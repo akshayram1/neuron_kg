@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.sqlite3
+docker-data/
+backups/
+.DS_Store
+node_modules/
+dist/
+logs/
+.secrets/
+*.pem
