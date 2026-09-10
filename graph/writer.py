@@ -62,9 +62,22 @@ def upsert_source_records(graph: Graph, rows: list[dict[str, Any]]) -> None:
 
 def upsert_entities(graph: Graph, label: str, rows: list[dict[str, Any]]) -> None:
     """rows: {uid, props: {...}}. `first_seen_at` is set once on creation and
-    never overwritten; `last_seen_at` bumps on every re-ingestion."""
+    never overwritten; `last_seen_at` bumps on every re-ingestion.
+
+    `None` values are stripped from `props` before the write — Cypher's
+    `n += {...}` map-merge sets a key to null rather than skipping it, so a
+    field that was populated in an earlier extraction (e.g. a Decision's
+    `rationale`) would otherwise be silently erased the moment a *later*
+    write for the same node happens not to know that field (verified against
+    a real write: a stored `url` was nulled out by a second call passing
+    `url: None`). Once a property is known, a later "don't know" must not
+    erase it."""
     if not rows:
         return
+    clean_rows = [
+        {"uid": row["uid"], "props": {k: v for k, v in row["props"].items() if v is not None}}
+        for row in rows
+    ]
     graph.query(
         f"""
         UNWIND $rows AS row
@@ -72,7 +85,7 @@ def upsert_entities(graph: Graph, label: str, rows: list[dict[str, Any]]) -> Non
         ON CREATE SET n.first_seen_at = $now, n += row.props
         ON MATCH SET n.last_seen_at = $now, n += row.props
         """,
-        params={"rows": rows, "now": now_iso()},
+        params={"rows": clean_rows, "now": now_iso()},
     )
 
 
@@ -145,6 +158,12 @@ def upsert_fact_edges(
     """
     if not rows:
         return
+    rows = [
+        {**row, "fact_uid": row.get("fact_uid") or make_uid(
+            "Fact", str(row["from_uid"]), rel_type, str(row["to_uid"])
+        )}
+        for row in rows
+    ]
     graph.query(
         f"""
         UNWIND $rows AS row
@@ -152,29 +171,154 @@ def upsert_fact_edges(
         MATCH (b:{_label(to_label)} {{uid: row.to_uid}})
         MERGE (a)-[r:{_label(rel_type)}]->(b)
         ON CREATE SET
-            r.valid_at = $now, r.invalid_at = null, r.first_seen_at = $now,
+            r.valid_at = coalesce(row.valid_at, $now), r.invalid_at = null, r.first_seen_at = $now,
             r.source_record_keys = row.source_record_keys,
             r.evidence = row.evidence, r.extraction_method = row.extraction_method,
-            r.confidence = row.confidence, r.last_confirmed_at = $now
+            r.confidence = row.confidence, r.last_confirmed_at = $now,
+            r.chunk_id = row.chunk_id, r.chunk_hash = row.chunk_hash,
+            r.extractor_version = row.extractor_version, r.model = row.model,
+            r.fact_uid = row.fact_uid,
+            r.derived = coalesce(row.derived, false),
+            r.derived_rule = row.derived_rule,
+            r.premise_fact_uids = row.premise_fact_uids,
+            r.ended_unknown = coalesce(row.ended_unknown, false),
+            r.attested_from = row.attested_from
         ON MATCH SET
-            r.last_confirmed_at = $now, r.invalid_at = null,
+            r.last_confirmed_at = $now,
+            r.valid_at = CASE WHEN r.invalid_at IS NULL THEN r.valid_at ELSE coalesce(row.valid_at, $now) END,
+            r.invalid_at = null,
+            r.derived = CASE WHEN row.derived IS NULL THEN r.derived ELSE row.derived END,
+            r.derived_rule = CASE WHEN row.derived_rule IS NULL THEN r.derived_rule ELSE row.derived_rule END,
+            r.premise_fact_uids = CASE WHEN row.premise_fact_uids IS NULL THEN r.premise_fact_uids ELSE row.premise_fact_uids END,
+            r.ended_unknown = CASE WHEN row.ended_unknown IS NULL THEN r.ended_unknown ELSE row.ended_unknown END,
+            r.attested_from = CASE WHEN row.attested_from IS NULL THEN r.attested_from ELSE row.attested_from END,
             r.source_record_keys = CASE
                 WHEN row.source_record_keys[0] IN coalesce(r.source_record_keys, [])
                 THEN r.source_record_keys
                 ELSE coalesce(r.source_record_keys, []) + row.source_record_keys
-            END
+            END,
+            r.chunk_id = CASE WHEN row.chunk_id IS NULL THEN r.chunk_id ELSE row.chunk_id END,
+            r.chunk_hash = CASE WHEN row.chunk_hash IS NULL THEN r.chunk_hash ELSE row.chunk_hash END,
+            r.extractor_version = CASE WHEN row.extractor_version IS NULL THEN r.extractor_version ELSE row.extractor_version END,
+            r.model = CASE WHEN row.model IS NULL THEN r.model ELSE row.model END,
+            r.fact_uid = row.fact_uid
         """,
         params={"rows": rows, "now": now_iso()},
     )
 
 
-def remove_record_support(graph: Graph, record_key: str, rows: list[dict[str, str]]) -> None:
+def _archive_history_rows(graph: Graph, rel_type: str, rows: list[dict[str, Any]]) -> None:
+    """Snapshot live relationship intervals before invalidation.
+
+    Hot traversals continue using live edges; immutable FactHistory nodes keep
+    every prior validity/transaction interval without scanning dead edges.
+    """
+    if not rows:
+        return
+    now = now_iso()
+    result = graph.query(
+        f"""
+        UNWIND $rows AS row
+        MATCH (a {{uid: row.from_uid}})-[r:{_label(rel_type)}]->(b {{uid: row.to_uid}})
+        WHERE r.invalid_at IS NULL
+        RETURN a.uid, a.name, b.uid, b.name, r.valid_at, row.valid_to, r.first_seen_at,
+               r.last_confirmed_at, r.source_record_keys, r.evidence,
+               r.extraction_method, r.confidence, r.chunk_id, r.chunk_hash,
+               r.extractor_version, r.model
+        """,
+        params={"rows": rows},
+    ).result_set
+    history_rows = []
+    for item in result:
+        (from_uid, from_name, to_uid, to_name, valid_from, valid_to, observed_from,
+         last_confirmed, source_keys, evidence, method, confidence, chunk_id,
+         chunk_hash, extractor_version, model) = item
+        history_rows.append({
+            "uid": make_uid("FactHistory", from_uid, rel_type, to_uid, str(valid_from or ""), now),
+            "props": {
+                "name": f"{from_name or from_uid} {rel_type} {to_name or to_uid}",
+                "from_uid": from_uid, "to_uid": to_uid, "relation": rel_type,
+                "fact_uid": make_uid("Fact", from_uid, rel_type, to_uid),
+                "valid_from": valid_from, "valid_to": valid_to or now,
+                "observed_from": observed_from, "observed_to": now,
+                "last_confirmed_at": last_confirmed,
+                "source_record_keys": source_keys or [], "evidence": evidence,
+                "extraction_method": method, "confidence": confidence,
+                "chunk_id": chunk_id, "chunk_hash": chunk_hash,
+                "extractor_version": extractor_version, "model": model,
+            },
+        })
+    upsert_entities(graph, "FactHistory", history_rows)
+
+
+def upsert_history_intervals(graph: Graph, rel_type: str, rows: list[dict[str, Any]]) -> None:
+    """Write closed world-axis intervals as FactHistory without touching live edges.
+
+    Used for connector changelogs: the source already knows assignee A held
+    from T0 to T1, so we record that interval instead of waiting for the next
+    sync to supersede it. Uid is deterministic on (endpoints, window) so a
+    re-sync MERGEs instead of duplicating.
+    rows: from_uid, to_uid, from_name, to_name, valid_from, valid_to,
+    source_record_keys, evidence?, observed_from?
+    """
+    if not rows:
+        return
+    now = now_iso()
+    history_rows = []
+    for row in rows:
+        from_uid, to_uid = str(row["from_uid"]), str(row["to_uid"])
+        valid_from, valid_to = row.get("valid_from"), row.get("valid_to")
+        history_rows.append({
+            "uid": make_uid(
+                "FactHistory", from_uid, rel_type, to_uid,
+                str(valid_from or ""), str(valid_to or ""),
+            ),
+            "props": {
+                "name": (
+                    f"{row.get('from_name') or from_uid} {rel_type} "
+                    f"{row.get('to_name') or to_uid}"
+                ),
+                "from_uid": from_uid, "to_uid": to_uid, "relation": rel_type,
+                "fact_uid": make_uid("Fact", from_uid, rel_type, to_uid),
+                "valid_from": valid_from, "valid_to": valid_to,
+                "observed_from": row.get("observed_from") or now,
+                "observed_to": row.get("observed_to") or now,
+                "last_confirmed_at": now,
+                "source_record_keys": row.get("source_record_keys") or [],
+                "evidence": row.get("evidence"),
+                "extraction_method": row.get("extraction_method") or "changelog",
+                "confidence": row.get("confidence", 1.0),
+                "ended_unknown": row.get("ended_unknown") or False,
+                "attested_from": row.get("attested_from") or valid_from,
+            },
+        })
+    upsert_entities(graph, "FactHistory", history_rows)
+
+
+def remove_record_support(graph: Graph, record_key: str, rows: list[dict[str, Any]]) -> None:
     """Remove one SourceRecord from known edges without dropping support
     contributed by other records. Edges with no support left are invalidated."""
-    by_type: dict[str, list[dict[str, str]]] = {}
+    by_type: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_type.setdefault(row["rel_type"], []).append(row)
     for rel_type, typed_rows in by_type.items():
+        candidates = graph.query(
+            f"""
+            UNWIND $rows AS row
+            MATCH (a {{uid: row.from_uid}})-[r:{_label(rel_type)}]->(b {{uid: row.to_uid}})
+            WHERE r.invalid_at IS NULL
+            RETURN a.uid, b.uid, r.source_record_keys
+            """,
+            params={"rows": typed_rows},
+        ).result_set
+        to_archive = [
+            {"from_uid": from_uid, "to_uid": to_uid,
+             "valid_to": next((row.get("valid_to") for row in typed_rows
+                               if row["from_uid"] == from_uid and row["to_uid"] == to_uid), None)}
+            for from_uid, to_uid, keys in candidates
+            if not [key for key in (keys or []) if key != record_key]
+        ]
+        _archive_history_rows(graph, rel_type, to_archive)
         graph.query(
             f"""
             UNWIND $rows AS row
@@ -265,6 +409,19 @@ def supersede_fact_edges(
     plan.md §3 Pass A step 5 (temporal diff on changed fields)."""
     if not from_uids:
         return
+    live_rows = graph.query(
+        f"""
+        UNWIND $from_uids AS from_uid
+        MATCH (a:{_label(from_label)} {{uid: from_uid}})-[r:{_label(rel_type)}]->(b:{_label(to_label)})
+        WHERE r.invalid_at IS NULL
+        RETURN a.uid, b.uid
+        """,
+        params={"from_uids": from_uids},
+    ).result_set
+    _archive_history_rows(
+        graph, rel_type,
+        [{"from_uid": row[0], "to_uid": row[1]} for row in live_rows],
+    )
     graph.query(
         f"""
         UNWIND $from_uids AS from_uid

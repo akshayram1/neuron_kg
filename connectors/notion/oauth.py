@@ -1,8 +1,8 @@
 """Public Notion OAuth and durable connector state.
 
 Secrets are encrypted before they are written to SQLite.  The database also
-stores one-time OAuth state values and the idempotency ledger used by the
-Notion -> Graphiti pipeline.
+stores one-time OAuth state values and legacy episode rows retained only for
+database compatibility. Current ingestion uses the shared ConnectorLedger.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def notion_state_db_path() -> Path:
 def graph_group_for_workspace(workspace_id: str) -> str:
     safe_id = "".join(ch for ch in workspace_id if ch.isascii() and (ch.isalnum() or ch in "_-"))
     if not safe_id:
-        raise ValueError("Notion workspace id cannot produce a safe Graphiti group id")
+        raise ValueError("Notion workspace id cannot produce a safe legacy scope id")
     return f"notion_{safe_id}"
 
 

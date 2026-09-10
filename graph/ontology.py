@@ -116,6 +116,13 @@ severity, etc.) must be traceable to what this text actually says — if the
 text doesn't state it, leave the field blank rather than inferring it.
   - Good: "switched to Redis because Postgres locking caused timeouts" -> rationale: "Postgres locking caused timeouts"
   - Bad: rationale: "likely for better performance" (invented, not stated)
+
+Dates: never invent a date the text does not state. A clock time without a
+timezone stays a calendar date — do not guess a zone. If the text says a
+relation ended but not when ("former assignee", "stepped down", "no longer"),
+put that in `when` as "unknown" rather than implying it still holds. A
+commit, a resolution, or "resolved on DATE" is a moment, not an open interval.
+Do not collapse "partners A, B and C" into one fact — one fact per named party.
 """
 
 
@@ -190,6 +197,7 @@ RELATION_TYPE_MAP: dict[tuple[str, str], list[RelationName]] = {
     ("Decision", "Repository"): ["APPLIES_TO"],
     ("Decision", "SourceFile"): ["APPLIES_TO"],
     ("Decision", "Commit"): ["APPLIES_TO"],
+    ("Decision", "PullRequest"): ["APPLIES_TO"],
     ("Decision", "Document"): ["APPLIES_TO"],
     ("Decision", "Workspace"): ["APPLIES_TO"],
     ("Decision", "Decision"): ["SUPERSEDES"],

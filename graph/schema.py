@@ -30,18 +30,35 @@ ENTITY_LABELS = [
     "Commit",
     "PullRequest",
     "Document",
-    "Workspace",
     "Decision",
     "Term",
     "System",
+    "FactHistory",
 ]
 
 # fulltext (BM25) — only content-bearing labels need keyword search.
-FULLTEXT_LABELS = ["WorkItem", "Document", "Decision", "Term", "Commit"]
+# SourceFile added here (verified live: "is Animesh mentioned in argus" --
+# animeshtmdcio is a real username inside test-fixture SourceFile content,
+# but SourceFile wasn't in this list at all, so hybrid_search never had a
+# chance to see it, same class of gap Commit had before it). Fulltext alone
+# turned out insufficient too -- see VECTOR_LABELS below.
+FULLTEXT_LABELS = ["WorkItem", "Document", "Decision", "Term", "Commit", "PullRequest", "SourceFile"]
 
-# vector (cosine) — only content-bearing labels get embeddings (plan.md §4:
-# embedding every structural node would be a real RAM cost at millions of rows).
-VECTOR_LABELS = ["WorkItem", "Document", "Decision", "Term"]
+# Labels that get embeddings — only content-bearing ones (plan.md §4:
+# embedding every structural node would be a real cost at millions of rows).
+# The vectors themselves live in Qdrant now, not FalkorDB (see
+# `graph/vector_store.py` for why), so this list no longer drives any index
+# DDL here — it still defines *which* labels are embeddable, which
+# `semantic_pass` and `search` both read.
+# SourceFile added alongside Commit for the same reason: RediSearch tokenizes
+# an identifier like `animeshtmdcio` as one atomic token, so a fulltext query
+# for "Animesh" alone (verified live) returns zero SourceFile hits even
+# though the fulltext index now covers the label -- only the vector leg's
+# subword-aware embedding can bridge that. Verified real cost of embedding
+# all 264 existing SourceFile nodes: ~435K tokens, ~$0.009 total (see
+# cost.md) -- not the "264+ extra OpenAI calls" cost concern it looks like
+# on paper, because text-embedding-3-small is priced at $0.02/1M tokens.
+VECTOR_LABELS = ["WorkItem", "Document", "Decision", "Term", "PullRequest", "Commit", "SourceFile"]
 EMBEDDING_DIMENSION = 1536  # text-embedding-3-small
 
 
@@ -70,6 +87,12 @@ def bootstrap_schema(graph: Graph) -> None:
             f"range index {label}.uid",
         )
 
+    _run_idempotent(
+        graph,
+        "CREATE INDEX FOR (n:FactHistory) ON (n.fact_uid)",
+        "range index FactHistory.fact_uid",
+    )
+
     for label in FULLTEXT_LABELS:
         _run_idempotent(
             graph,
@@ -77,15 +100,9 @@ def bootstrap_schema(graph: Graph) -> None:
             f"fulltext index {label}.search_text",
         )
 
-    for label in VECTOR_LABELS:
-        _run_idempotent(
-            graph,
-            (
-                f"CREATE VECTOR INDEX FOR (n:{label}) ON (n.embedding) "
-                f"OPTIONS {{dimension: {EMBEDDING_DIMENSION}, similarityFunction: 'cosine'}}"
-            ),
-            f"vector index {label}.embedding",
-        )
+    # No vector indexes here on purpose: dense vectors moved to Qdrant
+    # (`graph/vector_store.py`). FalkorDB's vector index has no quantization
+    # and keeps float32 in RAM, which is the ceiling we moved to escape.
 
 
 if __name__ == "__main__":

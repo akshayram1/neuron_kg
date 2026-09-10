@@ -62,7 +62,7 @@ class GitHubApiClient:
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {token}",
                 "X-GitHub-Api-Version": API_VERSION,
-                "User-Agent": "graphiti-context-connector",
+                "User-Agent": "neuron-context-connector",
             },
         )
 

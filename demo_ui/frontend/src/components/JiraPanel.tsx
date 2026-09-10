@@ -2,19 +2,22 @@ import { CheckCircle2, ExternalLink, ListTodo, LoaderCircle, LockKeyhole, Refres
 import { useCallback, useEffect, useRef, useState } from "react";
 import { deleteJiraConnection, getJiraProjects, getJiraSites, getJiraStatus, getJiraSyncRun, startJiraOAuth, startJiraSync } from "../api";
 import type { JiraProject, JiraSite, JiraSyncRun, OAuthConnectorConnection, OAuthConnectorSource } from "../types";
+import type { IngestionTokenUsage } from "../types";
+import { totalIngestionUsage } from "../tokenUsage";
 import SyncProgress from "./SyncProgress";
 
 const delay = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
-interface Props { open: boolean; onClose: () => void; onSourcesChanged: (sources: OAuthConnectorSource[]) => void; onSyncComplete: () => void; }
+interface Props { open: boolean; onClose: () => void; onSourcesChanged: (sources: OAuthConnectorSource[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
 
-export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncComplete }: Props) {
+export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
   const [connections, setConnections] = useState<OAuthConnectorConnection[]>([]);
   const [sources, setSources] = useState<OAuthConnectorSource[]>([]);
   const [sites, setSites] = useState<Record<string, JiraSite[]>>({});
   const [projects, setProjects] = useState<Record<string, JiraProject[]>>({});
   const [selectedSite, setSelectedSite] = useState<Record<string, string>>({});
   const [selectedProject, setSelectedProject] = useState<Record<string, string>>({});
+  const [scopeIssueKey, setScopeIssueKey] = useState<Record<string, string>>({});
   const [runs, setRuns] = useState<Record<string, JiraSyncRun>>({});
   const [loading, setLoading] = useState(false); const [connecting, setConnecting] = useState(false);
   const [discovering, setDiscovering] = useState<string | null>(null); const [error, setError] = useState<string | null>(null);
@@ -35,6 +38,10 @@ export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncCompl
         if (!latestRuns[run.connection_id]) latestRuns[run.connection_id] = run;
       }
       setRuns(latestRuns);
+      // Sum every run, not just the latest per connection -- the topbar
+      // counter is a lifetime total, not a "most recent sync" snapshot.
+      const usage = totalIngestionUsage("Jira", value.runs ?? []);
+      if (usage) onTokenUsage(usage);
       return value;
     } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "Could not load Jira connections."); return null;
     } finally { if (mounted.current) setLoading(false); }
@@ -104,7 +111,7 @@ export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncCompl
     const site = (sites[connectionId] ?? []).find((item) => item.cloud_id === selectedSite[connectionId]);
     const project = (projects[`${connectionId}:${site?.cloud_id}`] ?? []).find((item) => item.project_id === selectedProject[connectionId]);
     if (!site || !project) { setError("Select one Jira site and project first."); return; }
-    try { const started = await startJiraSync(connectionId, site, project);
+    try { const started = await startJiraSync(connectionId, site, project, (scopeIssueKey[connectionId] ?? "").trim());
       setRuns((current) => ({ ...current, [connectionId]: {
         run_id: started.run_id, connection_id: connectionId,
         source_id: `${site.cloud_id}:${project.project_id}`, status: "queued",
@@ -134,6 +141,7 @@ export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncCompl
         return <article className="connection-card" key={connection.connection_id}><div className="connection-card-top"><div className="connection-check"><CheckCircle2 size={15} /></div><div><strong>{connection.account_name}</strong><span>Atlassian OAuth connection</span></div><div className="connection-card-actions">{!connectionSites.length && <button onClick={() => void loadSites(connection.connection_id)} disabled={discovering === connection.connection_id}>{discovering === connection.connection_id ? <LoaderCircle className="spin" size={13} /> : <ListTodo size={13} />} Load sites</button>}<button className="connection-disconnect" title="Disconnect and delete all data synced under this account" onClick={() => void disconnect(connection.connection_id, connection.account_name)} disabled={disconnecting === connection.connection_id}>{disconnecting === connection.connection_id ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}</button></div></div>
           {connectionSites.length > 0 && <div className="provider-picker"><label><span>Jira site</span><select value={cloudId} onChange={(event) => { const value = event.target.value; setSelectedSite((current) => ({ ...current, [connection.connection_id]: value })); setSelectedProject((current) => ({ ...current, [connection.connection_id]: "" })); void loadProjects(connection.connection_id, value); }}><option value="">Choose a site…</option>{connectionSites.map((site) => <option value={site.cloud_id} key={site.cloud_id}>{site.name}</option>)}</select></label>
             <label><span>Project</span><select value={projectId} disabled={!cloudId} onChange={(event) => setSelectedProject((current) => ({ ...current, [connection.connection_id]: event.target.value }))}><option value="">Choose a project…</option>{projectList.map((item) => <option value={item.project_id} key={item.project_id}>{item.key} · {item.name}</option>)}</select></label>
+            <label><span>Scope to issue subtree (optional)</span><input type="text" placeholder="e.g. DATAOS-3833 — leave empty for whole project" value={scopeIssueKey[connection.connection_id] ?? ""} onChange={(event) => setScopeIssueKey((current) => ({ ...current, [connection.connection_id]: event.target.value }))} /></label>
             <button className="provider-sync" onClick={() => void sync(connection.connection_id)} disabled={syncing || !projectId}><RefreshCw className={syncing ? "spin" : ""} size={13} />{syncing ? (run.result?.records_total ? `Syncing ${run.result.records_done ?? 0}/${run.result.records_total}` : "Fetching issues…") : "Sync selected project"}</button></div>}
           {sources.filter((item) => item.connection_id === connection.connection_id).map((source) => <div className="github-source" key={source.source_id}><code>{source.group_id}</code><span>{source.source_name}</span></div>)}
           <SyncProgress progress={run?.result} provider="Jira" syncing={syncing} />

@@ -42,6 +42,8 @@ class LedgerEntry:
     content_hash: str
     primary_node_uid: str | None
     semantic_status: str
+    semantic_priority: int
+    update_count: int
     updated_at: str
 
 
@@ -72,9 +74,26 @@ class ConnectorLedger:
                     content_hash TEXT NOT NULL,
                     primary_node_uid TEXT,
                     semantic_status TEXT NOT NULL DEFAULT 'pending',
+                    semantic_priority INTEGER NOT NULL DEFAULT 100,
+                    update_count INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 )
                 """
+            )
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(source_records)")
+            }
+            if "semantic_priority" not in columns:
+                connection.execute(
+                    "ALTER TABLE source_records ADD COLUMN semantic_priority INTEGER NOT NULL DEFAULT 100"
+                )
+            if "update_count" not in columns:
+                connection.execute(
+                    "ALTER TABLE source_records ADD COLUMN update_count INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_source_records_semantic_priority "
+                "ON source_records(semantic_status, semantic_priority DESC, updated_at)"
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_source_records_semantic_status "
@@ -150,12 +169,17 @@ class ConnectorLedger:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO source_records(record_key, content_hash, primary_node_uid, semantic_status, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO source_records(
+                    record_key, content_hash, primary_node_uid, semantic_status,
+                    semantic_priority, update_count, updated_at
+                )
+                VALUES (?, ?, ?, ?, 100, 0, ?)
                 ON CONFLICT(record_key) DO UPDATE SET
                     content_hash = excluded.content_hash,
                     primary_node_uid = excluded.primary_node_uid,
                     semantic_status = excluded.semantic_status,
+                    update_count = source_records.update_count + 1,
+                    semantic_priority = min(300, 200 + source_records.update_count),
                     updated_at = excluded.updated_at
                 """,
                 (record_key, content_hash, primary_node_uid, str(semantic_status), datetime.now(UTC).isoformat()),
@@ -177,7 +201,8 @@ class ConnectorLedger:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT record_key FROM source_records "
-                "WHERE semantic_status = ? ORDER BY updated_at ASC LIMIT ?",
+                "WHERE semantic_status = ? "
+                "ORDER BY semantic_priority DESC, updated_at ASC LIMIT ?",
                 (str(SemanticStatus.PENDING), limit),
             ).fetchall()
         return [str(row["record_key"]) for row in rows]
@@ -218,15 +243,18 @@ class ConnectorLedger:
             if record_prefix:
                 escaped = record_prefix.replace("%", "\\%").replace("_", "\\_") + "%"
                 rows = connection.execute(
-                    "SELECT record_key, chunk_id, chunk_index, text FROM source_chunks "
-                    "WHERE status = 'pending' AND record_key LIKE ? ESCAPE '\\' "
-                    "ORDER BY committed_at ASC, chunk_index ASC LIMIT ?",
+                    "SELECT c.record_key, c.chunk_id, c.chunk_index, c.text "
+                    "FROM source_chunks c JOIN source_records s ON s.record_key = c.record_key "
+                    "WHERE c.status = 'pending' AND c.record_key LIKE ? ESCAPE '\\' "
+                    "ORDER BY s.semantic_priority DESC, c.committed_at ASC, c.chunk_index ASC LIMIT ?",
                     (escaped, limit),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT record_key, chunk_id, chunk_index, text FROM source_chunks "
-                    "WHERE status = 'pending' ORDER BY committed_at ASC, chunk_index ASC LIMIT ?",
+                    "SELECT c.record_key, c.chunk_id, c.chunk_index, c.text "
+                    "FROM source_chunks c JOIN source_records s ON s.record_key = c.record_key "
+                    "WHERE c.status = 'pending' "
+                    "ORDER BY s.semantic_priority DESC, c.committed_at ASC, c.chunk_index ASC LIMIT ?",
                     (limit,),
                 ).fetchall()
         return [PendingChunk(row["record_key"], row["chunk_id"], row["chunk_index"], row["text"]) for row in rows]

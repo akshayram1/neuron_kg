@@ -21,6 +21,10 @@ from connectors.core.runner import prepare_record
 from connectors.github_app.api import GitHubCommit, GitHubFile, GitHubRepository
 from graph import writer as w
 from graph.jira_pipeline import delete_orphaned_shared_entities, delete_record
+from graph.resolver import (
+    anchor_properties, link_verified_person_identity, resolve_backlinks_for_target,
+    resolve_exact_anchors,
+)
 
 logger = logging.getLogger("neuron.github_pipeline")
 
@@ -40,7 +44,7 @@ def repository_record(repository: GitHubRepository, installation_id: int) -> Sou
                  f"Default branch: {repository.default_branch}\n"
                  f"Visibility: {'private' if repository.private else 'public'}"),
         url=repository.html_url,
-        metadata={"default_branch": repository.default_branch, "pipeline_version": 1},
+        metadata={"default_branch": repository.default_branch, "pipeline_version": 2},
         access=SourceAccess(public=not repository.private, policy_version="github-app-v1"),
     )
 
@@ -65,7 +69,7 @@ def file_record(
         mime_type="text/x-python" if extension == ".py" else "text/markdown",
         language=language,
         metadata={"repository_id": repository.repository_id, "path": file.path,
-                  "blob_sha": file.sha, "pipeline_version": 1},
+                  "blob_sha": file.sha, "pipeline_version": 2},
         access=SourceAccess(public=not repository.private, policy_version="github-app-v1"),
     )
 
@@ -87,7 +91,7 @@ def commit_record(
         created_at=_time(commit.authored_at), updated_at=_time(commit.authored_at),
         mime_type="text/plain",
         metadata={"repository_id": repository.repository_id, "sha": commit.sha,
-                  "pipeline_version": 1},
+                  "pipeline_version": 2},
         access=SourceAccess(public=not repository.private, policy_version="github-app-v1"),
     )
 
@@ -115,13 +119,23 @@ def _source_row(record: SourceRecord, content_hash: str) -> dict:
         "connection_id": record.connection_id, "entity_type": record.entity_type,
         "external_id": record.external_id, "name": record.name, "url": record.url,
         "content_hash": content_hash,
+        "public": record.access.public, "principals": list(record.access.principals),
+        "policy_version": record.access.policy_version,
+        "source_created_at": record.created_at.isoformat() if record.created_at else None,
+        "source_updated_at": record.updated_at.isoformat() if record.updated_at else None,
+        "source_time": record.reference_time.isoformat() if record.reference_time else None,
+        **anchor_properties(record),
     }
 
 
-def _reset_support(graph: Graph, ledger: ConnectorLedger, record_key: str, primary_uid: str) -> None:
+def _reset_support(
+    graph: Graph, ledger: ConnectorLedger, record_key: str, primary_uid: str,
+    valid_to: datetime | None = None,
+) -> None:
     old = ledger.edges_for_record(record_key)
     w.remove_record_support(graph, record_key, [
-        {"rel_type": edge.rel_type, "from_uid": edge.from_uid, "to_uid": edge.to_uid}
+        {"rel_type": edge.rel_type, "from_uid": edge.from_uid, "to_uid": edge.to_uid,
+         "valid_to": valid_to.isoformat() if valid_to else None}
         for edge in old
     ])
     w.unlink_record_mentions_except(graph, record_key, primary_uid)
@@ -130,11 +144,12 @@ def _reset_support(graph: Graph, ledger: ConnectorLedger, record_key: str, prima
 
 def _write_edge(
     graph: Graph, rel: str, from_label: str, to_label: str,
-    from_uid: str, to_uid: str, record_key: str,
+    from_uid: str, to_uid: str, record_key: str, valid_at: datetime | None = None,
 ) -> RecordEdgeRef:
     w.upsert_fact_edges(graph, rel, from_label, to_label, [{
         "from_uid": from_uid, "to_uid": to_uid, "source_record_keys": [record_key],
         "evidence": None, "extraction_method": "deterministic", "confidence": 1.0,
+        "valid_at": valid_at.isoformat() if valid_at else None,
     }])
     return RecordEdgeRef(rel, from_uid, to_uid)
 
@@ -148,13 +163,18 @@ def write_repository(
         return prepared.action
     uid = repository_uid(installation_id, repository.repository_id)
     if prepared.action == RecordAction.UPDATE:
-        _reset_support(graph, ledger, record.record_key, uid)
+        _reset_support(graph, ledger, record.record_key, uid, record.reference_time)
     w.upsert_source_records(graph, [_source_row(record, prepared.content_hash)])
     w.upsert_entities(graph, "Repository", [{"uid": uid, "props": {
         "name": repository.full_name, "search_text": record.content, "url": repository.html_url,
         "default_branch": repository.default_branch, "private": repository.private,
     }}])
     w.link_mentioned_in(graph, "Repository", [{"uid": uid, "record_key": record.record_key}])
+    resolve_backlinks_for_target(
+        graph, ledger, target_uid=uid, target_label="Repository",
+        target_provider="github", repository_name=repository.full_name,
+        url=repository.html_url,
+    )
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
                   semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
@@ -171,15 +191,17 @@ def write_file(
     uid = file_uid(installation_id, repository.repository_id, file.path)
     root_uid = repository_uid(installation_id, repository.repository_id)
     if prepared.action == RecordAction.UPDATE:
-        _reset_support(graph, ledger, record.record_key, uid)
+        _reset_support(graph, ledger, record.record_key, uid, record.reference_time)
     w.upsert_source_records(graph, [_source_row(record, prepared.content_hash)])
     w.upsert_entities(graph, "SourceFile", [{"uid": uid, "props": {
         "name": file.path, "search_text": record.content, "url": record.url,
         "path": file.path, "language": record.language or "markdown", "blob_sha": file.sha,
     }}])
     w.link_mentioned_in(graph, "SourceFile", [{"uid": uid, "record_key": record.record_key}])
-    edge = _write_edge(graph, "CONTAINS", "Repository", "SourceFile", root_uid, uid, record.record_key)
+    edge = _write_edge(graph, "CONTAINS", "Repository", "SourceFile", root_uid, uid,
+                       record.record_key, record.reference_time)
     ledger.record_edge(record.record_key, edge.rel_type, edge.from_uid, edge.to_uid)
+    resolve_exact_anchors(graph, ledger, record, uid, "SourceFile")
     ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
                   semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
@@ -197,23 +219,31 @@ def write_commit(
     uid = commit_uid(installation_id, repository.repository_id, commit.sha)
     root_uid = repository_uid(installation_id, repository.repository_id)
     if prepared.action == RecordAction.UPDATE:
-        _reset_support(graph, ledger, record.record_key, uid)
+        _reset_support(graph, ledger, record.record_key, uid, record.reference_time)
     w.upsert_source_records(graph, [_source_row(record, prepared.content_hash)])
     w.upsert_entities(graph, "Commit", [{"uid": uid, "props": {
         "name": record.name, "search_text": record.content, "url": record.url,
         "sha": commit.sha, "authored_at": commit.authored_at,
     }}])
     w.link_mentioned_in(graph, "Commit", [{"uid": uid, "record_key": record.record_key}])
+    resolve_backlinks_for_target(
+        graph, ledger, target_uid=uid, target_label="Commit",
+        target_provider="github", commit_sha=commit.sha, url=commit.html_url,
+    )
     p_uid = person_uid(commit)
     w.upsert_entities(graph, "Person", [{"uid": p_uid, "props": {
         "name": commit.author_name, "email": commit.author_email or None,
     }}])
     w.link_mentioned_in(graph, "Person", [{"uid": p_uid, "record_key": record.record_key}])
     edges = [
-        _write_edge(graph, "CONTAINS", "Repository", "Commit", root_uid, uid, record.record_key),
-        _write_edge(graph, "AUTHORED_BY", "Commit", "Person", uid, p_uid, record.record_key),
+        _write_edge(graph, "CONTAINS", "Repository", "Commit", root_uid, uid,
+                    record.record_key, record.reference_time),
+        _write_edge(graph, "AUTHORED_BY", "Commit", "Person", uid, p_uid,
+                    record.record_key, record.reference_time),
     ]
     ledger.record_edges_batch(record.record_key, edges)
+    link_verified_person_identity(graph, ledger, p_uid, commit.author_email, record.record_key)
+    resolve_exact_anchors(graph, ledger, record, uid, "Commit")
     ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
                   semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)

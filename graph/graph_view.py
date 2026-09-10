@@ -18,24 +18,30 @@ from typing import Any
 
 from falkordb import Graph
 
+from graph.access import AccessScope
+from graph.writer import make_uid
 
-def fetch_graph(graph: Graph, providers: list[str] | None = None) -> dict[str, Any]:
+
+def fetch_graph(
+    graph: Graph, scope: AccessScope, providers: list[str] | None = None
+) -> dict[str, Any]:
     """providers=None returns everything; otherwise filters to SourceRecords
     for those providers and the entities/facts connected to them. `group` on
     each node/edge is a provider list, not a physical-graph selector (plan.md
     §6a.2 — the old `group_id` concept doesn't apply to a unified graph)."""
+    node_acl, node_acl_params = scope.cypher("sr", "node_acl")
     provider_filter = "AND sr.provider IN $providers" if providers else ""
 
     node_rows = graph.query(
         f"""
         MATCH (n)-[:MENTIONED_IN]->(sr:SourceRecord)
-        WHERE sr.deleted_at IS NULL {provider_filter}
+        WHERE sr.deleted_at IS NULL AND {node_acl} {provider_filter}
         WITH n, collect(DISTINCT sr.provider) AS providers, collect(DISTINCT sr.name) AS documents
         RETURN n.uid AS id, labels(n)[0] AS type, n.name AS label,
                n.search_text AS search_text, n.definition AS definition, n.statement AS statement,
                n.purpose AS purpose, providers, documents
         """,
-        params={"providers": providers} if providers else {},
+        params={**node_acl_params, **({"providers": providers} if providers else {})},
     ).result_set
 
     nodes = []
@@ -49,47 +55,57 @@ def fetch_graph(graph: Graph, providers: list[str] | None = None) -> dict[str, A
         })
 
     known_ids = {n["id"] for n in nodes}
-    edge_provider_filter = "AND sr.provider IN $providers" if providers else ""
+    edge_acl, edge_acl_params = scope.cypher("support", "edge_acl")
+    edge_provider_filter = "AND support.provider IN $providers" if providers else ""
     edge_rows = graph.query(
         f"""
         MATCH (a)-[r]->(b)
         WHERE type(r) <> 'MENTIONED_IN' AND r.invalid_at IS NULL
-        OPTIONAL MATCH (a)-[:MENTIONED_IN]->(sr:SourceRecord)
-        WHERE sr.deleted_at IS NULL {edge_provider_filter}
+        UNWIND coalesce(r.source_record_keys, []) AS support_key
+        MATCH (support:SourceRecord {{record_key: support_key}})
+        WHERE support.deleted_at IS NULL AND {edge_acl} {edge_provider_filter}
         RETURN DISTINCT a.uid AS source, b.uid AS target, type(r) AS label, r.evidence AS evidence,
                r.valid_at AS valid_at, r.invalid_at AS invalid_at,
                r.source_record_keys AS source_record_keys, r.extraction_method AS method,
-               r.confidence AS confidence
+               r.confidence AS confidence, r.derived AS derived, r.derived_rule AS derived_rule,
+               collect(DISTINCT support.name) AS documents
         """,
-        params={"providers": providers} if providers else {},
+        params={**edge_acl_params, **({"providers": providers} if providers else {})},
     ).result_set
 
     edges = []
     for row in edge_rows:
-        source, target, label, evidence, valid_at, invalid_at, source_record_keys, method, confidence = row
+        (source, target, label, evidence, valid_at, invalid_at, source_record_keys,
+         method, confidence, derived, derived_rule, documents) = row
         if source not in known_ids or target not in known_ids:
             continue
         edges.append({
             "id": f"{source}:{label}:{target}",
+            "factUid": make_uid("Fact", source, label, target),
             "source": source, "target": target, "label": label,
             "fact": evidence or f"{label} ({method or 'deterministic'})",
             "group": "", "validAt": valid_at, "invalidAt": invalid_at,
             "superseded": invalid_at is not None,
-            "documents": [], "confidence": confidence,
+            "derived": bool(derived) or method == "derived",
+            "derivedRule": derived_rule,
+            "documents": sorted(documents or []), "confidence": confidence,
         })
 
     return {"nodes": nodes, "edges": edges}
 
 
-def fetch_sources(graph: Graph) -> list[dict[str, Any]]:
+def fetch_sources(graph: Graph, scope: AccessScope) -> list[dict[str, Any]]:
     """One row per :SourceRecord — backs an "/api/sources" listing."""
+    acl, params = scope.cypher("sr", "sources_acl")
     rows = graph.query(
-        """
+        f"""
         MATCH (sr:SourceRecord)
+        WHERE sr.deleted_at IS NULL AND {acl}
         RETURN sr.record_key AS record_key, sr.provider AS provider, sr.entity_type AS entity_type,
                sr.name AS name, sr.url AS url, sr.ingested_at AS ingested_at, sr.deleted_at AS deleted_at
         ORDER BY sr.ingested_at DESC
-        """
+        """,
+        params=params,
     ).result_set
     return [
         {

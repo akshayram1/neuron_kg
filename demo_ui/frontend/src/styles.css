@@ -43,6 +43,19 @@ body {
 .topbar-status { display: flex; align-items: center; gap: 7px; color: var(--soft); font-size: 11px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px rgba(89, 220, 178, 0.7); }
 .topbar-actions { display: flex; align-items: center; gap: 12px; }
+.token-metrics { display: flex; align-items: center; gap: 7px; margin-inline: auto 16px; }
+.token-metric {
+  min-width: 116px; height: 36px; display: flex; flex-direction: column; justify-content: center;
+  padding: 0 10px; border: 1px solid #263242; border-radius: 9px;
+  background: rgba(16, 22, 31, .8); color: #a9b6c8;
+}
+.token-metric span { color: #6f7f94; font-size: 7px; font-weight: 780; letter-spacing: .1em; text-transform: uppercase; }
+.token-metric strong { margin-top: 2px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.token-metric.active { border-color: rgba(89, 220, 178, .4); background: rgba(89, 220, 178, .08); }
+.token-metric.active span { color: #71c9aa; }
+.token-metric.retrieval { border-color: rgba(100, 168, 255, .25); }
+.token-metric.retrieval.active { border-color: rgba(100, 168, 255, .55); background: rgba(100, 168, 255, .1); }
+.token-metric.retrieval.active span { color: #8fc1ff; }
 .notion-trigger { min-height: 32px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid #2a3545; border-radius: 8px; background: #111720; color: #aab6c7; font-size: 10px; font-weight: 650; cursor: pointer; }
 .notion-trigger:hover { border-color: #52647d; background: #151d28; color: #eef3fa; }
 .notion-trigger.connected { border-color: rgba(89, 220, 178, .33); background: rgba(89, 220, 178, .08); color: #99e3ca; }
@@ -145,6 +158,9 @@ body {
 
 .skos-export { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid #263140; border-radius: 8px; background: transparent; color: #7db6ff; font-size: 9px; font-weight: 650; text-decoration: none; cursor: pointer; }
 .skos-export:hover { border-color: #486888; background: #141d28; }
+.clear-graph { border-color: rgba(255, 108, 108, .35); color: #ff9d9d; }
+.clear-graph:hover:not(:disabled) { border-color: rgba(255, 108, 108, .6); background: rgba(255, 108, 108, .14); }
+.clear-graph:disabled { opacity: .6; cursor: not-allowed; }
 
 .bridge-status-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
 .bridge-status-row span { padding: 5px 9px; border: 1px solid #263242; border-radius: 7px; background: #10161f; color: #9dc5f3; font-size: 9px; }
@@ -172,6 +188,20 @@ body {
 .map-body { position: relative; min-height: 0; overflow: hidden; }
 .graph-stage, .graph-canvas { position: absolute; inset: 0; }
 .graph-canvas { background-image: radial-gradient(#222b37 0.7px, transparent 0.7px); background-size: 18px 18px; }
+.graph-search { position: absolute; z-index: 9; top: 14px; left: 14px; width: min(280px, calc(100% - 220px)); height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 9px 0 11px; border: 1px solid #273140; border-radius: 9px; background: rgba(13, 18, 26, .94); color: #718096; backdrop-filter: blur(12px); }
+.graph-search:focus-within { border-color: #486888; box-shadow: 0 0 0 3px rgba(100, 168, 255, .07); }
+.graph-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: #e3ebf5; font-size: 10px; }
+.graph-search input::placeholder { color: #647286; }
+.graph-search > button { width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #78869a; cursor: pointer; }
+.graph-search > button:hover { background: #1d2632; color: #eef4fc; }
+.graph-search-results { position: absolute; top: calc(100% + 7px); left: 0; width: 100%; max-height: 330px; overflow-y: auto; padding: 5px; border: 1px solid #2a3646; border-radius: 10px; background: rgba(12, 17, 24, .98); box-shadow: 0 18px 45px rgba(0, 0, 0, .42); }
+.graph-search-results > button { position: relative; width: 100%; min-height: 50px; display: block; padding: 8px 48px 8px 9px; overflow: hidden; border: 0; border-radius: 7px; background: transparent; color: #dce6f3; text-align: left; cursor: pointer; }
+.graph-search-results > button:hover { background: #192230; }
+.graph-search-results span, .graph-search-results small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-search-results span { font-size: 10px; font-weight: 680; }
+.graph-search-results small { margin-top: 4px; color: #77879b; font-size: 8px; font-style: normal; }
+.graph-search-results em { position: absolute; top: 9px; right: 8px; color: #6582a5; font-size: 7px; font-style: normal; font-weight: 780; letter-spacing: .08em; text-transform: uppercase; }
+.graph-search-empty { padding: 13px 9px; color: #77869a; font-size: 9px; text-align: center; }
 .graph-toolbar { position: absolute; z-index: 8; top: 14px; right: 14px; display: flex; padding: 4px; gap: 3px; border: 1px solid #273140; border-radius: 9px; background: rgba(13, 18, 26, .9); backdrop-filter: blur(12px); }
 .graph-toolbar button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: #93a0b1; cursor: pointer; }
 .graph-toolbar button:hover { background: #1d2632; color: #eef4fc; }
@@ -196,6 +226,23 @@ body {
 .shape-notion { border-radius: 3px; outline: 1px solid #cbd5e1; outline-offset: 1px; background: transparent; }
 
 .selection-card { position: absolute; z-index: 9; right: 16px; bottom: 16px; width: min(340px, calc(100% - 32px)); padding: 17px; border: 1px solid #334155; border-radius: 12px; background: rgba(16, 22, 31, .96); box-shadow: 0 18px 50px rgba(0, 0, 0, .42); backdrop-filter: blur(18px); }
+.entity-dock { top: 16px; bottom: 16px; width: min(380px, calc(100% - 32px)); display: flex; flex-direction: column; overflow: hidden; }
+.entity-tabs { display: flex; gap: 4px; margin: 12px 0 8px; padding: 3px; border: 1px solid #2a3544; border-radius: 8px; background: #0e141c; }
+.entity-tabs button { flex: 1; border: 0; border-radius: 6px; background: transparent; color: #8b98aa; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 6px 4px; cursor: pointer; }
+.entity-tabs button.active { background: #1c2734; color: #e8eef6; }
+.entity-list { overflow-y: auto; flex: 1; min-height: 0; margin-top: 4px; }
+.entity-fact, .entity-history { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; margin: 0 0 6px; padding: 8px 8px 7px; border: 1px solid #243040; border-radius: 8px; background: #121922; color: inherit; text-align: left; cursor: pointer; }
+.entity-history { cursor: default; }
+.entity-fact.is-derived { border-color: #6b5420; background: #18140c; }
+.entity-fact.is-past { opacity: .72; }
+.entity-fact-rel { color: #7fb6fb; font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.entity-fact-name { font-size: 12px; color: #e8eef6; }
+.entity-fact-when, .entity-fact-why, .entity-hint, .entity-empty, .entity-loading { color: #7d8b9c; font-size: 10px; }
+.entity-fact-why { color: #d4a017; }
+.entity-hint { margin: 0 0 8px; line-height: 1.45; }
+.entity-past { margin-top: 8px; color: #8b98aa; font-size: 10px; }
+.entity-past summary { cursor: pointer; margin-bottom: 6px; }
+.derived-note { color: #d4a017; }
 .selection-close { position: absolute; top: 8px; right: 9px; border: 0; background: transparent; color: #77859a; font-size: 20px; cursor: pointer; }
 .selection-kind { color: #7fb6fb; font-size: 8px; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
 .selection-card h3 { margin: 8px 24px 8px 0; font-size: 14px; line-height: 1.4; }
@@ -317,11 +364,22 @@ body {
   .chat-panel { border-right: 0; border-bottom: 1px solid var(--line); }
   .map-header { align-items: flex-start; flex-direction: column; gap: 13px; }
   .source-picker { justify-content: flex-start; }
+  .token-metrics { margin-right: 8px; }
+  .token-metric { min-width: 96px; padding-inline: 8px; }
 }
 
 @media (max-width: 560px) {
   .topbar { padding: 0 13px; }
   .topbar-status { display: none; }
+  .brand > div:last-child { display: none; }
+  .token-metrics { gap: 4px; margin-inline: auto 5px; }
+  .token-metric { min-width: 76px; height: 32px; padding-inline: 6px; }
+  .token-metric span { font-size: 6px; }
+  .token-metric strong { font-size: 8px; }
+  .topbar-actions { gap: 4px; }
+  .notion-trigger { padding-inline: 7px; font-size: 0; }
+  .notion-trigger svg { margin: 0; }
+  .notion-trigger > span { font-size: 7px; }
   .notion-trigger { min-height: 30px; }
   .workspace { grid-template-rows: minmax(640px, 88vh) 620px; }
   .chat-scroll { padding: 28px 17px 24px; }

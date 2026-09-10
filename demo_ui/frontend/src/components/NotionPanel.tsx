@@ -1,13 +1,14 @@
 import { CheckCircle2, ExternalLink, LoaderCircle, RefreshCw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { deleteNotionConnection, getNotionStatus, getNotionSyncRun, startNotionOAuth, startNotionSync } from "../api";
-import type { NotionConnection, NotionSyncRun } from "../types";
+import type { IngestionTokenUsage, NotionConnection, NotionSyncRun } from "../types";
+import { totalIngestionUsage } from "../tokenUsage";
 import SyncProgress from "./SyncProgress";
 
-interface Props { open: boolean; onClose: () => void; onConnectionsChanged: (items: NotionConnection[]) => void; onSyncComplete: () => void; }
+interface Props { open: boolean; onClose: () => void; onConnectionsChanged: (items: NotionConnection[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
 function when(value: string | null) { return value ? `Synced ${new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))}` : "Never synced"; }
 
-export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyncComplete }: Props) {
+export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyncComplete, onTokenUsage }: Props) {
   const [connections, setConnections] = useState<NotionConnection[]>([]);
   const [runs, setRuns] = useState<Record<string, NotionSyncRun>>({});
   const [loading, setLoading] = useState(false);
@@ -25,10 +26,14 @@ export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyn
         for (const run of status.runs) if (!next[run.workspace_id] || run.started_at > next[run.workspace_id].started_at) next[run.workspace_id] = run;
         return next;
       });
+      // Sum every run, not just the latest per workspace -- the topbar
+      // counter is a lifetime total, not a "most recent sync" snapshot.
+      const usage = totalIngestionUsage("Notion", status.runs ?? []);
+      if (usage) onTokenUsage(usage);
       setError(null); return status;
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load Notion connections."); return null; }
     finally { setLoading(false); }
-  }, [onConnectionsChanged]);
+  }, [onConnectionsChanged, onTokenUsage]);
 
   useEffect(() => { if (open) void loadStatus(); }, [open, loadStatus]);
   useEffect(() => {
@@ -104,4 +109,3 @@ export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyn
     </aside>
   </div>;
 }
-

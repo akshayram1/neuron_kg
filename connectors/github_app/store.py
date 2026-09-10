@@ -1,4 +1,4 @@
-"""Durable control state for GitHub App installations and Graphiti ingestion."""
+"""Durable control state for GitHub App installations and Neuron ingestion."""
 
 from __future__ import annotations
 

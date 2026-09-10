@@ -1,0 +1,6 @@
+{"query": "Who is working on the Data Product MCP integration into Argus?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["68011127-e019-5831-9d4e-4306d480439e"], "expected_citation_record_keys": ["jira:9696211725c5471eb0bc9d7a1eedacd2:work_item:c741dbd7-4953-457c-b95e-e0677d90cfdc:66108"]}
+{"query": "What is Argus's FedRAMP or compliance readiness status?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["b94cb509-9162-56d8-a753-2c46d0a0ee57"]}
+{"query": "Why do PR or synonym additions in Argus raise a 409 Conflict instead of an IntegrityError?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["605defdf-822e-5e1e-853b-65366499ee42", "9c9db9cb-3c88-5a2f-89e2-8a97f1e547f5"]}
+{"query": "How does the MCP Prometheus metrics work relate to Argus, and who worked on it?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["48e3ee19-0ede-540e-b5c3-e09f54f315b8"]}
+{"query": "What is Argus's policy posture implementation status?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["9fed9eb2-a3cf-5d2d-852d-902ca377240a"]}
+{"query": "What are the known gaps in Argus's Model drawer?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["365c58b1-4bd7-5cb1-b0a4-1a6543434a80"]}

@@ -4,7 +4,8 @@ import {
   deleteGitHubInstallation, getGitHubRepositories, getGitHubStatus,
   getGitHubSyncRun, startGitHubOAuth, startGitHubSync,
 } from "../api";
-import type { GitHubInstallation, GitHubRepository, GitHubSource, GitHubSyncRun } from "../types";
+import type { GitHubInstallation, GitHubRepository, GitHubSource, GitHubSyncRun, IngestionTokenUsage } from "../types";
+import { totalIngestionUsage } from "../tokenUsage";
 import SyncProgress from "./SyncProgress";
 
 const POLL_MS = 1500;
@@ -14,13 +15,14 @@ interface Props {
   onClose: () => void;
   onSourcesChanged: (sources: GitHubSource[]) => void;
   onSyncComplete: () => void;
+  onTokenUsage: (usage: IngestionTokenUsage) => void;
 }
 
 function when(value: string | null) {
   return value ? `Synced ${new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))}` : "Never synced";
 }
 
-export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncComplete }: Props) {
+export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
   const [installations, setInstallations] = useState<GitHubInstallation[]>([]);
   const [sources, setSources] = useState<GitHubSource[]>([]);
   const [repositories, setRepositories] = useState<Record<number, GitHubRepository[]>>({});
@@ -57,12 +59,16 @@ export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncCom
         return next;
       });
       setError(null);
+      // Sum every run, not just the latest per installation -- the topbar
+      // counter is a lifetime total, not a "most recent sync" snapshot.
+      const usage = totalIngestionUsage("GitHub", status.runs ?? []);
+      if (usage) onTokenUsage(usage);
       return status;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load GitHub connections.");
       return null;
     } finally { setLoading(false); }
-  }, [onSourcesChanged]);
+  }, [onSourcesChanged, onTokenUsage]);
 
   useEffect(() => { if (open) void loadStatus(); }, [open, loadStatus]);
 
@@ -196,4 +202,3 @@ export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncCom
     </aside>
   </div>;
 }
-

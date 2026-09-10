@@ -123,7 +123,7 @@ class GitHubAuthClient:
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": API_VERSION,
-            "User-Agent": "graphiti-context-connector",
+            "User-Agent": "neuron-context-connector",
         }
 
     async def exchange_user_code(self, code: str) -> str:
@@ -138,7 +138,7 @@ class GitHubAuthClient:
                 response = await client.post(
                     "https://github.com/login/oauth/access_token",
                     json=payload,
-                    headers={"Accept": "application/json", "User-Agent": "graphiti-context-connector"},
+                    headers={"Accept": "application/json", "User-Agent": "neuron-context-connector"},
                 )
         except httpx.HTTPError as exc:
             raise GitHubAuthError(f"Could not exchange GitHub OAuth code: {exc}") from exc

@@ -1,4 +1,4 @@
-"""Build a consistent, safe source header for Graphiti episodes."""
+"""Build a consistent, safe source header for semantic chunks."""
 
 from __future__ import annotations
 

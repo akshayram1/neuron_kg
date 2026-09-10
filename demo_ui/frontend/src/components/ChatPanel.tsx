@@ -12,8 +12,8 @@ import type { ConversationMessage, Highlight } from "../types";
 
 const SAMPLE_QUESTIONS = [
   "What is currently being worked on?",
-  "Which decisions were made recently?",
-  "Who owns the open Jira work?",
+  "Who was assigned in March 2026?",
+  "What did we know about Argus in January 2026?",
 ];
 
 interface ChatPanelProps {

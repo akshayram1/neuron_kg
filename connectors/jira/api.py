@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import httpx
@@ -41,6 +41,20 @@ class JiraPerson:
 
 
 @dataclass(frozen=True)
+class JiraChange:
+    """One field-level changelog item. `from_id`/`to_id` are account ids for
+    assignee; display names live in the string fields."""
+
+    at: str
+    field: str
+    from_id: str | None
+    from_string: str | None
+    to_id: str | None
+    to_string: str | None
+    author: str | None
+
+
+@dataclass(frozen=True)
 class JiraIssue:
     """`content` stays a fully flattened text blob (used for hashing and for
     the semantic-pass profile — plan.md §3 Pass B). Every field below it is
@@ -61,6 +75,9 @@ class JiraIssue:
     blocks: tuple[str, ...]  # issue_id (stable id, NOT key -- keys can change) of each blocked issue
     created_at: str
     updated_at: str
+    parent_id: str | None = None
+    parent_key: str | None = None
+    changes: tuple[JiraChange, ...] = field(default_factory=tuple)
 
 
 def adf_text(value: Any) -> str:
@@ -152,22 +169,20 @@ class JiraApiClient:
                 return output
             start_at = int(data.get("startAt", start_at)) + len(values)
 
-    async def issues(
-        self,
-        cloud_id: str,
-        project_key: str,
+    _ISSUE_FIELDS = [
+        "summary", "description", "status", "issuetype", "created", "updated",
+        "assignee", "reporter", "labels", "components", "parent", "issuelinks", "comment",
+    ]
+
+    async def _search_raw(
+        self, cloud_id: str, jql: str, fields: list[str],
         on_progress: Callable[[int], None] | None = None,
-    ) -> list[JiraIssue]:
-        output: list[JiraIssue] = []
+    ) -> list[dict]:
+        output: list[dict] = []
         next_token: str | None = None
         while True:
             payload: dict[str, Any] = {
-                "jql": f'project = "{project_key}" ORDER BY updated ASC',
-                "maxResults": 50,
-                "fields": [
-                    "summary", "description", "status", "issuetype", "created", "updated",
-                    "assignee", "reporter", "labels", "components", "parent", "issuelinks", "comment",
-                ],
+                "jql": jql, "maxResults": 100, "fields": fields, "expand": "changelog",
             }
             if next_token:
                 payload["nextPageToken"] = next_token
@@ -175,69 +190,192 @@ class JiraApiClient:
                 "POST", f"{self.site_base(cloud_id)}/search/jql",
                 headers={**self._headers, "Content-Type": "application/json"}, json=payload,
             )
-            values = data.get("issues", [])
-            for item in values:
-                if not isinstance(item, dict) or not item.get("id"):
-                    continue
-                fields = item.get("fields") or {}
-                summary = str(fields.get("summary") or item.get("key") or "Jira issue")
-                status = str((fields.get("status") or {}).get("name", ""))
-                issue_type = str((fields.get("issuetype") or {}).get("name", ""))
-                lines = [
-                    f"Issue: {item.get('key')}", f"Summary: {summary}",
-                    f"Type: {issue_type}", f"Status: {status}",
-                ]
-
-                def _person(raw: Any) -> JiraPerson | None:
-                    if not isinstance(raw, dict) or not raw.get("accountId"):
-                        return None
-                    return JiraPerson(
-                        str(raw["accountId"]), str(raw.get("displayName") or raw["accountId"]),
-                        raw.get("emailAddress"),
-                    )
-
-                assignee = _person(fields.get("assignee"))
-                reporter = _person(fields.get("reporter"))
-                for label, person in (("Assignee", assignee), ("Reporter", reporter)):
-                    if person:
-                        lines.append(f"{label}: {person.display_name}")
-
-                labels = tuple(str(label) for label in (fields.get("labels") or []))
-                if labels:
-                    lines.append("Labels: " + ", ".join(labels))
-
-                description = adf_text(fields.get("description")).strip()
-                if description:
-                    lines.extend(("", "Description:", description))
-
-                comments = ((fields.get("comment") or {}).get("comments") or [])
-                for comment in comments:
-                    author = (comment.get("author") or {}).get("displayName") or "Unknown"
-                    body = adf_text(comment.get("body")).strip()
-                    if body:
-                        lines.extend(("", f"Comment by {author}:", body))
-
-                blocks: list[str] = []
-                for link in fields.get("issuelinks") or []:
-                    if not isinstance(link, dict):
-                        continue
-                    link_type = link.get("type") or {}
-                    outward_name = str(link_type.get("outward") or "").lower()
-                    outward_issue = link.get("outwardIssue") or {}
-                    if "block" in outward_name and outward_issue.get("id"):
-                        blocks.append(str(outward_issue["id"]))
-
-                output.append(
-                    JiraIssue(
-                        issue_id=str(item["id"]), key=str(item.get("key") or item["id"]),
-                        summary=summary, content="\n".join(lines), description=description,
-                        status=status, issue_type=issue_type, assignee=assignee, reporter=reporter,
-                        labels=labels, blocks=tuple(blocks),
-                        created_at=str(fields.get("created") or ""), updated_at=str(fields.get("updated") or ""),
-                    )
-                )
+            output.extend(item for item in data.get("issues", []) if isinstance(item, dict) and item.get("id"))
             if on_progress is not None:
                 on_progress(len(output))
             next_token = data.get("nextPageToken")
             if data.get("isLast", not bool(next_token)) or not next_token:
                 return output
+
+    @staticmethod
+    def _parse_issue(item: dict) -> JiraIssue:
+        fields = item.get("fields") or {}
+        summary = str(fields.get("summary") or item.get("key") or "Jira issue")
+        status = str((fields.get("status") or {}).get("name", ""))
+        issue_type = str((fields.get("issuetype") or {}).get("name", ""))
+        lines = [
+            f"Issue: {item.get('key')}", f"Summary: {summary}",
+            f"Type: {issue_type}", f"Status: {status}",
+        ]
+
+        def _person(raw: Any) -> JiraPerson | None:
+            if not isinstance(raw, dict) or not raw.get("accountId"):
+                return None
+            return JiraPerson(
+                str(raw["accountId"]), str(raw.get("displayName") or raw["accountId"]),
+                raw.get("emailAddress"),
+            )
+
+        assignee = _person(fields.get("assignee"))
+        reporter = _person(fields.get("reporter"))
+        for label, person in (("Assignee", assignee), ("Reporter", reporter)):
+            if person:
+                lines.append(f"{label}: {person.display_name}")
+
+        labels = tuple(str(label) for label in (fields.get("labels") or []))
+        if labels:
+            lines.append("Labels: " + ", ".join(labels))
+
+        description = adf_text(fields.get("description")).strip()
+        if description:
+            lines.extend(("", "Description:", description))
+
+        comments = ((fields.get("comment") or {}).get("comments") or [])
+        for comment in comments:
+            author = (comment.get("author") or {}).get("displayName") or "Unknown"
+            body = adf_text(comment.get("body")).strip()
+            if body:
+                lines.extend(("", f"Comment by {author}:", body))
+
+        blocks: list[str] = []
+        for link in fields.get("issuelinks") or []:
+            if not isinstance(link, dict):
+                continue
+            link_type = link.get("type") or {}
+            outward_name = str(link_type.get("outward") or "").lower()
+            outward_issue = link.get("outwardIssue") or {}
+            if "block" in outward_name and outward_issue.get("id"):
+                blocks.append(str(outward_issue["id"]))
+
+        parent = fields.get("parent") if isinstance(fields.get("parent"), dict) else {}
+        parent_id = str(parent["id"]) if parent.get("id") else None
+        parent_key = str(parent["key"]) if parent.get("key") else None
+
+        return JiraIssue(
+            issue_id=str(item["id"]), key=str(item.get("key") or item["id"]),
+            summary=summary, content="\n".join(lines), description=description,
+            status=status, issue_type=issue_type, assignee=assignee, reporter=reporter,
+            labels=labels, blocks=tuple(blocks),
+            created_at=str(fields.get("created") or ""), updated_at=str(fields.get("updated") or ""),
+            parent_id=parent_id, parent_key=parent_key,
+            changes=tuple(_parse_changelog(item.get("changelog"))),
+        )
+
+    async def issues(
+        self,
+        cloud_id: str,
+        project_key: str,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> list[JiraIssue]:
+        raw = await self._search_raw(
+            cloud_id, f'project = "{project_key}" ORDER BY updated ASC', self._ISSUE_FIELDS, on_progress,
+        )
+        return [self._parse_issue(item) for item in raw]
+
+    async def subtree_keys(self, cloud_id: str, root_key: str, max_depth: int = 8) -> list[str]:
+        """BFS every descendant of `root_key`, root included.
+
+        Jira's hierarchy fans out through two different relations depending
+        on level: a sub-task points at its parent Task/Story via `parent`,
+        while Story/Task -> Epic uses the reserved JQL field `"Epic Link"`
+        (classic/company-managed projects) or `parentEpic` (team-managed) --
+        never `parent`. A single JQL clause only ever catches one of these
+        hops, so an Epic -> Task -> Sub-task chain (verified real case:
+        DATAOS-3833 -> DATAOS-3839 -> DATAOS-4346) needs one BFS level per
+        hop, not one query.
+        """
+        visited = {root_key}
+        frontier = [root_key]
+        for _ in range(max_depth):
+            if not frontier:
+                break
+            keys_clause = ", ".join(f'"{key}"' for key in frontier)
+            jql = (f'"Epic Link" in ({keys_clause}) OR parent in ({keys_clause}) '
+                   f'OR parentEpic in ({keys_clause})')
+            raw = await self._search_raw(cloud_id, jql, ["summary"])
+            frontier = []
+            for item in raw:
+                key = str(item.get("key") or "")
+                if key and key not in visited:
+                    visited.add(key)
+                    frontier.append(key)
+        return sorted(visited)
+
+    async def issues_by_keys(
+        self, cloud_id: str, keys: list[str],
+        on_progress: Callable[[int], None] | None = None,
+    ) -> list[JiraIssue]:
+        if not keys:
+            return []
+        output: list[JiraIssue] = []
+        # JQL "in" lists are practically capped well below Jira's hard limit;
+        # batching keeps this correct regardless of subtree size.
+        for start in range(0, len(keys), 100):
+            batch = keys[start:start + 100]
+            keys_clause = ", ".join(f'"{key}"' for key in batch)
+            raw = await self._search_raw(
+                cloud_id, f"key in ({keys_clause}) ORDER BY updated ASC", self._ISSUE_FIELDS,
+            )
+            output.extend(self._parse_issue(item) for item in raw)
+            if on_progress is not None:
+                on_progress(len(output))
+        return output
+
+
+def _parse_changelog(raw: Any) -> list[JiraChange]:
+    if not isinstance(raw, dict):
+        return []
+    changes: list[JiraChange] = []
+    for history in raw.get("histories") or []:
+        if not isinstance(history, dict):
+            continue
+        at = str(history.get("created") or "")
+        author = ((history.get("author") or {}).get("displayName") if isinstance(history.get("author"), dict) else None)
+        for item in history.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get("field") or "")
+            if field not in {"assignee", "status"}:
+                continue
+            changes.append(JiraChange(
+                at=at, field=field,
+                from_id=str(item["from"]) if item.get("from") else None,
+                from_string=str(item["fromString"]) if item.get("fromString") else None,
+                to_id=str(item["to"]) if item.get("to") else None,
+                to_string=str(item["toString"]) if item.get("toString") else None,
+                author=author,
+            ))
+    changes.sort(key=lambda change: change.at)
+    return changes
+
+
+def field_intervals(
+    created_at: str,
+    current_id: str | None,
+    current_name: str | None,
+    changes: tuple[JiraChange, ...] | list[JiraChange],
+    field: str,
+) -> list[tuple[str, str | None, str | None, str | None]]:
+    """Walk a field's changelog into closed [start, end) intervals.
+
+    Each tuple is (valid_from, valid_to, id, display_name). The last interval
+    is open (end=None) when it matches the current value; older ones are
+    closed at the next change. A source that never changed the field yields
+    one open interval from `created_at` if a current value exists.
+    """
+    relevant = [change for change in changes if change.field == field and change.at]
+    if not relevant:
+        if created_at and (current_id or current_name):
+            return [(created_at, None, current_id, current_name)]
+        return []
+
+    intervals: list[tuple[str, str | None, str | None, str | None]] = []
+    cursor_id, cursor_name = relevant[0].from_id, relevant[0].from_string
+    cursor_start = created_at or relevant[0].at
+    for change in relevant:
+        if cursor_id or cursor_name:
+            intervals.append((cursor_start, change.at, cursor_id, cursor_name))
+        cursor_id, cursor_name, cursor_start = change.to_id, change.to_string, change.at
+    if cursor_id or cursor_name:
+        intervals.append((cursor_start, None, cursor_id, cursor_name))
+    return [(start, end, vid, name) for start, end, vid, name in intervals if start and (vid or name)]

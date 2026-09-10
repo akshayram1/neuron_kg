@@ -24,6 +24,9 @@ export interface GraphEdge {
   superseded: boolean;
   documents: string[];
   confidence: number | null;
+  factUid?: string;
+  derived?: boolean;
+  derivedRule?: string | null;
 }
 
 export interface GraphPayload {
@@ -48,6 +51,19 @@ export interface ChatResponse {
   citations: ChatCitation[];
   highlight: Highlight;
   readOnly: boolean;
+  tokenUsage: TokenUsage;
+}
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+  total: number;
+}
+
+export interface IngestionTokenUsage extends TokenUsage {
+  provider: string;
+  active: boolean;
+  startedAt: string;
 }
 
 export interface ConversationMessage {
@@ -55,6 +71,51 @@ export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
   result?: ChatResponse;
+}
+
+export interface EntityFact {
+  source: string;
+  target: string;
+  relation: string;
+  evidence: string | null;
+  validFrom: string | null;
+  validTo: string | null;
+  observedFrom: string | null;
+  observedTo: string | null;
+  documents: string[];
+  state: "live" | "historical";
+  derived: boolean;
+  derivedRule: string | null;
+  premises: string[];
+  endedUnknown: boolean;
+  interval: string | null;
+  direction: "in" | "out";
+  otherUid?: string;
+  otherName?: string;
+}
+
+export interface EntityHistoryEvent {
+  kind: string;
+  relation: string;
+  source: string;
+  target: string;
+  at: string | null;
+  interval: string | null;
+  documents: string[];
+  derived: boolean;
+  derivedRule: string | null;
+  evidence: string | null;
+  direction: "in" | "out";
+}
+
+export interface EntityDetail {
+  entity: GraphNode & { status?: string | null; issueKey?: string | null; url?: string | null };
+  facts: EntityFact[];
+  past: EntityFact[];
+  derived: EntityFact[];
+  history: EntityHistoryEvent[];
+  at: string | null;
+  asOf: string | null;
 }
 
 export type GraphSelection =
@@ -93,11 +154,15 @@ export interface ConnectorSyncProgress {
   files_processed?: number;
   files_fetched?: number;
   commits_fetched?: number;
+  pull_requests_fetched?: number;
   episodes_ingested?: number;
   files_too_large?: number;
   files_without_text?: number;
   records_removed?: number;
   missing_pages_retained?: number;
+  ingestion_input_tokens?: number;
+  ingestion_output_tokens?: number;
+  ingestion_total_tokens?: number;
 }
 
 export interface GitHubInstallation {
@@ -155,6 +220,23 @@ export interface OAuthConnectorSource {
   last_sync_at: string | null;
   last_sync_error: string | null;
   config: Record<string, unknown>;
+}
+
+export interface BitbucketWorkspace { uuid: string; slug: string; name: string; }
+export interface BitbucketRepository {
+  uuid: string; workspace: string; slug: string; name: string; full_name: string;
+  main_branch: string; html_url: string; private: boolean; description: string;
+}
+export interface BitbucketStatus {
+  configured: boolean;
+  connections: OAuthConnectorConnection[];
+  sources: OAuthConnectorSource[];
+  runs: BitbucketSyncRun[];
+}
+export interface BitbucketSyncRun {
+  run_id: string; connection_id: string; source_id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  started_at: string; finished_at: string | null; result: ConnectorSyncProgress | null; error: string | null;
 }
 
 export interface JiraSite { cloud_id: string; name: string; url: string; }

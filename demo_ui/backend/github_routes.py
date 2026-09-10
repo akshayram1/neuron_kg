@@ -9,6 +9,7 @@ import secrets
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
@@ -27,11 +28,11 @@ from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
 from graph.semantic_pass import run_semantic_pass
 from util.paths import DATA_DIR
+from demo_ui.backend.job_worker import JOB_STORE
 
 router = APIRouter(prefix="/api/connectors/github", tags=["github-connector"])
 SESSION_COOKIE = "neuron_github_session"
 LEDGER_PATH = DATA_DIR / "connector_ledger.sqlite3"
-_live_runs: dict[str, asyncio.Task] = {}
 logger = logging.getLogger("uvicorn.error.github_connector")
 
 
@@ -242,10 +243,14 @@ async def _run_sync(
                 "files_processed": len(files), "files_without_text": without_text,
                 "chunks_ingested": done_chunks, "chunks_total": total_chunks,
                 "entities_written": current.entities_written, "facts_written": current.facts_written,
+                **current.token_usage.as_dict("ingestion"),
             })
 
-        semantic = run_semantic_pass(
-            graph, ledger, record_prefix=f"github:{payload.installation_id}:",
+        # See bitbucket_routes.py's identical wrap: this call blocks for
+        # minutes and would otherwise freeze the whole server's event loop.
+        semantic = await run_in_threadpool(
+            run_semantic_pass, graph, ledger,
+            record_prefix=f"github:{payload.installation_id}:",
             on_progress=semantic_progress,
         )
         orphans_removed = gp.delete_orphaned_shared_entities(graph)
@@ -257,6 +262,7 @@ async def _run_sync(
             "chunks_ingested": semantic.chunks_processed,
             "entities_written": semantic.entities_written, "facts_written": semantic.facts_written,
             "orphans_removed": orphans_removed,
+            **semantic.token_usage.as_dict("ingestion"),
         }
         store.finish_source_sync(payload.installation_id, payload.repository_id)
         store.set_sync_run(run_id, "completed", result)
@@ -268,6 +274,7 @@ async def _run_sync(
         logger.exception("GitHub sync failed run=%s", run_id)
         store.finish_source_sync(payload.installation_id, payload.repository_id, str(exc)[:1_000])
         store.set_sync_run(run_id, "failed", error=str(exc)[:1_000])
+        raise
 
 
 @router.post("/sync", status_code=status.HTTP_202_ACCEPTED)
@@ -279,16 +286,13 @@ async def start_sync(payload: GitHubSyncRequest, request: Request) -> dict:
     if not repository:
         raise HTTPException(status_code=404, detail="Selected repository is no longer accessible")
     run_id = uuid4().hex
-    live = {key for key, task in _live_runs.items() if not task.done()}
-    store.fail_orphaned_sync_runs(payload.installation_id, payload.repository_id, live,
-                                  "Previous GitHub sync was interrupted by a server restart")
     try:
         store.create_sync_run(run_id, payload.installation_id, payload.repository_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    task = asyncio.create_task(_run_sync(run_id, payload, repository, settings, store))
-    _live_runs[run_id] = task
-    task.add_done_callback(lambda _task: _live_runs.pop(run_id, None))
+    JOB_STORE.enqueue(run_id, "github", {
+        "request": payload.model_dump(), "repository": repository.__dict__,
+    })
     return {"run_id": run_id, "status": "queued"}
 
 
@@ -315,4 +319,3 @@ async def delete_installation(installation_id: int, request: Request) -> dict:
     store.delete_installation(installation_id)
     return {"deleted": True, "records_removed": len(record_keys),
             "orphans_removed": orphans_removed}
-

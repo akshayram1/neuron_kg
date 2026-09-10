@@ -29,7 +29,7 @@ from graph.ontology import (
 # name) so the deterministic pass (Block 6) can resolve it back to a real uid.
 StructuralKind = Literal[
     "WorkItem", "Person", "Project", "Repository", "SourceFile", "Commit",
-    "Document", "Workspace",
+    "PullRequest", "Document", "Workspace",
 ]
 SemanticKind = Literal["Decision", "Term", "System"]
 
@@ -98,11 +98,14 @@ WORK_MANAGEMENT = ExtractionProfile(
 )
 
 _SOFTWARE_KNOWLEDGE_ADDENDUM = """\
-This text is from a GitHub source file or commit. Repository membership, file
-paths, commit authors and timestamps are already captured deterministically
-from the GitHub API and must NOT be re-extracted. Extract only durable
-knowledge expressed by the content: architectural or implementation
-decisions, domain terms, named systems, and explicit caveats.
+This text is from a source file, commit, or pull request on GitHub or
+Bitbucket. Repository membership, file paths, authors and timestamps are
+already captured deterministically from the provider API and must NOT be
+re-extracted. Extract only durable knowledge expressed by the content:
+architectural or implementation decisions, domain terms, named systems, and
+explicit caveats. A pull request's title/description is human-written prose
+explaining *why* a change was made -- often the highest-signal source in a
+repository for this kind of knowledge, unlike a source file's raw code.
 
 Do not treat imports, variable names, ordinary functions, code syntax, or a
 commit title by itself as a domain entity. Every term/decision/system you list
@@ -151,7 +154,7 @@ def profile_for_record(record: SourceRecord) -> ExtractionProfile:
     per-provider as GitHub (`software_knowledge`) and Notion
     (`business_document`) are added — see plan.md §1 build order."""
     if record.provider == "jira": return WORK_MANAGEMENT
-    if record.provider == "github": return SOFTWARE_KNOWLEDGE
+    if record.provider in ("github", "bitbucket"): return SOFTWARE_KNOWLEDGE
     if record.provider == "notion": return BUSINESS_DOCUMENT
     raise ValueError(f"no extraction profile for provider={record.provider!r}")
 
@@ -159,6 +162,6 @@ def profile_for_record(record: SourceRecord) -> ExtractionProfile:
 def profile_for_record_key(record_key: str) -> ExtractionProfile:
     provider = record_key.split(":", 1)[0].lower()
     if provider == "jira": return WORK_MANAGEMENT
-    if provider == "github": return SOFTWARE_KNOWLEDGE
+    if provider in ("github", "bitbucket"): return SOFTWARE_KNOWLEDGE
     if provider == "notion": return BUSINESS_DOCUMENT
     raise ValueError(f"no extraction profile for record_key={record_key!r}")

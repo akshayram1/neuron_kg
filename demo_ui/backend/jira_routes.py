@@ -22,6 +22,7 @@ import secrets
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -34,12 +35,12 @@ from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
 from graph.semantic_pass import run_semantic_pass
 from util.paths import DATA_DIR
+from demo_ui.backend.job_worker import JOB_STORE
 
 router = APIRouter(prefix="/api/connectors/jira", tags=["jira-connector"])
 SESSION_COOKIE = "neuron_jira_session"
 LEDGER_PATH = DATA_DIR / "connector_ledger.sqlite3"
 OAUTH_STORE_PATH = DATA_DIR / os.getenv("OAUTH_CONNECTOR_STATE_DB", "oauth_connectors.sqlite3")
-_live_runs: dict[str, asyncio.Task] = {}
 logger = logging.getLogger("uvicorn.error.jira_connector")
 
 
@@ -51,6 +52,9 @@ class JiraSyncRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=100)
     project_key: str = Field(min_length=1, max_length=100)
     project_name: str = Field(min_length=1, max_length=300)
+    # Optional: ingest only this issue's subtree (epic/task/sub-task
+    # descendants) instead of the whole project. Empty = whole project.
+    scope_issue_key: str = Field(default="", max_length=100)
 
 
 def _components() -> tuple[JiraOAuthSettings, OAuthConnectorStore]:
@@ -172,9 +176,11 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
         bootstrap_schema(graph)
         ledger = ConnectorLedger(LEDGER_PATH)
 
+        scope = payload.scope_issue_key.strip().upper()
+        fetch_label = f"{scope} subtree" if scope else payload.project_key
         store.set_run(run_id, "running", {
             "phase": "fetching", "project_key": payload.project_key,
-            "current": f"Fetching issues from {payload.project_key}…",
+            "current": f"Fetching issues from {fetch_label}…",
             "records_done": 0, "records_total": 0, "records_kept": 0, "records_written": 0,
             "issues_fetched": 0, "entities_written": 0, "facts_written": 0,
         })
@@ -188,12 +194,22 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
                 "entities_written": 0, "facts_written": 0,
             })
 
-        issues = await _with_refresh(
-            store,
-            settings,
-            payload.connection_id,
-            lambda c: c.issues(payload.cloud_id, project.key, on_progress=fetch_progress),
-        )
+        if scope:
+            keys = await _with_refresh(
+                store, settings, payload.connection_id,
+                lambda c: c.subtree_keys(payload.cloud_id, scope),
+            )
+            issues = await _with_refresh(
+                store, settings, payload.connection_id,
+                lambda c: c.issues_by_keys(payload.cloud_id, keys, on_progress=fetch_progress),
+            )
+        else:
+            issues = await _with_refresh(
+                store,
+                settings,
+                payload.connection_id,
+                lambda c: c.issues(payload.cloud_id, project.key, on_progress=fetch_progress),
+            )
 
         jp.write_project(graph, ledger, project, site, payload.connection_id)
         total = len(issues)
@@ -227,10 +243,14 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
                 "issues_fetched": total, "chunks_ingested": done, "chunks_total": semantic_total,
                 "entities_written": current_result.entities_written,
                 "facts_written": current_result.facts_written,
+                **current_result.token_usage.as_dict("ingestion"),
             })
 
-        semantic = run_semantic_pass(
-            graph, ledger, record_prefix=f"jira:{payload.connection_id}:",
+        # See bitbucket_routes.py's identical wrap: this call blocks for
+        # minutes and would otherwise freeze the whole server's event loop.
+        semantic = await run_in_threadpool(
+            run_semantic_pass, graph, ledger,
+            record_prefix=f"jira:{payload.connection_id}:",
             on_progress=semantic_progress,
         )
         orphans_removed = jp.delete_orphaned_shared_entities(graph)
@@ -242,6 +262,7 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
             "issues_fetched": total, "entities_written": semantic.entities_written,
             "facts_written": semantic.facts_written, "chunks_ingested": semantic.chunks_processed,
             "orphans_removed": orphans_removed,
+            **semantic.token_usage.as_dict("ingestion"),
         }
         source_id = f"{payload.cloud_id}:{payload.project_id}"
         store.save_source(
@@ -263,6 +284,7 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
     except Exception as exc:
         logger.exception("Jira sync failed run=%s", run_id)
         store.set_run(run_id, "failed", error=str(exc)[:1000])
+        raise
 
 
 @router.post("/sync", status_code=status.HTTP_202_ACCEPTED)
@@ -270,15 +292,11 @@ async def start_sync(payload: JiraSyncRequest, request: Request) -> dict:
     settings, store = _components(); _authorized(request, store, payload.connection_id)
     source_id = f"{payload.cloud_id}:{payload.project_id}"
     run_id = uuid4().hex
-    live = {key for key, task in _live_runs.items() if not task.done()}
-    store.fail_orphaned_runs(payload.connection_id, source_id, live, "Previous Jira sync was interrupted by a server restart")
     try:
         store.create_run(run_id, payload.connection_id, source_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    task = asyncio.create_task(_run(run_id, payload, settings, store))
-    _live_runs[run_id] = task
-    task.add_done_callback(lambda _task: _live_runs.pop(run_id, None))
+    JOB_STORE.enqueue(run_id, "jira", {"request": payload.model_dump()})
     return {"run_id": run_id, "status": "queued"}
 
 

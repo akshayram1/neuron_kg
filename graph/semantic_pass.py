@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from typing import Callable
 
 from falkordb import Graph
@@ -36,29 +38,36 @@ from connectors.core.ledger import (
     RecordEdgeRef,
     SemanticStatus,
 )
+from graph import vector_store
 from graph import writer as w
 from graph.ontology import is_relation_allowed
 from graph.profiles import WorkManagementExtraction, profile_for_record_key
 from graph.search import find_similar_uid
+from graph.token_usage import TokenUsage
 
 logger = logging.getLogger("neuron.semantic_pass")
 
 _SEMANTIC_LABELS = {"Decision", "Term", "System"}
 _ENTITY_TYPE_TO_LABEL = {
     "work_item": "WorkItem", "project": "Project", "repository": "Repository",
-    "source_file": "SourceFile", "commit": "Commit", "page": "Document",
-    "workspace": "Workspace",
+    "source_file": "SourceFile", "commit": "Commit", "pull_request": "PullRequest",
+    "page": "Document", "workspace": "Workspace",
 }
 # Must match graph.schema.VECTOR_LABELS -- System has no vector index (it's
 # usually just a proper noun with little embeddable text), Project isn't a
 # content-bearing label either.
-_EMBEDDABLE_LABELS = {"WorkItem", "Document", "Decision", "Term"}
+_EMBEDDABLE_LABELS = {"WorkItem", "Document", "Decision", "Term", "PullRequest", "Commit", "SourceFile"}
 
 
-def _embed(client: OpenAI, model: str, texts: list[str]) -> list[list[float]]:
+def _embed(
+    client: OpenAI, model: str, texts: list[str], token_usage: TokenUsage,
+) -> list[list[float]]:
     if not texts:
         return []
-    response = client.embeddings.create(model=model, input=texts)
+    response = client.embeddings.create(
+        model=model, input=[vector_store.truncate_for_embedding(t) for t in texts]
+    )
+    token_usage.add(response.usage)
     return [item.embedding for item in response.data]
 
 
@@ -84,6 +93,7 @@ class SemanticPassResult:
     facts_written: int = 0
     facts_rejected: int = 0
     records_completed: int = 0
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
 
 
 def _resolve_endpoint(
@@ -150,7 +160,15 @@ def _write_extraction(
     record_own_kind: str | None,
     client: OpenAI,
     embedding_model: str,
+    extraction_model: str,
+    profile_name: str,
+    token_usage: TokenUsage,
 ) -> tuple[int, int, int]:
+    source_rows = graph.query(
+        "MATCH (sr:SourceRecord {record_key: $record_key}) RETURN sr.source_time LIMIT 1",
+        params={"record_key": chunk.record_key},
+    ).result_set
+    source_time = source_rows[0][0] if source_rows else None
     # An entity with no fact connecting it to anything is graph noise, not
     # knowledge -- a floating "Redis" node nobody can query into is worse
     # than not having it at all. Rather than trust the LLM to always attach
@@ -189,7 +207,10 @@ def _write_extraction(
             # `semantic_uid` alone would silently create a second node for
             # the same real-world entity every time the wording drifts.
             # Verified against real duplicate tickets (see CHECKLIST).
-            vectors = _embed(client, embedding_model, [_embedding_text(label, item) for item in items])
+            vectors = _embed(
+                client, embedding_model,
+                [_embedding_text(label, item) for item in items], token_usage,
+            )
             uids = [
                 find_similar_uid(graph, label, vector) or semantic_uid(label, item.name)
                 for item, vector in zip(items, vectors)
@@ -198,8 +219,26 @@ def _write_extraction(
             vectors = [None] * len(items)
             uids = [semantic_uid(label, item.name) for item in items]
 
+        # `search_text` is the text this node is *represented by*, and two
+        # separate things depend on it existing:
+        #   - the FalkorDB fulltext (BM25) index is built on `search_text`, so
+        #     without it a Decision/Term can never match the keyword leg of
+        #     hybrid search — only the vector leg (observed: every Decision hit
+        #     came back `methods=['vector']`, never 'fulltext').
+        #   - `scripts/rebuild_vectors` re-embeds from `search_text`, so
+        #     without it the Qdrant projection is NOT rebuildable for exactly
+        #     the semantic entities that matter most (observed: a rebuild after
+        #     wiping Qdrant reported "Decision: 0 nodes with text").
+        # Storing the same string that was embedded keeps both in agreement.
         rows = [
-            {"uid": uid, "props": {**item.model_dump(exclude={"name"}), "name": item.name}}
+            {
+                "uid": uid,
+                "props": {
+                    **item.model_dump(exclude={"name"}),
+                    "name": item.name,
+                    "search_text": _embedding_text(label, item),
+                },
+            }
             for uid, item in zip(uids, items)
         ]
         w.upsert_entities(graph, label, rows)
@@ -222,6 +261,11 @@ def _write_extraction(
                     "evidence": None,
                     "extraction_method": "deterministic",
                     "confidence": 1.0,
+                    "chunk_id": chunk.chunk_id,
+                    "chunk_hash": hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
+                    "extractor_version": profile_name,
+                    "model": extraction_model,
+                    "valid_at": source_time,
                 }
                 for uid in uids
             ]
@@ -231,8 +275,9 @@ def _write_extraction(
             )
 
         if label in _EMBEDDABLE_LABELS:
-            w.upsert_entity_embeddings(graph, label, [
-                {"uid": uid, "embedding": vector} for uid, vector in zip(uids, vectors)
+            vector_store.upsert_vectors(vector_store.client(), [
+                {"uid": uid, "label": label, "embedding": vector}
+                for uid, vector in zip(uids, vectors)
             ])
 
     facts_written = 0
@@ -263,6 +308,11 @@ def _write_extraction(
         w.upsert_fact_edges(graph, fact.relation, fact.subject_kind, fact.object_kind, [{
             "from_uid": subject_uid, "to_uid": object_uid, "source_record_keys": [chunk.record_key],
             "evidence": fact.evidence, "extraction_method": "llm", "confidence": 0.9,
+            "chunk_id": chunk.chunk_id,
+            "chunk_hash": hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
+            "extractor_version": profile_name,
+            "model": extraction_model,
+            "valid_at": source_time,
         }])
         edges_supported.append(RecordEdgeRef(fact.relation, subject_uid, object_uid))
         facts_written += 1
@@ -276,6 +326,21 @@ def _write_extraction(
     return entities_written, facts_written, facts_rejected
 
 
+def _call_llm(client: OpenAI, model: str, chunk: PendingChunk):
+    """The only part of a chunk's processing that's safe to run concurrently:
+    a pure network round-trip with no graph/ledger side effects."""
+    profile = profile_for_record_key(chunk.record_key)
+    response = client.responses.parse(
+        model=model,
+        input=[
+            {"role": "system", "content": profile.instructions},
+            {"role": "user", "content": chunk.text},
+        ],
+        text_format=profile.schema,
+    )
+    return profile, response
+
+
 def run_semantic_pass(
     graph: Graph,
     ledger: ConnectorLedger,
@@ -285,63 +350,78 @@ def run_semantic_pass(
     model: str | None = None,
     record_prefix: str | None = None,
     on_progress: Callable[[int, int, str, SemanticPassResult], None] | None = None,
+    max_concurrency: int | None = None,
 ) -> SemanticPassResult:
     """Process up to `budget` pending chunks (default: $LLM_BUDGET_PER_RUN).
     A chunk that fails its LLM call is left 'pending' and retried on a later
     run rather than dropped — no retry-count/backoff yet (known v1 gap: a
-    persistently failing chunk keeps consuming one budget slot per run)."""
+    persistently failing chunk keeps consuming one budget slot per run).
+
+    LLM calls run concurrently (`LLM_CONCURRENCY`, default 6) -- per-chunk
+    latency is 30-50s and almost entirely network wait, so this is the actual
+    lever on wall-clock time (a smaller/denser chunk still costs about the
+    same latency per call; only the number of *sequential* round-trips does).
+    Every write -- the write-time similarity dedup in `_write_extraction`, the
+    ledger commit -- stays on the main thread, one chunk at a time, in
+    completion order: two chunks racing to decide "is this a new Decision or
+    an existing one" concurrently could each conclude "new" and create a
+    duplicate, since the first one's node/vector isn't visible to the second
+    until it's actually written.
+    """
     client = client or OpenAI()
     model = model or os.getenv("LLM_MODEL", "gpt-5.6-sol")
     embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     budget = budget if budget is not None else int(os.getenv("LLM_BUDGET_PER_RUN", "200"))
+    max_concurrency = max_concurrency or int(os.getenv("LLM_CONCURRENCY", "6"))
 
     result = SemanticPassResult()
     touched_records: set[str] = set()
 
     chunks = ledger.pending_chunks(budget, record_prefix=record_prefix)
     total_chunks = len(chunks)
-    for index, chunk in enumerate(chunks, 1):
-        if on_progress is not None:
-            on_progress(index - 1, total_chunks, chunk.record_key, result)
+
+    runnable: list[tuple[PendingChunk, object]] = []
+    for chunk in chunks:
         entry = ledger.get(chunk.record_key)
         if entry is None or entry.primary_node_uid is None:
             logger.warning("no primary_node_uid for %s, skipping chunk", chunk.record_key)
             continue
+        runnable.append((chunk, entry))
 
-        result.llm_calls += 1
-        try:
-            profile = profile_for_record_key(chunk.record_key)
-            response = client.responses.parse(
-                model=model,
-                input=[
-                    {"role": "system", "content": profile.instructions},
-                    {"role": "user", "content": chunk.text},
-                ],
-                text_format=profile.schema,
-            )
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+        futures = {pool.submit(_call_llm, client, model, chunk): (chunk, entry) for chunk, entry in runnable}
+        for future in as_completed(futures):
+            chunk, entry = futures[future]
+            result.llm_calls += 1
+            try:
+                profile, response = future.result()
+            except Exception:
+                logger.exception("LLM extraction failed for chunk %s of %s", chunk.chunk_id, chunk.record_key)
+                continue
+            result.token_usage.add(response.usage)
             extraction: WorkManagementExtraction = response.output_parsed
-        except Exception:
-            logger.exception("LLM extraction failed for chunk %s of %s", chunk.chunk_id, chunk.record_key)
-            continue
 
-        entities, facts, rejected = _write_extraction(
-            graph, ledger, chunk, extraction, entry.primary_node_uid,
-            _record_own_kind(chunk.record_key), client, embedding_model,
-        )
-        result.chunks_processed += 1
-        result.entities_written += entities
-        result.facts_written += facts
-        result.facts_rejected += rejected
-        logger.info(
-            "chunk %s of %s: %d terms, %d decisions, %d systems extracted, %d facts written, %d rejected",
-            chunk.chunk_index, chunk.record_key,
-            len(extraction.terms), len(extraction.decisions), len(extraction.systems), facts, rejected,
-        )
+            entities, facts, rejected = _write_extraction(
+                graph, ledger, chunk, extraction, entry.primary_node_uid,
+                _record_own_kind(chunk.record_key), client, embedding_model, model, profile.name,
+                result.token_usage,
+            )
+            result.chunks_processed += 1
+            result.entities_written += entities
+            result.facts_written += facts
+            result.facts_rejected += rejected
+            logger.info(
+                "chunk %s of %s: %d terms, %d decisions, %d systems extracted, %d facts written, %d rejected",
+                chunk.chunk_index, chunk.record_key,
+                len(extraction.terms), len(extraction.decisions), len(extraction.systems), facts, rejected,
+            )
 
-        ledger.commit_chunk(chunk.record_key, chunk.chunk_id, SemanticStatus.DONE)
-        touched_records.add(chunk.record_key)
-        if on_progress is not None:
-            on_progress(index, total_chunks, chunk.record_key, result)
+            ledger.commit_chunk(chunk.record_key, chunk.chunk_id, SemanticStatus.DONE)
+            touched_records.add(chunk.record_key)
+            completed += 1
+            if on_progress is not None:
+                on_progress(completed, total_chunks, chunk.record_key, result)
 
     for record_key in touched_records:
         if not ledger.record_fully_processed(record_key):
@@ -361,8 +441,10 @@ def run_semantic_pass(
             ).result_set
             search_text = rows[0][0] if rows else None
             if search_text:
-                vector = _embed(client, embedding_model, [search_text])[0]
-                w.upsert_entity_embeddings(graph, own_label, [{"uid": entry.primary_node_uid, "embedding": vector}])
+                vector = _embed(client, embedding_model, [search_text], result.token_usage)[0]
+                vector_store.upsert_vectors(vector_store.client(), [
+                    {"uid": entry.primary_node_uid, "label": own_label, "embedding": vector}
+                ])
 
     logger.info(
         "semantic pass done: %d chunks, %d llm calls, %d entities, %d facts (%d rejected), %d records completed",

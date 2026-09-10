@@ -1,0 +1,3 @@
+{"query":"Why did we choose Redis rate limiting for login?","providers":["jira","github","notion"],"expected_uids":["replace-with-decision-or-work-item-uid"],"expected_citation_record_keys":["replace-with-jira-record-key"]}
+{"query":"Which commit implements EAPD-1?","providers":["jira","github"],"expected_uids":["replace-with-commit-uid"],"expected_citation_record_keys":["replace-with-github-commit-record-key"]}
+{"query":"Where is the EAPD-1 implementation documented?","providers":["jira","github","notion"],"expected_uids":["replace-with-notion-document-uid"],"expected_citation_record_keys":["replace-with-notion-page-record-key"]}
