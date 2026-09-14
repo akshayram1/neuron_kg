@@ -20,6 +20,7 @@ logger = logging.getLogger("neuron.derived")
 PARENT_IMPLEMENTS = "parent_implements"
 PARENT_DOCUMENTS = "parent_documents"
 SHARED_CONCEPT = "shared_concept"
+PR_IMPLEMENTS = "pr_implements"
 VERIFIED_EMAIL = "verified_email"
 
 
@@ -29,6 +30,7 @@ def materialize_around(graph: Graph, seed_uid: str, record_key: str) -> int:
     written += _lift_through_parent(graph, seed_uid, record_key, "IMPLEMENTS", PARENT_IMPLEMENTS)
     written += _lift_through_parent(graph, seed_uid, record_key, "DOCUMENTS", PARENT_DOCUMENTS)
     written += _shared_concept_documents(graph, seed_uid, record_key)
+    written += _document_via_pr(graph, seed_uid, record_key)
     return written
 
 
@@ -103,6 +105,38 @@ def _shared_concept_documents(graph: Graph, seed_uid: str, record_key: str) -> i
             "premises": lambda item_row, bundled=item: bundled["premises"],
         })
     return written
+
+
+def _document_via_pr(graph: Graph, seed_uid: str, record_key: str) -> int:
+    """Document -DOCUMENTS-> PR -IMPLEMENTS-> WorkItem → Document DOCUMENTS WorkItem.
+
+    The PR is the hub: Notion names the PR (URL or `PR #12`), the PR names
+    the Jira key. Without this lift the three nodes are a path, not a
+    Document↔ticket edge chat already knows how to cite.
+    """
+    rows = graph.query(
+        """
+        MATCH (doc:Document)-[r1:DOCUMENTS]->(pr:PullRequest)
+        WHERE r1.invalid_at IS NULL AND coalesce(r1.derived, false) = false
+        MATCH (pr)-[r2:IMPLEMENTS]->(wi:WorkItem)
+        WHERE r2.invalid_at IS NULL AND coalesce(r2.derived, false) = false
+          AND (doc.uid = $uid OR pr.uid = $uid OR wi.uid = $uid)
+        OPTIONAL MATCH (doc)-[existing:DOCUMENTS]->(wi)
+        WHERE existing.invalid_at IS NULL AND coalesce(existing.derived, false) = false
+        WITH doc, pr, wi, r1, r2, existing
+        WHERE existing IS NULL
+        RETURN doc.uid, 'Document', wi.uid, 'WorkItem',
+               pr.name, r1.fact_uid, r1.source_record_keys, r1.valid_at,
+               r2.fact_uid
+        """,
+        params={"uid": seed_uid},
+    ).result_set
+    return _write_derived(graph, "DOCUMENTS", PR_IMPLEMENTS, record_key, rows, {
+        "evidence": lambda row: (
+            f"Inferred: {row[4]} implements the ticket and this page documents that PR."
+        ),
+        "premises": lambda row: [uid for uid in (row[5], row[8]) if uid],
+    })
 
 
 def _write_derived(

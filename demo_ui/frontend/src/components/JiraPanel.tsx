@@ -8,9 +8,9 @@ import SyncProgress from "./SyncProgress";
 
 const delay = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
-interface Props { open: boolean; onClose: () => void; onSourcesChanged: (sources: OAuthConnectorSource[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
+interface Props { open: boolean; graphName: string; onClose: () => void; onSourcesChanged: (sources: OAuthConnectorSource[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
 
-export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
+export default function JiraPanel({ open, graphName, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
   const [connections, setConnections] = useState<OAuthConnectorConnection[]>([]);
   const [sources, setSources] = useState<OAuthConnectorSource[]>([]);
   const [sites, setSites] = useState<Record<string, JiraSite[]>>({});
@@ -31,7 +31,7 @@ export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncCompl
 
   const loadStatus = useCallback(async () => {
     setLoading(true); setError(null);
-    try { const value = await getJiraStatus(); if (!mounted.current) return value;
+    try { const value = await getJiraStatus(graphName); if (!mounted.current) return value;
       setConnections(value.connections); setSources(value.sources); onSourcesChangedRef.current(value.sources);
       const latestRuns: Record<string, JiraSyncRun> = {};
       for (const run of value.runs ?? []) {
@@ -45,7 +45,7 @@ export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncCompl
       return value;
     } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "Could not load Jira connections."); return null;
     } finally { if (mounted.current) setLoading(false); }
-  }, []);
+  }, [graphName]);
   useEffect(() => { if (open) void loadStatus(); }, [open, loadStatus]);
   useEffect(() => { if (!open) setConnecting(false); }, [open]);
   useEffect(() => {
@@ -81,7 +81,7 @@ export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncCompl
       for (let index = 0; index < 200; index += 1) {
         await delay(1500);
         if (!mounted.current || !openRef.current) { if (!popup.closed) popup.close(); return; }
-        const value = await getJiraStatus();
+        const value = await getJiraStatus(graphName);
         if (!mounted.current || !openRef.current) { if (!popup.closed) popup.close(); return; }
         if (value.connections.some((item) => !before.has(item.connection_id))) {
           setConnections(value.connections); setSources(value.sources); onSourcesChangedRef.current(value.sources); if (!popup.closed) popup.close(); return;
@@ -111,7 +111,7 @@ export default function JiraPanel({ open, onClose, onSourcesChanged, onSyncCompl
     const site = (sites[connectionId] ?? []).find((item) => item.cloud_id === selectedSite[connectionId]);
     const project = (projects[`${connectionId}:${site?.cloud_id}`] ?? []).find((item) => item.project_id === selectedProject[connectionId]);
     if (!site || !project) { setError("Select one Jira site and project first."); return; }
-    try { const started = await startJiraSync(connectionId, site, project, (scopeIssueKey[connectionId] ?? "").trim());
+    try { const started = await startJiraSync(connectionId, site, project, (scopeIssueKey[connectionId] ?? "").trim(), graphName);
       setRuns((current) => ({ ...current, [connectionId]: {
         run_id: started.run_id, connection_id: connectionId,
         source_id: `${site.cloud_id}:${project.project_id}`, status: "queued",

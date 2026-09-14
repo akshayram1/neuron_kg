@@ -15,6 +15,18 @@ GITHUB_COMMIT_RE = re.compile(
     r"(?:github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/commit/|\bCommit:\s*)([0-9a-f]{7,40})\b",
     re.IGNORECASE,
 )
+# `PR #12` alone is stored as `#12` and only matches if exactly one
+# ingested PullRequest has that id (see resolver). Repo-qualified refs
+# come from Bitbucket/GitHub PR URLs.
+_BITBUCKET_PR_RE = re.compile(
+    r"bitbucket\.org/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull-requests/(\d+)",
+    re.IGNORECASE,
+)
+_GITHUB_PR_RE = re.compile(
+    r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(\d+)",
+    re.IGNORECASE,
+)
+_PR_NUM_RE = re.compile(r"\bPR\s*#\s*(\d+)\b", re.IGNORECASE)
 
 
 def normalize_url(value: str) -> str:
@@ -35,6 +47,18 @@ def repository_names(text: str) -> frozenset[str]:
 
 def commit_shas(text: str) -> frozenset[str]:
     return frozenset(value.lower() for value in GITHUB_COMMIT_RE.findall(text))
+
+
+def pull_request_refs(text: str) -> frozenset[str]:
+    """`rubik_/argus#12` from a PR URL, or `#12` from `PR #12`."""
+    refs: set[str] = set()
+    for repo, number in _BITBUCKET_PR_RE.findall(text):
+        refs.add(f"{repo.lower()}#{number}")
+    for repo, number in _GITHUB_PR_RE.findall(text):
+        refs.add(f"{repo.lower().removesuffix('.git')}#{number}")
+    for number in _PR_NUM_RE.findall(text):
+        refs.add(f"#{number}")
+    return frozenset(refs)
 
 
 def evidence_excerpt(text: str, anchor: str, radius: int = 150) -> str:

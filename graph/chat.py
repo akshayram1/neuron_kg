@@ -7,9 +7,7 @@ doesn't give you (plan.md §6, quoting the old `graph/ask.py`'s own framing).
 
 from __future__ import annotations
 
-import difflib
 import os
-import re
 from dataclasses import dataclass, field
 
 from falkordb import Graph
@@ -19,10 +17,10 @@ from pydantic import BaseModel, Field
 from graph.search import SearchHit, hybrid_search
 from graph.access import AccessScope
 from graph.entity import fetch_entity_detail
+from graph.structured_query import find_named_persons, resolve_structured
 from graph.time_axis import infer_query_clocks
 from graph.token_usage import TokenUsage
-
-_WORD_RE = re.compile(r"[A-Za-z]+")
+from graph import vector_store
 
 SYSTEM_PROMPT = """\
 You answer questions about a company's Jira/GitHub/Bitbucket/Notion
@@ -46,6 +44,19 @@ email). Say they are inferred and name the premise. An asserted Jira/GitHub
 fact always beats an inferred one if they disagree.
 
 Cite sources inline using the record names given, e.g. "(HERA-101)".
+
+Format the answer as short markdown: `###` headings per source or topic,
+blank lines between sections, and bullet lists. Do not write one unbroken
+paragraph.
+
+If the evidence starts with STRUCTURED RESULT, that list is complete for
+the question. Do not add tickets or commits that appear only inside
+Document or SourceFile text. A WorkItem with no live ASSIGNED_TO is
+unassigned; an ended historical ASSIGNED_TO is not a current assignee.
+Commit AUTHORED_BY is not a Jira assignment. Text on the commit block
+itself (message, Files: paths, dates) is evidence — those paths are the
+provider's full change list. `--MODIFIES-->` is only HEAD .py/.md still
+on the graph.
 
 The evidence is organized into blocks, each headed "[Label] Name" (e.g.
 "[WorkItem] DATAOS-4191 ..."). In `used_sources`, list the exact Name of every
@@ -88,6 +99,38 @@ def _format_fact(fact: dict) -> str:
         f"  - {fact['source']} --{fact['relation']}--> {fact['target']}"
         f"{inferred}{interval}{evidence}"
     )
+
+
+def _mentioned_record_keys(
+    graph: Graph, uid: str, scope: AccessScope, providers: list[str] | None,
+) -> set[str]:
+    """SourceRecords this node itself is MENTIONED_IN — not neighbors'.
+
+    Neighborhood fact `recordKeys` follow the edge writer. A parent's
+    PARENT_OF edge is often written from the child's Jira record, so
+    citing DATAOS-3833's facts pulled DATAOS-3839 / 4191 / 4151 even
+    when those tickets were assigned and not part of the answer.
+    """
+    acl, acl_params = scope.cypher("sr", "mentioned_acl")
+    provider_filter = "AND sr.provider IN $providers" if providers else ""
+    rows = graph.query(
+        f"""
+        MATCH (n {{uid: $uid}})-[:MENTIONED_IN]->(sr:SourceRecord)
+        WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
+        RETURN DISTINCT sr.record_key
+        """,
+        params={"uid": uid, **acl_params, **({"providers": providers} if providers else {})},
+    ).result_set
+    return {row[0] for row in rows if row[0]}
+
+
+def _assignment_facts(facts: list[dict]) -> tuple[list[dict], list[str]]:
+    slim = [fact for fact in facts if fact.get("relation") == "ASSIGNED_TO"]
+    edge_ids = [
+        f"{fact['fromUid']}:{fact['relation']}:{fact['toUid']}"
+        for fact in slim if fact.get("fromUid") and fact.get("toUid")
+    ]
+    return slim, edge_ids
 
 
 def _entity_evidence(
@@ -163,52 +206,9 @@ def _live_facts(
 def _find_named_person(
     graph: Graph, question: str, scope: AccessScope, providers: list[str] | None,
 ) -> SearchHit | None:
-    """Fuzzy-match a Person the question is asking about.
-
-    Why this exists: hybrid_search's top-K is tuned to find the single best
-    matching fact, not to enumerate everything about a named entity. Verified
-    on real data: "what did Soumadip do in argus" only surfaced 2 of the 29
-    WorkItems he's ASSIGNED_TO/REPORTED_BY on, because the other 27 simply
-    didn't score in the top 8 -- they're not more/less relevant, there just
-    isn't room. A person question needs "all of this entity's edges", which
-    is a graph traversal, not a similarity ranking.
-
-    Matching is fuzzy, not exact-substring: verified case had the question
-    spell the name "Soumyadip" against the real "Soumadip De" -- a one-letter
-    typo an exact/substring match would miss entirely.
-    """
-    provider_filter = "AND sr.provider IN $providers" if providers else ""
-    acl, acl_params = scope.cypher("sr", "person_name_acl")
-    rows = graph.query(
-        f"""
-        MATCH (p:Person)-[:MENTIONED_IN]->(sr:SourceRecord)
-        WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
-        RETURN DISTINCT p.uid, p.name
-        """,
-        params={**acl_params, **({"providers": providers} if providers else {})},
-    ).result_set
-    if not rows:
-        return None
-
-    query_words = [w.lower() for w in _WORD_RE.findall(question) if len(w) >= 3]
-    if not query_words:
-        return None
-
-    best: tuple[float, str, str] | None = None  # (ratio, uid, name)
-    for uid, name in rows:
-        for part in _WORD_RE.findall(name or ""):
-            if len(part) < 3:
-                continue
-            part_lower = part.lower()
-            for word in query_words:
-                ratio = difflib.SequenceMatcher(None, part_lower, word).ratio()
-                if ratio >= 0.82 and (best is None or ratio > best[0]):
-                    best = (ratio, uid, name)
-
-    if best is None:
-        return None
-    _, uid, name = best
-    return SearchHit(uid=uid, label="Person", name=name, summary="", score=0.0, methods=["named_entity"])
+    """First SAME_AS cluster member. Prefer `find_named_persons`."""
+    people = find_named_persons(graph, question, scope, providers)
+    return people[0] if people else None
 
 
 def _used_record_keys(
@@ -226,7 +226,23 @@ def _used_record_keys(
     normalized = {name.strip(): keys for name, keys in record_keys_by_source.items()}
     used: set[str] = set()
     for name in used_sources:
-        used.update(normalized.get(name.strip(), set()))
+        stripped = name.strip()
+        if stripped in normalized:
+            used.update(normalized[stripped])
+            continue
+        # Block name is often just "DATAOS-3833"; the model echoes the
+        # SourceRecord title "DATAOS-3833 — …". Require a separator so
+        # "DATAOS-38" cannot steal "DATAOS-3833".
+        for block_name, keys in normalized.items():
+            if (
+                stripped.startswith(block_name + " ")
+                or stripped.startswith(block_name + "—")
+                or stripped.startswith(block_name + "–")
+                or block_name.startswith(stripped + " ")
+                or block_name.startswith(stripped + "—")
+                or block_name.startswith(stripped + "–")
+            ):
+                used.update(keys)
     return used
 
 
@@ -248,6 +264,7 @@ def run_chat_turn(
     graph: Graph, client: OpenAI, question: str, *, model: str | None = None,
     search_limit: int = 6, providers: list[str] | None = None,
     scope: AccessScope, at: str | None = None, as_of: str | None = None,
+    collection: str = vector_store.COLLECTION,
 ) -> ChatResult:
     # Deliberately NOT the same model/env var as semantic_pass's extraction
     # call. Extraction needs gpt-5.6-sol's reliability at filling typed
@@ -262,19 +279,23 @@ def run_chat_turn(
     inferred_at, inferred_as_of = infer_query_clocks(question)
     at = at or inferred_at
     as_of = as_of or inferred_as_of
-    hits: list[SearchHit] = hybrid_search(
-        graph, client, question, limit=search_limit, providers=providers, scope=scope,
-        token_usage=token_usage,
-    )
+    structured = resolve_structured(graph, question, scope, providers)
+    if structured is not None:
+        hits = structured.hits
+    else:
+        hits = hybrid_search(
+            graph, client, question, limit=search_limit, providers=providers, scope=scope,
+            token_usage=token_usage, collection=collection,
+        )
+        # Inject the whole SAME_AS cluster, not the first equal-ratio name.
+        # Bitbucket Aashish and Jira Aashish score the same; first-wins hid
+        # the four live ASSIGNED_TO edges on the Jira node.
+        seen = {hit.uid for hit in hits}
+        extras = [p for p in find_named_persons(graph, question, scope, providers) if p.uid not in seen]
+        if extras:
+            hits = extras + hits
 
-    # A person the question names by name gets ALL their live facts, not just
-    # whatever made hybrid_search's top-K -- see `_find_named_person`'s
-    # docstring for the real case this fixes.
-    named_person = _find_named_person(graph, question, scope, providers)
-    if named_person is not None and not any(hit.uid == named_person.uid for hit in hits):
-        hits = [named_person, *hits]
-
-    if not hits:
+    if not hits and structured is None:
         return ChatResult(
             answer="I don't have any information about that in the graph yet.",
             citations=[],
@@ -300,6 +321,11 @@ def run_chat_turn(
         facts, edge_ids, record_keys = _entity_evidence(
             graph, hit.uid, scope, providers, at=at, as_of=as_of,
         )
+        if structured is not None and structured.kind in {"unassigned", "assigned_to"}:
+            facts, edge_ids = _assignment_facts(facts)
+            record_keys = _mentioned_record_keys(graph, hit.uid, scope, providers)
+        elif structured is not None:
+            record_keys = _mentioned_record_keys(graph, hit.uid, scope, providers)
         all_facts.extend(facts)
         all_edge_ids.extend(edge_ids)
         source_keys = record_keys_by_source.setdefault(hit.name.strip(), set())
@@ -313,6 +339,8 @@ def run_chat_turn(
     if as_of:
         clock.append(f"record time as_of={as_of}")
     header = ("CLOCKS: " + "; ".join(clock) + "\n\n") if clock else ""
+    if structured is not None:
+        header += structured.preamble + "\n\n"
     context = header + "\n\n".join(context_blocks)
 
     response = client.responses.parse(
@@ -326,7 +354,15 @@ def run_chat_turn(
     token_usage.add(response.usage)
     parsed = response.output_parsed
 
-    used_record_keys = _used_record_keys(parsed.used_sources, record_keys_by_source)
+    if structured is not None:
+        # The structured list is the answer. Citing via used_sources would
+        # still be wrong if a block's neighborhood keys leaked assigned
+        # children (DATAOS-3833 PARENT_OF → 3839 / 4151). Own records only.
+        used_record_keys = set()
+        for keys in record_keys_by_source.values():
+            used_record_keys.update(keys)
+    else:
+        used_record_keys = _used_record_keys(parsed.used_sources, record_keys_by_source)
     citations_by_key = _resolve_records(graph, used_record_keys, scope)
 
     return ChatResult(

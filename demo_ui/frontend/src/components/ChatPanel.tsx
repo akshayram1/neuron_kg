@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import type { ConversationMessage, Highlight } from "../types";
+import MarkdownBody from "./MarkdownBody";
 
 const SAMPLE_QUESTIONS = [
   "What is currently being worked on?",
@@ -77,7 +78,11 @@ export default function ChatPanel({
           return (
             <article className={`message ${message.role}`} key={message.id}>
               <div className="message-role">{message.role === "assistant" ? "Neuron" : "You"}</div>
-              <div className="message-body">{message.content}</div>
+              <div className="message-body">
+                {message.role === "assistant"
+                  ? <MarkdownBody text={message.content} />
+                  : message.content}
+              </div>
               {message.result && (
                 <div className="answer-evidence">
                   <details>

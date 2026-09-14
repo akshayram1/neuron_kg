@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import secrets
 from uuid import uuid4
 
@@ -21,7 +22,9 @@ from connectors.notion.oauth import (
     NotionOAuthSettings, NotionStore, notion_state_db_path,
 )
 from graph import jira_pipeline as common_pipeline
+from graph import multigraph
 from graph import notion_pipeline as np
+from graph import vector_store as vector_store_module
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
 from graph.semantic_pass import run_semantic_pass
@@ -36,6 +39,7 @@ logger = logging.getLogger("uvicorn.error.notion_connector")
 
 class NotionSyncRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
+    graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
 
 
 def _components() -> tuple[NotionOAuthSettings, NotionStore]:
@@ -65,11 +69,14 @@ def _authorized(request: Request, store: NotionStore, workspace_id: str) -> None
 
 
 @router.get("/status")
-async def notion_status(request: Request, response: Response) -> dict:
+async def notion_status(
+    request: Request, response: Response,
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+) -> dict:
     _, store = _components()
     session_hash = store.session_hash(_session(request, response, True))
     return {"configured": True, "connections": store.list_connections(session_hash),
-            "runs": store.list_sync_runs(session_hash)}
+            "runs": store.list_sync_runs(session_hash, graph_name=graph_name)}
 
 
 @router.post("/oauth/start")
@@ -137,9 +144,15 @@ async def _run_sync(
         store.set_sync_run(run_id, "running", {
             **base, "phase": "ingesting", "current": f"Writing {total} Notion pages…",
         })
-        graph = get_graph()
+        target = multigraph.resolve(
+            payload.graph_name, data_dir=DATA_DIR,
+            base_falkor_name=os.getenv("FALKOR_GRAPH", "neuron"),
+            base_collection=vector_store_module.COLLECTION,
+        )
+        graph = get_graph(name=target.falkor_name)
         bootstrap_schema(graph)
-        ledger = ConnectorLedger(LEDGER_PATH)
+        vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
+        ledger = ConnectorLedger(target.ledger_path)
         np.write_workspace(graph, ledger, payload.workspace_id, connection.workspace_name)
         kept = written = 0
         for index, page in enumerate(pages, 1):
@@ -174,6 +187,7 @@ async def _run_sync(
             run_semantic_pass, graph, ledger,
             record_prefix=f"notion:{payload.workspace_id}:",
             on_progress=semantic_progress,
+            collection=target.qdrant_collection,
         )
         orphans_removed = common_pipeline.delete_orphaned_shared_entities(graph)
         result = {
@@ -208,7 +222,7 @@ async def start_sync(payload: NotionSyncRequest, request: Request) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     run_id = uuid4().hex
     try:
-        store.create_sync_run(run_id, payload.workspace_id)
+        store.create_sync_run(run_id, payload.workspace_id, graph_name=payload.graph_name)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     JOB_STORE.enqueue(run_id, "notion", {"request": payload.model_dump()})

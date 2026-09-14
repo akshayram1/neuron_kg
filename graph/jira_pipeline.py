@@ -1,8 +1,7 @@
 """Jira deterministic pass (plan.md §3 Pass A, Block 6). Builds Project/
 WorkItem/Person nodes and structural edges straight from Jira API fields —
-zero LLM. The semantic pass (Decision/Term/System extraction from free text)
-is Block 7; this module's only connection to it is flagging each record's
-`semantic_status` so that pass knows what's waiting.
+zero LLM. Jira records are committed `NOT_APPLICABLE` — the semantic pass
+runs only on Notion prose.
 
 `project_record`/`issue_record` are ported near-verbatim from the source
 project's `graph/jira_ingest.py` — they only build `SourceRecord`s and never
@@ -37,12 +36,12 @@ logger = logging.getLogger("neuron.jira_pipeline")
 _embed_client: OpenAI | None = None
 
 
-def _embed_now(uid: str, label: str, text: str) -> None:
+def _embed_now(uid: str, label: str, text: str, collection: str = vector_store.COLLECTION) -> None:
     """Embed and upsert a single node immediately, at write time.
 
-    Only used for records that will NEVER reach the semantic pass (empty
-    description -> zero chunks -> `SemanticStatus.NOT_APPLICABLE`). Without
-    this, such a WorkItem is fulltext-searchable but has no vector at all --
+    Used for Pass A records that never reach the semantic pass
+    (`NOT_APPLICABLE`). Without this, a WorkItem/Commit is fulltext-searchable
+    but has no vector at all --
     verified on real data: an issue with an empty description ranked #1 on
     a fulltext-only query, yet never appeared in `hybrid_search`'s top
     results, because RRF (`graph/search.py`) sums a rank contribution from
@@ -57,10 +56,12 @@ def _embed_now(uid: str, label: str, text: str) -> None:
     if _embed_client is None:
         _embed_client = OpenAI()
     model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-    response = _embed_client.embeddings.create(model=model, input=[text])
+    response = _embed_client.embeddings.create(
+        model=model, input=[vector_store.truncate_for_embedding(text)],
+    )
     vector_store.upsert_vectors(vector_store.client(), [
         {"uid": uid, "label": label, "embedding": response.data[0].embedding}
-    ])
+    ], collection=collection)
 
 
 def _time(value: str) -> datetime | None:
@@ -155,12 +156,10 @@ def write_project(
     # actual description instead, or every project would queue a pointless
     # LLM call that can only ever extract nothing (plan.md §4: don't spend
     # budget where there's no real free text).
-    if project.description.strip():
-        ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
-        semantic_status = SemanticStatus.PENDING
-    else:
-        semantic_status = SemanticStatus.NOT_APPLICABLE
-    ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid, semantic_status=semantic_status)
+    # Jira is Pass A only: API fields + exact anchors. Free text stays on
+    # the node for search; it is not queued for LLM extraction.
+    ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
+                  semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
 
 
@@ -171,6 +170,7 @@ def write_issue(
     project: JiraProject,
     site: JiraSite,
     connection_id: str,
+    collection: str = vector_store.COLLECTION,
 ) -> RecordAction:
     record = issue_record(issue, project, site, connection_id)
     prepared = prepare_record(record, ledger)
@@ -289,16 +289,9 @@ def write_issue(
         issue.key, len(edges_supported), [e.rel_type for e in edges_supported],
     )
 
-    if issue.description.strip():
-        ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
-        semantic_status = SemanticStatus.PENDING
-    else:
-        # This WorkItem will never reach the semantic pass, so it would
-        # otherwise never get a vector at all -- see `_embed_now`'s docstring
-        # for the real search-ranking bug this caused.
-        semantic_status = SemanticStatus.NOT_APPLICABLE
-        _embed_now(wi_uid, "WorkItem", record.content)
-    ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=wi_uid, semantic_status=semantic_status)
+    _embed_now(wi_uid, "WorkItem", record.content, collection=collection)
+    ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=wi_uid,
+                  semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
 
 

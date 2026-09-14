@@ -12,6 +12,7 @@ const POLL_MS = 1500;
 
 interface Props {
   open: boolean;
+  graphName: string;
   onClose: () => void;
   onSourcesChanged: (sources: GitHubSource[]) => void;
   onSyncComplete: () => void;
@@ -22,7 +23,7 @@ function when(value: string | null) {
   return value ? `Synced ${new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))}` : "Never synced";
 }
 
-export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
+export default function GitHubPanel({ open, graphName, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
   const [installations, setInstallations] = useState<GitHubInstallation[]>([]);
   const [sources, setSources] = useState<GitHubSource[]>([]);
   const [repositories, setRepositories] = useState<Record<number, GitHubRepository[]>>({});
@@ -39,7 +40,7 @@ export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncCom
   const loadStatus = useCallback(async () => {
     setLoading(true);
     try {
-      const status = await getGitHubStatus();
+      const status = await getGitHubStatus(graphName);
       setInstallations(status.installations);
       setSources(status.sources);
       onSourcesChanged(status.sources);
@@ -68,7 +69,7 @@ export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncCom
       setError(reason instanceof Error ? reason.message : "Could not load GitHub connections.");
       return null;
     } finally { setLoading(false); }
-  }, [onSourcesChanged, onTokenUsage]);
+  }, [graphName, onSourcesChanged, onTokenUsage]);
 
   useEffect(() => { if (open) void loadStatus(); }, [open, loadStatus]);
 
@@ -134,7 +135,7 @@ export default function GitHubPanel({ open, onClose, onSourcesChanged, onSyncCom
     if (!repositoryId) return setError("Select one repository first.");
     if (!selectedTypes.length && !commits) return setError("Select .py, .md, or commit messages.");
     try {
-      const started = await startGitHubSync(installationId, repositoryId, selectedTypes, commits);
+      const started = await startGitHubSync(installationId, repositoryId, selectedTypes, commits, graphName);
       setRuns((current) => ({ ...current, [installationId]: {
         run_id: started.run_id, installation_id: installationId, repository_id: repositoryId,
         status: "queued", started_at: new Date().toISOString(), finished_at: null,

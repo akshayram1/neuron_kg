@@ -194,9 +194,6 @@ class NotionStore:
                     result_json TEXT,
                     error TEXT
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS notion_one_active_sync_per_workspace
-                    ON notion_sync_runs(workspace_id)
-                    WHERE status IN ('queued', 'running');
                 CREATE TABLE IF NOT EXISTS notion_session_connections (
                     session_hash TEXT NOT NULL,
                     workspace_id TEXT NOT NULL,
@@ -216,6 +213,24 @@ class NotionStore:
                 db.execute(
                     "ALTER TABLE oauth_states ADD COLUMN session_hash TEXT NOT NULL DEFAULT ''"
                 )
+            # Multi-graph migration (same idiom as connectors/core/ledger.py).
+            sync_run_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(notion_sync_runs)").fetchall()
+            }
+            if "graph_name" not in sync_run_columns:
+                db.execute(
+                    "ALTER TABLE notion_sync_runs ADD COLUMN graph_name TEXT NOT NULL DEFAULT 'default'"
+                )
+            # Widen "one active sync per workspace" to "...per workspace per
+            # graph" -- otherwise syncing the same workspace into a second
+            # graph while the first is still running would be wrongly
+            # rejected as a conflict.
+            db.execute("DROP INDEX IF EXISTS notion_one_active_sync_per_workspace")
+            db.execute(
+                """CREATE UNIQUE INDEX notion_one_active_sync_per_workspace
+                   ON notion_sync_runs(workspace_id, graph_name)
+                   WHERE status IN ('queued', 'running')"""
+            )
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -474,13 +489,13 @@ class NotionStore:
                 (self._now(), error, workspace_id),
             )
 
-    def create_sync_run(self, run_id: str, workspace_id: str) -> None:
+    def create_sync_run(self, run_id: str, workspace_id: str, graph_name: str = "default") -> None:
         try:
             with self._connect() as db:
                 db.execute(
-                    """INSERT INTO notion_sync_runs(run_id, workspace_id, status, started_at)
-                       VALUES (?, ?, 'queued', ?)""",
-                    (run_id, workspace_id, self._now()),
+                    """INSERT INTO notion_sync_runs(run_id, workspace_id, status, started_at, graph_name)
+                       VALUES (?, ?, 'queued', ?, ?)""",
+                    (run_id, workspace_id, self._now(), graph_name),
                 )
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("A sync is already queued or running for this workspace") from exc
@@ -534,13 +549,17 @@ class NotionStore:
         result["result"] = json.loads(result.pop("result_json")) if row["result_json"] else None
         return result
 
-    def list_sync_runs(self, session_hash: str, limit: int = 30) -> list[dict[str, Any]]:
+    def list_sync_runs(
+        self, session_hash: str, limit: int = 30, graph_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        graph_clause = "AND run.graph_name=?" if graph_name is not None else ""
         with self._connect() as db:
             rows = db.execute(
-                """SELECT run.* FROM notion_sync_runs run
+                f"""SELECT run.* FROM notion_sync_runs run
                    JOIN notion_session_connections ses ON ses.workspace_id=run.workspace_id
-                   WHERE ses.session_hash=? ORDER BY run.started_at DESC LIMIT ?""",
-                (session_hash, limit),
+                   WHERE ses.session_hash=? {graph_clause}
+                   ORDER BY run.started_at DESC LIMIT ?""",
+                (session_hash, *([graph_name] if graph_name is not None else []), limit),
             ).fetchall()
         output = []
         for row in rows:

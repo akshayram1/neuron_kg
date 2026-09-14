@@ -11,9 +11,9 @@ import SyncProgress from "./SyncProgress";
 const delay = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 const DEFAULT_TYPES = [".py", ".md"];
 
-interface Props { open: boolean; onClose: () => void; onSourcesChanged: (sources: OAuthConnectorSource[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
+interface Props { open: boolean; graphName: string; onClose: () => void; onSourcesChanged: (sources: OAuthConnectorSource[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
 
-export default function BitbucketPanel({ open, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
+export default function BitbucketPanel({ open, graphName, onClose, onSourcesChanged, onSyncComplete, onTokenUsage }: Props) {
   const [connections, setConnections] = useState<OAuthConnectorConnection[]>([]);
   const [sources, setSources] = useState<OAuthConnectorSource[]>([]);
   const [workspaces, setWorkspaces] = useState<Record<string, BitbucketWorkspace>>({});
@@ -39,7 +39,7 @@ export default function BitbucketPanel({ open, onClose, onSourcesChanged, onSync
 
   const loadStatus = useCallback(async () => {
     setLoading(true); setError(null);
-    try { const value = await getBitbucketStatus(); if (!mounted.current) return value;
+    try { const value = await getBitbucketStatus(graphName); if (!mounted.current) return value;
       setConnections(value.connections); setSources(value.sources); onSourcesChangedRef.current(value.sources);
       const latestRuns: Record<string, BitbucketSyncRun> = {};
       for (const run of value.runs ?? []) {
@@ -53,7 +53,7 @@ export default function BitbucketPanel({ open, onClose, onSourcesChanged, onSync
       return value;
     } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "Could not load Bitbucket connections."); return null;
     } finally { if (mounted.current) setLoading(false); }
-  }, []);
+  }, [graphName]);
   useEffect(() => { if (open) void loadStatus(); }, [open, loadStatus]);
   useEffect(() => { if (!open) setConnecting(false); }, [open]);
   useEffect(() => {
@@ -89,7 +89,7 @@ export default function BitbucketPanel({ open, onClose, onSourcesChanged, onSync
       for (let index = 0; index < 200; index += 1) {
         await delay(1500);
         if (!mounted.current || !openRef.current) { if (!popup.closed) popup.close(); return; }
-        const value = await getBitbucketStatus();
+        const value = await getBitbucketStatus(graphName);
         if (!mounted.current || !openRef.current) { if (!popup.closed) popup.close(); return; }
         if (value.connections.some((item) => !before.has(item.connection_id))) {
           setConnections(value.connections); setSources(value.sources); onSourcesChangedRef.current(value.sources); if (!popup.closed) popup.close(); return;
@@ -144,7 +144,7 @@ export default function BitbucketPanel({ open, onClose, onSourcesChanged, onSync
     const branch = selectedBranch[connectionId] ?? repository?.main_branch ?? "";
     if (!workspace || !repository) { setError("Select one Bitbucket workspace and repository first."); return; }
     if (!selectedTypes.length && !commits && !prs) { setError("Select .py, .md, commit messages, or pull requests."); return; }
-    try { const started = await startBitbucketSync(connectionId, workspace, repository.uuid, branch, selectedTypes, commits, prs);
+    try { const started = await startBitbucketSync(connectionId, workspace, repository.uuid, branch, selectedTypes, commits, prs, graphName);
       setRuns((current) => ({ ...current, [connectionId]: {
         run_id: started.run_id, connection_id: connectionId,
         source_id: `${workspace}:${repository.slug}`, status: "queued",

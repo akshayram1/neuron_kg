@@ -31,3 +31,14 @@ def test_question_clocks_split_world_and_record():
     at, as_of = infer_query_clocks("what did we know about Argus in January 2026")
     assert at is None
     assert as_of is not None and as_of.startswith("2026-01-01")
+
+
+def test_jira_issue_key_is_not_a_year():
+    assert infer_query_clocks("for DATAOS-4346 ticket what has been done") == (None, None)
+    assert infer_query_clocks("tell me about HERA-101") == (None, None)
+
+
+def test_iso_date_still_parses_next_to_words():
+    at, as_of = infer_query_clocks("as of 2026-03-01 what was open")
+    assert at is not None and at.startswith("2026-03-01")
+    assert as_of is None

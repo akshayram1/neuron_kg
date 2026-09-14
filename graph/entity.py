@@ -62,6 +62,9 @@ def _entity(
         WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
         RETURN n.uid, labels(n)[0], n.name, n.search_text, n.definition,
                n.statement, n.purpose, n.status, n.issue_key, n.url,
+               n.email, n.sha, n.path, n.language, n.issue_type, n.authored_at,
+               n.last_edited_time, n.state, n.pr_ref, n.source_branch,
+               n.destination_branch, n.default_branch,
                collect(DISTINCT sr.provider), collect(DISTINCT sr.name)
         """,
         params={"uid": uid, **params, **({"providers": providers} if providers else {})},
@@ -69,11 +72,30 @@ def _entity(
     if not rows:
         return None
     row = rows[0]
-    summary = row[4] or row[5] or row[6] or (row[3][:200] if row[3] else "") or ""
+    search_text = row[3] or ""
+    summary = row[4] or row[5] or row[6] or (search_text[:200] if search_text else "") or ""
+    fields = {
+        key: value for key, value in {
+            "email": row[10],
+            "sha": row[11],
+            "path": row[12],
+            "language": row[13],
+            "issueType": row[14],
+            "authoredAt": row[15],
+            "lastEditedTime": row[16],
+            "state": row[17],
+            "prRef": row[18],
+            "sourceBranch": row[19],
+            "destinationBranch": row[20],
+            "defaultBranch": row[21],
+        }.items() if value
+    }
     return {
         "id": row[0], "type": row[1], "label": row[2] or row[0],
         "summary": summary, "status": row[7], "issueKey": row[8], "url": row[9],
-        "providers": row[10] or [], "documents": sorted(row[11] or []),
+        "body": search_text,
+        "fields": fields,
+        "providers": row[22] or [], "documents": sorted(row[23] or []),
     }
 
 

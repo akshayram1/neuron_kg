@@ -19,8 +19,12 @@ _MONTHS = {
     "december": 12, "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
 }
+# Do not treat `DATAOS-4346` as year 4346 (verified: chat set
+# world-time at=4346-01-01 and then said the ticket was absent).
+# A leading project-key hyphen, or a year outside 19xx/20xx, is not a date.
 _ISO_RE = re.compile(
-    r"\b(\d{4})(?:-(\d{2})(?:-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:Z|[+-]\d{2}:?\d{2})?)?)?)?\b"
+    r"(?<![A-Za-z0-9]-)\b((?:19|20)\d{2})"
+    r"(?:-(\d{2})(?:-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:Z|[+-]\d{2}:?\d{2})?)?)?)?\b"
 )
 _MONTH_YEAR_RE = re.compile(
     r"\b(" + "|".join(_MONTHS) + r")\s+(\d{4})\b", re.IGNORECASE

@@ -3,6 +3,12 @@ export interface AppConfig {
   defaultProviders: string[];
 }
 
+export interface GraphInfo {
+  name: string;
+  displayName: string;
+  createdAt: string;
+}
+
 export interface GraphNode {
   id: string;
   label: string;
@@ -109,7 +115,13 @@ export interface EntityHistoryEvent {
 }
 
 export interface EntityDetail {
-  entity: GraphNode & { status?: string | null; issueKey?: string | null; url?: string | null };
+  entity: GraphNode & {
+    status?: string | null;
+    issueKey?: string | null;
+    url?: string | null;
+    body?: string | null;
+    fields?: Record<string, string>;
+  };
   facts: EntityFact[];
   past: EntityFact[];
   derived: EntityFact[];

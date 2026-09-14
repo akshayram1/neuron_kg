@@ -11,7 +11,8 @@ from connectors.core.models import SourceRecord
 from graph import writer as w
 from graph.derived import materialize_around
 from graph.bridge.anchors import (
-    commit_shas, evidence_excerpt, jira_keys, repository_names, urls,
+    commit_shas, evidence_excerpt, jira_keys, pull_request_refs,
+    repository_names, urls,
 )
 
 
@@ -26,6 +27,7 @@ def anchor_properties(record: SourceRecord) -> dict[str, list[str]]:
         "anchor_jira_keys": sorted(jira_keys(record.content)),
         "anchor_repository_names": sorted(repository_names(record.content)),
         "anchor_commit_shas": sorted(commit_shas(record.content)),
+        "anchor_pull_request_refs": sorted(pull_request_refs(record.content)),
         "anchor_urls": sorted(urls(record.content)),
     }
 
@@ -72,6 +74,34 @@ def _targets(graph: Graph, record: SourceRecord) -> list[dict]:
             found[uid] = {"uid": uid, "label": label, "name": name,
                           "anchor": anchor, "providers": providers or []}
 
+    pr_refs = sorted(pull_request_refs(record.content))
+    if pr_refs:
+        qualified = [ref.lower() for ref in pr_refs if not ref.startswith("#")]
+        bare = [ref.lower() for ref in pr_refs if ref.startswith("#")]
+        if qualified:
+            rows = graph.query(
+                """MATCH (n:PullRequest)-[:MENTIONED_IN]->(sr:SourceRecord)
+                   WHERE toLower(n.pr_ref) IN $values
+                   RETURN DISTINCT n.uid, labels(n)[0], n.name, n.pr_ref,
+                          collect(DISTINCT sr.provider)""",
+                params={"values": qualified},
+            ).result_set
+            for uid, label, name, anchor, providers in rows:
+                found[uid] = {"uid": uid, "label": label, "name": name,
+                              "anchor": anchor, "providers": providers or []}
+        if bare:
+            rows = graph.query(
+                """MATCH (n:PullRequest)-[:MENTIONED_IN]->(sr:SourceRecord)
+                   WHERE any(value IN $values WHERE toLower(n.pr_ref) ENDS WITH value)
+                   RETURN DISTINCT n.uid, labels(n)[0], n.name, n.pr_ref,
+                          collect(DISTINCT sr.provider)""",
+                params={"values": bare},
+            ).result_set
+            if len(rows) == 1:
+                uid, label, name, anchor, providers = rows[0]
+                found[uid] = {"uid": uid, "label": label, "name": name,
+                              "anchor": anchor, "providers": providers or []}
+
     exact_urls = sorted(urls(record.content))
     if exact_urls:
         rows = graph.query(
@@ -91,7 +121,9 @@ def _targets(graph: Graph, record: SourceRecord) -> list[dict]:
 def _relation(from_label: str, to_label: str) -> str:
     if from_label in ("Commit", "PullRequest") and to_label == "WorkItem":
         return "IMPLEMENTS"
-    if from_label == "Document" and to_label in {"WorkItem", "Commit", "Repository", "SourceFile"}:
+    if from_label == "Document" and to_label in {
+        "WorkItem", "Commit", "PullRequest", "Repository", "SourceFile",
+    }:
         return "DOCUMENTS"
     return "REFERENCES"
 
@@ -134,6 +166,7 @@ def resolve_backlinks_for_target(
     jira_key: str | None = None,
     repository_name: str | None = None,
     commit_sha: str | None = None,
+    pull_request_ref: str | None = None,
     url: str | None = None,
 ) -> list[RecordEdgeRef]:
     """Resolve records ingested *before* a newly available exact target.
@@ -156,6 +189,14 @@ def resolve_backlinks_for_target(
             "WHERE toLower($commit_sha) STARTS WITH value)"
         )
         params["commit_sha"] = commit_sha.lower()
+    if pull_request_ref:
+        ref = pull_request_ref.lower()
+        predicates.append(
+            "$pr_ref IN coalesce(sr.anchor_pull_request_refs, []) "
+            "OR any(value IN coalesce(sr.anchor_pull_request_refs, []) "
+            "WHERE value STARTS WITH '#' AND $pr_ref ENDS WITH value)"
+        )
+        params["pr_ref"] = ref
     if url:
         predicates.append("$url IN coalesce(sr.anchor_urls, [])")
         params["url"] = url.rstrip("/")
@@ -185,7 +226,9 @@ def resolve_backlinks_for_target(
             continue
         source_label = label_rows[0][0]
         relation = _relation(source_label, target_label)
-        evidence_anchor = jira_key or repository_name or commit_sha or url or target_uid
+        evidence_anchor = (
+            jira_key or repository_name or commit_sha or pull_request_ref or url or target_uid
+        )
         w.upsert_fact_edges(graph, relation, source_label, target_label, [{
             "from_uid": entry.primary_node_uid, "to_uid": target_uid,
             "source_record_keys": [record_key],

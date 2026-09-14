@@ -40,6 +40,7 @@ from demo_ui.backend.jira_routes import router as jira_router
 from demo_ui.backend.notion_routes import router as notion_router
 from demo_ui.backend.access import access_scope_for_request
 from demo_ui.backend.job_worker import run_worker
+from graph import multigraph
 from graph import vector_store
 from graph.chat import run_chat_turn
 from graph.entity import fetch_entity_detail
@@ -58,6 +59,15 @@ logger = logging.getLogger("uvicorn.error.neuron")
 _worker_stop: asyncio.Event | None = None
 _worker_task: asyncio.Task | None = None
 LEDGER_PATH = DATA_DIR / "connector_ledger.sqlite3"
+GRAPH_REGISTRY = multigraph.GraphRegistry(DATA_DIR / "graphs.sqlite3")
+
+
+def _resolve(graph_name: str) -> multigraph.GraphTarget:
+    return multigraph.resolve(
+        graph_name, data_dir=DATA_DIR,
+        base_falkor_name=os.getenv("FALKOR_GRAPH", "neuron"),
+        base_collection=vector_store.COLLECTION,
+    )
 
 
 class ChatRequest(BaseModel):
@@ -65,6 +75,12 @@ class ChatRequest(BaseModel):
     providers: list[str] = Field(default_factory=lambda: ["jira", "github", "bitbucket", "notion"])
     at: str | None = None
     as_of: str | None = None
+    graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
+
+
+class GraphCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    display_name: str | None = Field(default=None, max_length=100)
 
 app = FastAPI(
     title="Neuron context graph API",
@@ -127,18 +143,48 @@ async def config() -> dict:
     return {"providers": providers, "defaultProviders": providers}
 
 
-@app.get("/api/graph")
-async def graph(request: Request, providers: list[str] | None = Query(default=None)) -> dict:
+@app.get("/api/graphs")
+async def list_graphs() -> dict:
+    return {"graphs": GRAPH_REGISTRY.list()}
+
+
+@app.post("/api/graphs", status_code=201)
+async def create_graph(payload: GraphCreateRequest) -> dict:
+    """Register a new named graph and pre-create its FalkorDB indexes +
+    Qdrant collection, so the very first sync into it isn't the thing that
+    creates them (and the UI can show it as an existing, empty graph
+    immediately, before any data has been synced)."""
     try:
-        view = fetch_graph(get_graph(), access_scope_for_request(request), providers)
+        GRAPH_REGISTRY.create(payload.name, payload.display_name)
+    except multigraph.InvalidGraphName as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    target = _resolve(payload.name)
+    bootstrap_schema(get_graph(name=target.falkor_name))
+    vector_store.ensure_collection(vector_store.client(), collection=target.qdrant_collection)
+    return {"name": target.name}
+
+
+@app.get("/api/graph")
+async def graph(
+    request: Request, providers: list[str] | None = Query(default=None),
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+) -> dict:
+    target = _resolve(graph_name)
+    try:
+        view = fetch_graph(get_graph(name=target.falkor_name), access_scope_for_request(request), providers)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Could not load FalkorDB graph: {exc}") from exc
     return {"groups": providers or ["jira", "github", "bitbucket", "notion"], **view}
 
 
 @app.get("/api/sources")
-async def sources(request: Request) -> dict:
-    return {"sources": fetch_sources(get_graph(), access_scope_for_request(request))}
+async def sources(
+    request: Request, graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+) -> dict:
+    target = _resolve(graph_name)
+    return {"sources": fetch_sources(get_graph(name=target.falkor_name), access_scope_for_request(request))}
 
 
 @app.get("/api/entities/{uid}")
@@ -147,11 +193,13 @@ async def entity_detail(
     at: str | None = Query(default=None),
     as_of: str | None = Query(default=None),
     providers: list[str] | None = Query(default=None),
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
 ) -> dict:
     """Relations (current + past), record-axis history, and derived proofs."""
+    target = _resolve(graph_name)
     try:
         detail = fetch_entity_detail(
-            get_graph(), access_scope_for_request(request), uid,
+            get_graph(name=target.falkor_name), access_scope_for_request(request), uid,
             at=at, as_of=as_of, providers=providers,
         )
     except ValueError as exc:
@@ -166,11 +214,13 @@ async def fact_history(
     fact_uid: str, request: Request,
     valid_at: str | None = Query(default=None),
     observed_at: str | None = Query(default=None),
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
 ) -> dict:
     """Audit a fact or select business-time / transaction-time state."""
+    target = _resolve(graph_name)
     try:
         intervals = fetch_fact_history(
-            get_graph(), access_scope_for_request(request), fact_uid,
+            get_graph(name=target.falkor_name), access_scope_for_request(request), fact_uid,
             valid_at=valid_at, observed_at=observed_at,
         )
     except ValueError as exc:
@@ -179,10 +229,14 @@ async def fact_history(
 
 
 @app.get("/api/export/skos")
-async def export_skos(request: Request, providers: list[str] | None = Query(default=None)) -> PlainTextResponse:
+async def export_skos(
+    request: Request, providers: list[str] | None = Query(default=None),
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+) -> PlainTextResponse:
     """Download the graph as SKOS RDF (Turtle) — plan.md §6b.1."""
+    target = _resolve(graph_name)
     try:
-        view = fetch_graph(get_graph(), access_scope_for_request(request), providers)
+        view = fetch_graph(get_graph(name=target.falkor_name), access_scope_for_request(request), providers)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Could not load FalkorDB graph: {exc}") from exc
     turtle = build_skos_turtle(view["nodes"], view["edges"])
@@ -193,36 +247,46 @@ async def export_skos(request: Request, providers: list[str] | None = Query(defa
 
 
 @app.post("/api/admin/clear-graph")
-async def clear_graph() -> dict:
-    """Wipe the knowledge graph and its vector projection for a fresh sync.
+async def clear_graph(graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME)) -> dict:
+    """Wipe ONE named graph's knowledge graph and vector projection for a
+    fresh sync.
 
-    Deliberately scoped to exactly the `neuron` FalkorDB graph -- other
-    graphs sharing this Redis instance (a `GRAPH.COPY` backup, or the old
-    graphiti_context_explorer project's graphs) are untouched. Also clears
-    `connector_ledger.sqlite3`: without that, every connector would see an
-    unchanged content hash on the next sync and skip writing anything back
-    into the now-empty graph. OAuth connections (Jira/GitHub/Notion/Bitbucket)
-    are never touched here -- reconnecting Bitbucket in particular required
-    an admin round-trip, so nothing in this endpoint may force that again.
+    Deliberately scoped to exactly the requested graph_name's FalkorDB graph
+    and Qdrant collection -- every other graph (and other graphs sharing this
+    Redis instance, like a `GRAPH.COPY` backup or the old
+    graphiti_context_explorer project's graphs) is untouched. This used to be
+    an unconditional global wipe; it was scoped per-graph specifically
+    because a single-provider cleanup once destroyed unrelated, already-
+    completed work in a different provider's data -- see the
+    `feedback_scoped_cleanup` project memory. Also clears that graph's own
+    ledger file: without that, every connector would see an unchanged
+    content hash on the next sync and skip writing anything back into the
+    now-empty graph. OAuth connections (Jira/GitHub/Notion/Bitbucket) are
+    never touched here -- they are shared across every graph, not owned by
+    any one of them.
     """
-    graph = get_graph()
+    target = _resolve(graph_name)
+    graph = get_graph(name=target.falkor_name)
     before = graph.query("MATCH (n) RETURN count(n)").result_set[0][0]
     graph.delete()
-    bootstrap_schema(get_graph())
+    bootstrap_schema(get_graph(name=target.falkor_name))
 
     client = vector_store.client()
-    if client.collection_exists(vector_store.COLLECTION):
-        client.delete_collection(vector_store.COLLECTION)
-    vector_store.ensure_collection(client)
+    if client.collection_exists(target.qdrant_collection):
+        client.delete_collection(target.qdrant_collection)
+    vector_store.ensure_collection(client, collection=target.qdrant_collection)
 
-    ledger = ConnectorLedger(LEDGER_PATH)
+    ledger = ConnectorLedger(target.ledger_path)
     with sqlite3.connect(ledger.path) as db:
         db.execute("DELETE FROM source_records")
         db.execute("DELETE FROM source_chunks")
         db.execute("DELETE FROM record_edges")
 
-    logger.info("cleared neuron graph: %s nodes removed, ledger and vector store reset", before)
-    return {"cleared": True, "nodes_removed": before}
+    logger.info(
+        "cleared graph %r: %s nodes removed, its ledger and vector collection reset",
+        target.name, before,
+    )
+    return {"cleared": True, "nodes_removed": before, "graph": target.name}
 
 
 @app.post("/api/chat")
@@ -234,10 +298,11 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
     Naming the body `request` shadowed it and made `access_scope_for_request`
     read `.cookies` off a Pydantic model.
     """
+    target = _resolve(payload.graph_name)
     try:
         result = await run_in_threadpool(
             run_chat_turn,
-            get_graph(),
+            get_graph(name=target.falkor_name),
             OpenAI(api_key=os.environ.get("OPENAI_API_KEY")),
             payload.message.strip(),
             # Not $LLM_MODEL — that's extraction's model, chat wants its own
@@ -246,6 +311,7 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
             providers=payload.providers,
             scope=access_scope_for_request(request),
             at=payload.at, as_of=payload.as_of,
+            collection=target.qdrant_collection,
         )
     except Exception as exc:
         logger.exception("Grounded chat failed")

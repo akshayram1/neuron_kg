@@ -22,10 +22,16 @@ const TYPE_COLORS: Record<string, string> = {
   Workspace: "#f2f4f7",
   SourceFile: "#72b7ff",
   Commit: "#84d6ba",
+  PullRequest: "#9ad0ff",
   Document: "#f2f4f7",
   Entity: "#91a0b5",
   SourceRecord: "#7db6ff",
 };
+
+const TYPE_ORDER = [
+  "Project", "Workspace", "Repository", "WorkItem", "SourceFile", "Commit",
+  "PullRequest", "Document", "Person", "Term", "Decision", "System",
+];
 
 interface GraphCanvasProps {
   graph: GraphPayload | null;
@@ -134,6 +140,13 @@ export default function GraphCanvas({
       .sort((left, right) => right.score - left.score || left.title.localeCompare(right.title))
       .slice(0, 10);
   }, [graph, searchQuery]);
+
+  const legendTypes = useMemo(() => {
+    const present = new Set((graph?.nodes ?? []).map((node) => node.type));
+    const known = TYPE_ORDER.filter((type) => present.has(type));
+    const extra = [...present].filter((type) => !TYPE_ORDER.includes(type)).sort();
+    return [...known, ...extra];
+  }, [graph]);
 
   useEffect(() => {
     if (!containerRef.current || !graph) return;
@@ -406,6 +419,34 @@ export default function GraphCanvas({
       </div>
       <div ref={containerRef} className="graph-canvas" aria-label="Interactive knowledge graph" />
       {!graph && <div className="graph-empty">Connecting to the graph…</div>}
+      {graph && legendTypes.length > 0 && (
+        <aside className="map-legend" aria-label="Graph legend">
+          <div className="legend-title">Legend</div>
+          <div className="legend-section">
+            <span className="legend-rule">Nodes</span>
+            <div className="legend-items">
+              {legendTypes.map((type) => (
+                <span key={type}>
+                  <i
+                    className="shape-marker"
+                    style={{ background: TYPE_COLORS[type] ?? TYPE_COLORS.Entity }}
+                    aria-hidden="true"
+                  />
+                  {type}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="legend-section">
+            <span className="legend-rule">Edges</span>
+            <div className="legend-items">
+              <span><i className="edge-swatch" aria-hidden="true" /> Live</span>
+              <span className="gold-key"><i className="edge-swatch is-derived" aria-hidden="true" /> Derived</span>
+              <span><i className="edge-swatch is-superseded" aria-hidden="true" /> Superseded</span>
+            </div>
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

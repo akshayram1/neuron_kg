@@ -86,10 +86,28 @@ class OAuthConnectorStore:
                     error TEXT,
                     PRIMARY KEY(provider, run_id)
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS oauth_one_active_sync_per_source
-                    ON oauth_sync_runs(provider, connection_id, source_id)
-                    WHERE status IN ('queued', 'running');
                 """
+            )
+            # `executescript`'s CREATE TABLE IF NOT EXISTS above only helps a
+            # brand-new file -- an existing oauth_connectors.sqlite3 (every
+            # user before the multi-graph feature) needs this column added
+            # explicitly, same idempotent-migration idiom as
+            # connectors/core/ledger.py.
+            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(oauth_sync_runs)")}
+            if "graph_name" not in columns:
+                db.execute(
+                    "ALTER TABLE oauth_sync_runs ADD COLUMN graph_name TEXT NOT NULL DEFAULT 'default'"
+                )
+            # The "one active sync per source" index predates graph_name and
+            # would otherwise wrongly block syncing the same Jira/Bitbucket/
+            # etc. source into a *second* graph just because a sync is
+            # already running for it in the first -- widen it to include
+            # graph_name so only same-source-same-graph is exclusive.
+            db.execute("DROP INDEX IF EXISTS oauth_one_active_sync_per_source")
+            db.execute(
+                """CREATE UNIQUE INDEX oauth_one_active_sync_per_source
+                   ON oauth_sync_runs(provider, connection_id, source_id, graph_name)
+                   WHERE status IN ('queued', 'running')"""
             )
         try:
             self.path.chmod(0o600)
@@ -314,14 +332,16 @@ class OAuthConnectorStore:
                 )
             return len(stale)
 
-    def create_run(self, run_id: str, connection_id: str, source_id: str) -> None:
+    def create_run(
+        self, run_id: str, connection_id: str, source_id: str, graph_name: str = "default",
+    ) -> None:
         try:
             with self._connect() as db:
                 db.execute(
                     """INSERT INTO oauth_sync_runs(
-                           provider, run_id, connection_id, source_id, status, started_at
-                       ) VALUES (?, ?, ?, ?, 'queued', ?)""",
-                    (self.provider, run_id, connection_id, source_id, self._now()),
+                           provider, run_id, connection_id, source_id, status, started_at, graph_name
+                       ) VALUES (?, ?, ?, ?, 'queued', ?, ?)""",
+                    (self.provider, run_id, connection_id, source_id, self._now(), graph_name),
                 )
         except sqlite3.IntegrityError as exc:
             raise RuntimeError(f"A {self.provider} sync is already active for this source") from exc
@@ -364,16 +384,24 @@ class OAuthConnectorStore:
         value["result"] = json.loads(value.pop("result_json")) if value.get("result_json") else None
         return value
 
-    def list_runs(self, session_hash: str, limit: int = 25) -> list[dict[str, Any]]:
-        """Recent runs visible to this browser session, newest first."""
+    def list_runs(
+        self, session_hash: str, limit: int = 25, graph_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Recent runs visible to this browser session, newest first.
+
+        `graph_name=None` returns every graph's runs (used nowhere today, kept
+        for scripts/debugging); routes always pass the current graph so a
+        connection's token-usage/cost total only reflects the graph in view,
+        even though the connection itself is shared across all graphs."""
+        graph_clause = "AND run.graph_name=?" if graph_name is not None else ""
         with self._connect() as db:
             rows = db.execute(
-                """SELECT run.* FROM oauth_sync_runs run
+                f"""SELECT run.* FROM oauth_sync_runs run
                    JOIN oauth_session_connections session
                      ON session.provider=run.provider AND session.connection_id=run.connection_id
-                   WHERE run.provider=? AND session.session_hash=?
+                   WHERE run.provider=? AND session.session_hash=? {graph_clause}
                    ORDER BY run.started_at DESC LIMIT ?""",
-                (self.provider, session_hash, limit),
+                (self.provider, session_hash, *([graph_name] if graph_name is not None else []), limit),
             ).fetchall()
         output: list[dict[str, Any]] = []
         for row in rows:

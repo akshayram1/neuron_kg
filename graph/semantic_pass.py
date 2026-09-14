@@ -47,6 +47,20 @@ from graph.token_usage import TokenUsage
 
 logger = logging.getLogger("neuron.semantic_pass")
 
+
+def evidence_in_chunk(evidence: str | None, chunk_text: str) -> bool:
+    """True when the claimed quote actually appears in the source chunk.
+
+    The extraction schema asks for a verbatim span. Constrained decoding
+    still lets a weak model paraphrase; that would silently break provenance
+    if we stored it. Empty evidence is treated as missing, not verbatim.
+    """
+    if not evidence or not evidence.strip():
+        return False
+    needle = " ".join(evidence.casefold().split())
+    haystack = " ".join(chunk_text.casefold().split())
+    return bool(needle) and needle in haystack
+
 _SEMANTIC_LABELS = {"Decision", "Term", "System"}
 _ENTITY_TYPE_TO_LABEL = {
     "work_item": "WorkItem", "project": "Project", "repository": "Repository",
@@ -163,6 +177,7 @@ def _write_extraction(
     extraction_model: str,
     profile_name: str,
     token_usage: TokenUsage,
+    collection: str = vector_store.COLLECTION,
 ) -> tuple[int, int, int]:
     source_rows = graph.query(
         "MATCH (sr:SourceRecord {record_key: $record_key}) RETURN sr.source_time LIMIT 1",
@@ -212,7 +227,7 @@ def _write_extraction(
                 [_embedding_text(label, item) for item in items], token_usage,
             )
             uids = [
-                find_similar_uid(graph, label, vector) or semantic_uid(label, item.name)
+                find_similar_uid(graph, label, vector, collection=collection) or semantic_uid(label, item.name)
                 for item, vector in zip(items, vectors)
             ]
         else:
@@ -278,11 +293,19 @@ def _write_extraction(
             vector_store.upsert_vectors(vector_store.client(), [
                 {"uid": uid, "label": label, "embedding": vector}
                 for uid, vector in zip(uids, vectors)
-            ])
+            ], collection=collection)
 
     facts_written = 0
     facts_rejected = 0
     for fact in extraction.facts:
+        if not evidence_in_chunk(fact.evidence, chunk.text):
+            facts_rejected += 1
+            logger.info(
+                "  rejected fact (evidence not in chunk): (%s) %r -%s-> (%s) %r  evidence=%r",
+                fact.subject_kind, fact.subject_name, fact.relation, fact.object_kind, fact.object_name,
+                fact.evidence,
+            )
+            continue
         if not is_relation_allowed(fact.subject_kind, fact.relation, fact.object_kind):
             facts_rejected += 1
             logger.info(
@@ -351,6 +374,7 @@ def run_semantic_pass(
     record_prefix: str | None = None,
     on_progress: Callable[[int, int, str, SemanticPassResult], None] | None = None,
     max_concurrency: int | None = None,
+    collection: str = vector_store.COLLECTION,
 ) -> SemanticPassResult:
     """Process up to `budget` pending chunks (default: $LLM_BUDGET_PER_RUN).
     A chunk that fails its LLM call is left 'pending' and retried on a later
@@ -369,7 +393,7 @@ def run_semantic_pass(
     until it's actually written.
     """
     client = client or OpenAI()
-    model = model or os.getenv("LLM_MODEL", "gpt-5.6-sol")
+    model = model or os.getenv("LLM_MODEL", "gpt-5.6-luna")
     embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     budget = budget if budget is not None else int(os.getenv("LLM_BUDGET_PER_RUN", "200"))
     max_concurrency = max_concurrency or int(os.getenv("LLM_CONCURRENCY", "6"))
@@ -405,7 +429,7 @@ def run_semantic_pass(
             entities, facts, rejected = _write_extraction(
                 graph, ledger, chunk, extraction, entry.primary_node_uid,
                 _record_own_kind(chunk.record_key), client, embedding_model, model, profile.name,
-                result.token_usage,
+                result.token_usage, collection=collection,
             )
             result.chunks_processed += 1
             result.entities_written += entities
@@ -444,7 +468,7 @@ def run_semantic_pass(
                 vector = _embed(client, embedding_model, [search_text], result.token_usage)[0]
                 vector_store.upsert_vectors(vector_store.client(), [
                     {"uid": entry.primary_node_uid, "label": own_label, "embedding": vector}
-                ])
+                ], collection=collection)
 
     logger.info(
         "semantic pass done: %d chunks, %d llm calls, %d entities, %d facts (%d rejected), %d records completed",

@@ -3,9 +3,8 @@ sites/projects listing are ported as-is from
 `graphiti_context_explorer/demo_ui/backend/jira_routes.py` — none of that
 touched Graphiti. What's rewritten:
 
-  - sync orchestration (`_run`): calls `graph.jira_pipeline` (Block 6) +
-    `graph.semantic_pass` (Block 7) directly instead of
-    `graph.jira_ingest.sync_jira_project` (Graphiti's `add_episode`).
+  - sync orchestration (`_run`): calls `graph.jira_pipeline` (Pass A only).
+    LLM extraction is Notion-only.
   - `delete_connection`: purges by (provider, connection_id) directly against
     the unified graph instead of deleting a per-source FalkorDB group —
     plan.md §7 dropped `graph/bridge/resolver.py` and its group-based purge
@@ -22,7 +21,6 @@ import secrets
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -31,9 +29,11 @@ from connectors.core.oauth_store import OAuthConnectorStore, OAuthStoreError
 from connectors.jira.api import JiraApiClient, JiraApiError, JiraSite, JiraUnauthorized
 from connectors.jira.oauth import JiraConfigurationError, JiraOAuthError, JiraOAuthSettings
 from graph import jira_pipeline as jp
+from graph import multigraph
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
-from graph.semantic_pass import run_semantic_pass
+from graph import vector_store as vector_store_module
+from graph.token_usage import TokenUsage
 from util.paths import DATA_DIR
 from demo_ui.backend.job_worker import JOB_STORE
 
@@ -55,6 +55,7 @@ class JiraSyncRequest(BaseModel):
     # Optional: ingest only this issue's subtree (epic/task/sub-task
     # descendants) instead of the whole project. Empty = whole project.
     scope_issue_key: str = Field(default="", max_length=100)
+    graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
 
 
 def _components() -> tuple[JiraOAuthSettings, OAuthConnectorStore]:
@@ -99,11 +100,15 @@ async def _with_refresh(store, settings, connection_id, operation):
 
 
 @router.get("/status")
-async def jira_status(request: Request, response: Response) -> dict:
+async def jira_status(
+    request: Request, response: Response,
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+) -> dict:
     _, store = _components()
     session_hash = store.session_hash(_session(request, response, True))
     return {"configured": True, "connections": store.list_connections(session_hash),
-            "sources": store.list_sources(session_hash), "runs": store.list_runs(session_hash)}
+            "sources": store.list_sources(session_hash),
+            "runs": store.list_runs(session_hash, graph_name=graph_name)}
 
 
 @router.post("/oauth/start")
@@ -172,9 +177,15 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
         if not project:
             raise JiraApiError("Selected Jira project is no longer accessible")
 
-        graph = get_graph()
+        target = multigraph.resolve(
+            payload.graph_name, data_dir=DATA_DIR,
+            base_falkor_name=os.getenv("FALKOR_GRAPH", "neuron"),
+            base_collection=vector_store_module.COLLECTION,
+        )
+        graph = get_graph(name=target.falkor_name)
         bootstrap_schema(graph)
-        ledger = ConnectorLedger(LEDGER_PATH)
+        vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
+        ledger = ConnectorLedger(target.ledger_path)
 
         scope = payload.scope_issue_key.strip().upper()
         fetch_label = f"{scope} subtree" if scope else payload.project_key
@@ -215,7 +226,10 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
         total = len(issues)
         kept = written = 0
         for index, issue in enumerate(issues, 1):
-            action = jp.write_issue(graph, ledger, issue, project, site, payload.connection_id)
+            action = jp.write_issue(
+                graph, ledger, issue, project, site, payload.connection_id,
+                collection=target.qdrant_collection,
+            )
             if str(action) == "keep":
                 kept += 1
             else:
@@ -227,42 +241,16 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
                 "issues_fetched": total, "entities_written": 0, "facts_written": 0,
             })
 
-        store.set_run(run_id, "running", {
-            "phase": "ingesting", "project_key": payload.project_key,
-            "current": "Running semantic extraction…", "records_done": total, "records_total": total,
-            "records_kept": kept, "records_written": written, "issues_fetched": total,
-            "entities_written": 0, "facts_written": 0,
-        })
-        def semantic_progress(done: int, semantic_total: int, record_key: str, current_result) -> None:
-            display_key = record_key.rsplit(":", 1)[-1]
-            store.set_run(run_id, "running", {
-                "phase": "semantic", "project_key": payload.project_key,
-                "current": f"Understanding record {display_key} ({done}/{semantic_total})…",
-                "records_done": total, "records_total": total,
-                "records_kept": kept, "records_written": written,
-                "issues_fetched": total, "chunks_ingested": done, "chunks_total": semantic_total,
-                "entities_written": current_result.entities_written,
-                "facts_written": current_result.facts_written,
-                **current_result.token_usage.as_dict("ingestion"),
-            })
-
-        # See bitbucket_routes.py's identical wrap: this call blocks for
-        # minutes and would otherwise freeze the whole server's event loop.
-        semantic = await run_in_threadpool(
-            run_semantic_pass, graph, ledger,
-            record_prefix=f"jira:{payload.connection_id}:",
-            on_progress=semantic_progress,
-        )
         orphans_removed = jp.delete_orphaned_shared_entities(graph)
 
         result = {
             "phase": "done", "project_key": payload.project_key,
             "current": f"Finished {total} issues from {project.key}",
             "records_done": total, "records_total": total, "records_kept": kept, "records_written": written,
-            "issues_fetched": total, "entities_written": semantic.entities_written,
-            "facts_written": semantic.facts_written, "chunks_ingested": semantic.chunks_processed,
+            "issues_fetched": total, "entities_written": 0,
+            "facts_written": 0, "chunks_ingested": 0,
             "orphans_removed": orphans_removed,
-            **semantic.token_usage.as_dict("ingestion"),
+            **TokenUsage().as_dict("ingestion"),
         }
         source_id = f"{payload.cloud_id}:{payload.project_id}"
         store.save_source(
@@ -293,7 +281,7 @@ async def start_sync(payload: JiraSyncRequest, request: Request) -> dict:
     source_id = f"{payload.cloud_id}:{payload.project_id}"
     run_id = uuid4().hex
     try:
-        store.create_run(run_id, payload.connection_id, source_id)
+        store.create_run(run_id, payload.connection_id, source_id, graph_name=payload.graph_name)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     JOB_STORE.enqueue(run_id, "jira", {"request": payload.model_dump()})

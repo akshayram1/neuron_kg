@@ -102,10 +102,23 @@ class GitHubStore:
                     result_json TEXT,
                     error TEXT
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS github_one_active_sync_per_repo
-                    ON github_sync_runs(installation_id, repository_id)
-                    WHERE status IN ('queued', 'running');
                 """
+            )
+            # Idempotent migration for pre-multi-graph databases (same idiom
+            # as connectors/core/ledger.py / oauth_store.py).
+            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(github_sync_runs)")}
+            if "graph_name" not in columns:
+                db.execute(
+                    "ALTER TABLE github_sync_runs ADD COLUMN graph_name TEXT NOT NULL DEFAULT 'default'"
+                )
+            # Widen "one active sync per repo" to "...per repo per graph" --
+            # otherwise syncing the same repo into a second graph while the
+            # first is still running would be wrongly rejected as a conflict.
+            db.execute("DROP INDEX IF EXISTS github_one_active_sync_per_repo")
+            db.execute(
+                """CREATE UNIQUE INDEX github_one_active_sync_per_repo
+                   ON github_sync_runs(installation_id, repository_id, graph_name)
+                   WHERE status IN ('queued', 'running')"""
             )
         try:
             self.path.chmod(0o600)
@@ -321,14 +334,16 @@ class GitHubStore:
                 (self._now(), error, installation_id, repository_id),
             )
 
-    def create_sync_run(self, run_id: str, installation_id: int, repository_id: int) -> None:
+    def create_sync_run(
+        self, run_id: str, installation_id: int, repository_id: int, graph_name: str = "default",
+    ) -> None:
         try:
             with self._connect() as db:
                 db.execute(
                     """INSERT INTO github_sync_runs(
-                           run_id, installation_id, repository_id, status, started_at
-                       ) VALUES (?, ?, ?, 'queued', ?)""",
-                    (run_id, installation_id, repository_id, self._now()),
+                           run_id, installation_id, repository_id, status, started_at, graph_name
+                       ) VALUES (?, ?, ?, 'queued', ?, ?)""",
+                    (run_id, installation_id, repository_id, self._now(), graph_name),
                 )
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("A sync is already queued or running for this repository") from exc
@@ -379,14 +394,18 @@ class GitHubStore:
         output["result"] = json.loads(output.pop("result_json")) if output["result_json"] else None
         return output
 
-    def list_sync_runs(self, session_hash: str, limit: int = 30) -> list[dict[str, Any]]:
+    def list_sync_runs(
+        self, session_hash: str, limit: int = 30, graph_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        graph_clause = "AND run.graph_name=?" if graph_name is not None else ""
         with self._connect() as db:
             rows = db.execute(
-                """SELECT run.* FROM github_sync_runs run
+                f"""SELECT run.* FROM github_sync_runs run
                    JOIN github_session_installations ses
                      ON ses.installation_id=run.installation_id
-                   WHERE ses.session_hash=? ORDER BY run.started_at DESC LIMIT ?""",
-                (session_hash, limit),
+                   WHERE ses.session_hash=? {graph_clause}
+                   ORDER BY run.started_at DESC LIMIT ?""",
+                (session_hash, *([graph_name] if graph_name is not None else []), limit),
             ).fetchall()
         output = []
         for row in rows:

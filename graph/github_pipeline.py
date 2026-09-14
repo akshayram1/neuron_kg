@@ -1,8 +1,8 @@
 """Deterministic GitHub -> unified FalkorDB writer.
 
 Repository, SourceFile, Commit and Person are provider facts and therefore do
-not need an LLM. File bodies and commit messages are queued for the shared
-semantic pass, which extracts only Decision/Term/System knowledge.
+not need an LLM. File and commit text stays on the node for search and exact
+ticket-key anchors; it is not queued for extraction.
 """
 
 from __future__ import annotations
@@ -19,8 +19,9 @@ from connectors.core.ledger import ConnectorLedger, RecordEdgeRef, SemanticStatu
 from connectors.core.models import SourceAccess, SourceBreadcrumb, SourceRecord
 from connectors.core.runner import prepare_record
 from connectors.github_app.api import GitHubCommit, GitHubFile, GitHubRepository
+from graph import vector_store
 from graph import writer as w
-from graph.jira_pipeline import delete_orphaned_shared_entities, delete_record
+from graph.jira_pipeline import _embed_now, delete_orphaned_shared_entities, delete_record
 from graph.resolver import (
     anchor_properties, link_verified_person_identity, resolve_backlinks_for_target,
     resolve_exact_anchors,
@@ -183,6 +184,7 @@ def write_repository(
 def write_file(
     graph: Graph, ledger: ConnectorLedger, repository: GitHubRepository,
     file: GitHubFile, content: str, installation_id: int,
+    collection: str = vector_store.COLLECTION,
 ) -> RecordAction:
     record = file_record(repository, file, content, installation_id)
     prepared = prepare_record(record, ledger)
@@ -202,15 +204,17 @@ def write_file(
                        record.record_key, record.reference_time)
     ledger.record_edge(record.record_key, edge.rel_type, edge.from_uid, edge.to_uid)
     resolve_exact_anchors(graph, ledger, record, uid, "SourceFile")
-    ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
+    if record.content.strip():
+        _embed_now(uid, "SourceFile", record.content, collection=collection)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
 
 
 def write_commit(
     graph: Graph, ledger: ConnectorLedger, repository: GitHubRepository,
     commit: GitHubCommit, installation_id: int,
+    collection: str = vector_store.COLLECTION,
 ) -> RecordAction:
     record = commit_record(repository, commit, installation_id)
     prepared = prepare_record(record, ledger)
@@ -244,9 +248,10 @@ def write_commit(
     ledger.record_edges_batch(record.record_key, edges)
     link_verified_person_identity(graph, ledger, p_uid, commit.author_email, record.record_key)
     resolve_exact_anchors(graph, ledger, record, uid, "Commit")
-    ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
+    if record.content.strip():
+        _embed_now(uid, "Commit", record.content, collection=collection)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
 
 

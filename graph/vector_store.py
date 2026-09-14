@@ -96,14 +96,14 @@ def client() -> QdrantClient:
     return _client
 
 
-def ensure_collection(client: QdrantClient) -> None:
+def ensure_collection(client: QdrantClient, collection: str = COLLECTION) -> None:
     """Idempotent. Quantized vectors stay in RAM (small, fast first pass),
     originals live on disk and are only read to rescore the shortlist — the
     standard Qdrant memory-efficiency setup."""
-    if client.collection_exists(COLLECTION):
+    if client.collection_exists(collection):
         return
     client.create_collection(
-        collection_name=COLLECTION,
+        collection_name=collection,
         vectors_config=VectorParams(
             size=EMBEDDING_DIMENSION,
             distance=Distance.COSINE,
@@ -119,12 +119,12 @@ def ensure_collection(client: QdrantClient) -> None:
     # `label` is the only field we ever filter on inside Qdrant; everything
     # else is filtered in the graph.
     client.create_payload_index(
-        collection_name=COLLECTION, field_name="label", field_schema="keyword"
+        collection_name=collection, field_name="label", field_schema="keyword"
     )
-    logger.info("created Qdrant collection %s", COLLECTION)
+    logger.info("created Qdrant collection %s", collection)
 
 
-def upsert_vectors(client: QdrantClient, rows: list[dict[str, Any]]) -> None:
+def upsert_vectors(client: QdrantClient, rows: list[dict[str, Any]], collection: str = COLLECTION) -> None:
     """rows: {uid, label, embedding}. `uid` is already a uuid5 string, which
     Qdrant accepts directly as a point id — so a re-upsert of the same entity
     overwrites in place rather than duplicating, matching the graph's MERGE
@@ -132,7 +132,7 @@ def upsert_vectors(client: QdrantClient, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     client.upsert(
-        collection_name=COLLECTION,
+        collection_name=collection,
         points=[
             PointStruct(
                 id=row["uid"],
@@ -151,13 +151,14 @@ def _label_filter(label: str | None) -> Filter | None:
 
 
 def search(
-    client: QdrantClient, embedding: list[float], *, label: str | None = None, limit: int = 20
+    client: QdrantClient, embedding: list[float], *, label: str | None = None, limit: int = 20,
+    collection: str = COLLECTION,
 ) -> list[tuple[str, float]]:
     """Returns (uid, similarity) pairs, best first. Similarity is cosine in
     [-1, 1]; 1.0 means identical."""
     try:
         result = client.query_points(
-            collection_name=COLLECTION,
+            collection_name=collection,
             query=embedding,
             query_filter=_label_filter(label),
             limit=limit,
@@ -169,13 +170,14 @@ def search(
             ),
         )
     except Exception:
-        logger.exception("Qdrant search failed for label=%s", label)
+        logger.exception("Qdrant search failed for label=%s collection=%s", label, collection)
         return []
     return [(str(point.payload.get("uid") or point.id), float(point.score)) for point in result.points]
 
 
 def find_similar_uid(
-    client: QdrantClient, label: str, embedding: list[float], min_similarity: float = 0.90
+    client: QdrantClient, label: str, embedding: list[float], min_similarity: float = 0.90,
+    collection: str = COLLECTION,
 ) -> str | None:
     """Write-time entity dedup: reuse an existing node's uid when the LLM
     re-extracted the same real-world thing under slightly different wording.
@@ -185,18 +187,18 @@ def find_similar_uid(
     that was calibrated on real embeddings, where a genuine near-duplicate
     pair scored ~0.04 distance (~0.96 similarity) and an unrelated pair
     ~0.80 distance (~0.20 similarity)."""
-    hits = search(client, embedding, label=label, limit=1)
+    hits = search(client, embedding, label=label, limit=1, collection=collection)
     if hits and hits[0][1] >= min_similarity:
         return hits[0][0]
     return None
 
 
-def delete_vectors(client: QdrantClient, uids: Iterable[str]) -> None:
+def delete_vectors(client: QdrantClient, uids: Iterable[str], collection: str = COLLECTION) -> None:
     ids = list(uids)
     if not ids:
         return
-    client.delete(collection_name=COLLECTION, points_selector=ids)
+    client.delete(collection_name=collection, points_selector=ids)
 
 
-def count(client: QdrantClient) -> int:
-    return client.count(collection_name=COLLECTION, exact=True).count
+def count(client: QdrantClient, collection: str = COLLECTION) -> int:
+    return client.count(collection_name=collection, exact=True).count

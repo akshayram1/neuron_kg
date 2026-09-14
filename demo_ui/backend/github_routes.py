@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import secrets
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
@@ -24,9 +24,11 @@ from connectors.github_app.auth import (
 )
 from connectors.github_app.store import GitHubStore, github_state_db_path
 from graph import github_pipeline as gp
+from graph import multigraph
+from graph import vector_store as vector_store_module
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
-from graph.semantic_pass import run_semantic_pass
+from graph.token_usage import TokenUsage
 from util.paths import DATA_DIR
 from demo_ui.backend.job_worker import JOB_STORE
 
@@ -41,6 +43,7 @@ class GitHubSyncRequest(BaseModel):
     repository_id: int = Field(gt=0)
     file_types: list[str] = Field(default_factory=list, max_length=2)
     include_commit_messages: bool = True
+    graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
 
     @model_validator(mode="after")
     def validate_selection(self) -> "GitHubSyncRequest":
@@ -89,14 +92,17 @@ async def _repositories(settings: GitHubAppSettings, installation_id: int) -> li
 
 
 @router.get("/status")
-async def github_status(request: Request, response: Response) -> dict:
+async def github_status(
+    request: Request, response: Response,
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+) -> dict:
     _, store = _components()
     session_hash = store.session_hash(_session(request, response, True))
     return {
         "configured": True,
         "installations": store.list_installations(session_hash),
         "sources": store.list_sources(session_hash),
-        "runs": store.list_sync_runs(session_hash),
+        "runs": store.list_sync_runs(session_hash, graph_name=graph_name),
     }
 
 
@@ -192,9 +198,15 @@ async def _run_sync(
                 **base, "phase": "ingesting", "current": f"Writing {total} GitHub records…",
             })
 
-            graph = get_graph()
+            target = multigraph.resolve(
+                payload.graph_name, data_dir=DATA_DIR,
+                base_falkor_name=os.getenv("FALKOR_GRAPH", "neuron"),
+                base_collection=vector_store_module.COLLECTION,
+            )
+            graph = get_graph(name=target.falkor_name)
             bootstrap_schema(graph)
-            ledger = ConnectorLedger(LEDGER_PATH)
+            vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
+            ledger = ConnectorLedger(target.ledger_path)
             gp.write_repository(graph, ledger, repository, payload.installation_id)
             done = kept = written = without_text = 0
             present_file_keys = {
@@ -208,7 +220,10 @@ async def _run_sync(
             for file in files:
                 try:
                     content = await client.read_blob(repository, file.sha)
-                    action = gp.write_file(graph, ledger, repository, file, content, payload.installation_id)
+                    action = gp.write_file(
+                        graph, ledger, repository, file, content, payload.installation_id,
+                        collection=target.qdrant_collection,
+                    )
                     kept += action == RecordAction.KEEP
                     written += action != RecordAction.KEEP
                 except GitHubFileTextError:
@@ -220,7 +235,10 @@ async def _run_sync(
                     "files_processed": done, "files_without_text": without_text,
                 })
             for commit in commits:
-                action = gp.write_commit(graph, ledger, repository, commit, payload.installation_id)
+                action = gp.write_commit(
+                    graph, ledger, repository, commit, payload.installation_id,
+                    collection=target.qdrant_collection,
+                )
                 kept += action == RecordAction.KEEP
                 written += action != RecordAction.KEEP
                 done += 1
@@ -235,34 +253,16 @@ async def _run_sync(
             present_file_keys, present_commit_keys,
         )
 
-        def semantic_progress(done_chunks: int, total_chunks: int, record_key: str, current) -> None:
-            store.set_sync_run(run_id, "running", {
-                **base, "phase": "semantic", "current": f"Understanding {record_key.rsplit(':', 1)[-1]}…",
-                "records_done": total, "records_total": total,
-                "records_kept": kept, "records_written": written,
-                "files_processed": len(files), "files_without_text": without_text,
-                "chunks_ingested": done_chunks, "chunks_total": total_chunks,
-                "entities_written": current.entities_written, "facts_written": current.facts_written,
-                **current.token_usage.as_dict("ingestion"),
-            })
-
-        # See bitbucket_routes.py's identical wrap: this call blocks for
-        # minutes and would otherwise freeze the whole server's event loop.
-        semantic = await run_in_threadpool(
-            run_semantic_pass, graph, ledger,
-            record_prefix=f"github:{payload.installation_id}:",
-            on_progress=semantic_progress,
-        )
         orphans_removed = gp.delete_orphaned_shared_entities(graph)
         result = {
             **base, "phase": "done", "current": f"Finished {repository.full_name}",
             "records_done": total, "records_total": total, "records_kept": kept,
             "records_written": written, "files_processed": len(files),
             "files_without_text": without_text, "records_removed": removed,
-            "chunks_ingested": semantic.chunks_processed,
-            "entities_written": semantic.entities_written, "facts_written": semantic.facts_written,
+            "chunks_ingested": 0,
+            "entities_written": 0, "facts_written": 0,
             "orphans_removed": orphans_removed,
-            **semantic.token_usage.as_dict("ingestion"),
+            **TokenUsage().as_dict("ingestion"),
         }
         store.finish_source_sync(payload.installation_id, payload.repository_id)
         store.set_sync_run(run_id, "completed", result)
@@ -287,7 +287,9 @@ async def start_sync(payload: GitHubSyncRequest, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="Selected repository is no longer accessible")
     run_id = uuid4().hex
     try:
-        store.create_sync_run(run_id, payload.installation_id, payload.repository_id)
+        store.create_sync_run(
+            run_id, payload.installation_id, payload.repository_id, graph_name=payload.graph_name,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     JOB_STORE.enqueue(run_id, "github", {

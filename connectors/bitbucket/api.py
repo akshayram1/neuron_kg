@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
+logger = logging.getLogger("neuron.bitbucket")
 BASE_URL = "https://api.bitbucket.org/2.0"
-TRANSIENT = {429, 500, 502, 503, 504}
+# 555 is Bitbucket Cloud's undocumented overload response (seen live on
+# diffstat during a 100-commit sync). Treat it like 503 so we back off
+# instead of dropping that commit's file list.
+TRANSIENT = {429, 500, 502, 503, 504, 555}
 LANGUAGES = {".py": "python", ".md": "markdown"}
 SUPPORTED_FILE_TYPES = set(LANGUAGES)
 _EMAIL_IN_RAW = re.compile(r"<([^<>@\s]+@[^<>\s]+)>")
@@ -57,6 +62,16 @@ class BitbucketFile:
 
 
 @dataclass(frozen=True)
+class BitbucketFileChange:
+    """One path from `GET …/diffstat/{commit}` (vs first parent)."""
+    path: str
+    old_path: str
+    status: str  # added | modified | removed | renamed
+    lines_added: int
+    lines_removed: int
+
+
+@dataclass(frozen=True)
 class BitbucketCommit:
     commit_hash: str
     message: str
@@ -64,6 +79,7 @@ class BitbucketCommit:
     author_email: str
     date: str
     html_url: str
+    files: tuple[BitbucketFileChange, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,6 +95,46 @@ class BitbucketPullRequest:
     created_on: str
     updated_on: str
     html_url: str
+
+
+def src_listing_url(src_root: str, path: str) -> str:
+    """Directory listing URL. Root must be `{src_root}/`, not `{src_root}`.
+
+    Bitbucket 404s `GET /src/{commit}` (verified on the parallel-walk
+    regression) and lists the tree at `GET /src/{commit}/`.
+    """
+    return f"{src_root}/{quote(path, safe='/')}"
+
+
+def parse_diffstat(values: list[dict]) -> tuple[BitbucketFileChange, ...]:
+    """Map Bitbucket diffstat JSON rows to file changes.
+
+    Path prefers `new.path` (added / modified / renamed target), then
+    `old.path` (removed). Official shape verified against
+    https://developer.atlassian.com/cloud/bitbucket/rest/api-group-commits/
+    """
+    changes: list[BitbucketFileChange] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        new = value.get("new") or {}
+        old = value.get("old") or {}
+        path = str(new.get("path") or old.get("path") or "").strip()
+        if not path:
+            continue
+        try:
+            added = int(value.get("lines_added") or 0)
+            removed = int(value.get("lines_removed") or 0)
+        except (TypeError, ValueError):
+            added, removed = 0, 0
+        changes.append(BitbucketFileChange(
+            path=path,
+            old_path=str(old.get("path") or "").strip(),
+            status=str(value.get("status") or "modified"),
+            lines_added=added,
+            lines_removed=removed,
+        ))
+    return tuple(changes)
 
 
 def _split_author(raw_author: dict) -> tuple[str, str]:
@@ -239,38 +295,60 @@ class BitbucketApiClient:
         # Read the tree at a resolved commit, never at a branch name -- see
         # resolve_ref: a branch containing '/' cannot be addressed here.
         encoded_branch = quote(await self.resolve_ref(repository, repository.main_branch), safe="")
+        # Sibling dirs + file bodies used to run one-at-a-time. Argus has
+        # hundreds of .py files; that walk alone is "still on Discovering"
+        # for minutes. Cap concurrency so we don't trip Bitbucket 555s.
+        sem = asyncio.Semaphore(16)
+        lock = asyncio.Lock()
+        src_root = (
+            f"{BASE_URL}/repositories/{quote(repository.workspace)}/"
+            f"{quote(repository.slug)}/src/{encoded_branch}"
+        )
+
+        async def download(item_path: str, size: int, commit_hash: str) -> None:
+            nonlocal without_text
+            raw_url = f"{src_root}/{quote(item_path, safe='/')}"
+            async with sem:
+                response = await self._response("GET", raw_url, headers={"Accept": "text/plain"})
+            try:
+                content = response.content.decode("utf-8")
+            except UnicodeDecodeError:
+                async with lock:
+                    without_text += 1
+                return
+            language = LANGUAGES.get(PurePosixPath(item_path).suffix.lower())
+            async with lock:
+                output.append(BitbucketFile(item_path, commit_hash, size, content, language))
 
         async def walk(path: str) -> None:
-            nonlocal too_large, without_text
-            if path in visited:
-                return
-            visited.add(path)
-            encoded_path = quote(path, safe="/")
-            url = (f"{BASE_URL}/repositories/{quote(repository.workspace)}/{quote(repository.slug)}"
-                   f"/src/{encoded_branch}/{encoded_path}")
-            values = await self.paginated(url, {"pagelen": 100})
+            nonlocal too_large
+            async with lock:
+                if path in visited:
+                    return
+                visited.add(path)
+            url = src_listing_url(src_root, path)
+            async with sem:
+                values = await self.paginated(url, {"pagelen": 100})
+            child_dirs: list[str] = []
+            pending: list[Any] = []
             for value in values:
                 item_path = str(value.get("path") or "")
                 if value.get("type") == "commit_directory":
-                    await walk(item_path)
-                elif value.get("type") == "commit_file":
-                    extension = PurePosixPath(item_path).suffix.lower()
-                    if extension not in extensions:
-                        continue
-                    size = int(value.get("size") or 0)
-                    if size > max_bytes:
+                    child_dirs.append(item_path)
+                    continue
+                if value.get("type") != "commit_file":
+                    continue
+                if PurePosixPath(item_path).suffix.lower() not in extensions:
+                    continue
+                size = int(value.get("size") or 0)
+                if size > max_bytes:
+                    async with lock:
                         too_large += 1
-                        continue
-                    raw_url = (f"{BASE_URL}/repositories/{quote(repository.workspace)}/{quote(repository.slug)}"
-                               f"/src/{encoded_branch}/{quote(item_path, safe='/')}")
-                    response = await self._response("GET", raw_url, headers={"Accept": "text/plain"})
-                    try:
-                        content = response.content.decode("utf-8")
-                    except UnicodeDecodeError:
-                        without_text += 1
-                        continue
-                    commit_hash = str(((value.get("commit") or {}).get("hash")) or "")
-                    output.append(BitbucketFile(item_path, commit_hash, size, content, LANGUAGES.get(extension)))
+                    continue
+                commit_hash = str(((value.get("commit") or {}).get("hash")) or "")
+                pending.append(download(item_path, size, commit_hash))
+            await asyncio.gather(*[walk(child) for child in child_dirs], *pending)
+
         await walk("")
         return output, too_large, without_text
 
@@ -328,3 +406,37 @@ class BitbucketApiClient:
                 str(((value.get("links") or {}).get("html") or {}).get("href") or ""),
             ))
         return output
+
+    async def diffstat(
+        self, repository: BitbucketRepository, commit_hash: str,
+    ) -> tuple[BitbucketFileChange, ...]:
+        """Files this commit changed vs its first parent. JSON, not the patch."""
+        values = await self.paginated(
+            f"{BASE_URL}/repositories/{quote(repository.workspace)}/{quote(repository.slug)}"
+            f"/diffstat/{quote(commit_hash, safe='')}",
+            {"pagelen": 100},
+        )
+        return parse_diffstat(values)
+
+    async def attach_diffstats(
+        self, repository: BitbucketRepository, commits: list[BitbucketCommit],
+        *, concurrency: int = 16,
+    ) -> list[BitbucketCommit]:
+        """Fill `commit.files` for each commit. One failed diffstat stays empty."""
+        if not commits:
+            return commits
+        sem = asyncio.Semaphore(max(1, concurrency))
+
+        async def one(commit: BitbucketCommit) -> BitbucketCommit:
+            async with sem:
+                try:
+                    files = await self.diffstat(repository, commit.commit_hash)
+                except BitbucketApiError as exc:
+                    logger.warning(
+                        "diffstat failed commit=%s repo=%s: %s",
+                        commit.commit_hash[:12], repository.full_name, exc,
+                    )
+                    return commit
+                return replace(commit, files=files)
+
+        return list(await asyncio.gather(*[one(commit) for commit in commits]))

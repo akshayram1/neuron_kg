@@ -1,7 +1,5 @@
-"""CLI: run a full Jira sync end-to-end (Block 8) — fetch a project's
-issues, run the deterministic pass (Block 6), then the budgeted semantic
-pass (Block 7). This proves the graph is correct before any UI gets built —
-demo_ui is a later phase (plan.md §6a.1), not needed to validate the graph.
+"""CLI: run a Jira Pass A sync — fetch a project and write structural facts.
+LLM extraction is Notion-only.
 
     uv run python -m scripts.sync_jira --list-connections
     uv run python -m scripts.sync_jira --connection <id> --project-key HERA
@@ -24,7 +22,6 @@ from connectors.jira.oauth import JiraOAuthSettings
 from graph import jira_pipeline as jp
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
-from graph.semantic_pass import run_semantic_pass
 
 LEDGER_PATH = "connector_ledger.sqlite3"
 OAUTH_STORE_PATH = "oauth_connectors.sqlite3"
@@ -67,7 +64,7 @@ def list_connections() -> None:
         print(f"{connection_id}  {account_name}  (connected {created_at})")
 
 
-async def sync_project(connection_id: str, project_key: str, *, semantic_budget: int | None) -> None:
+async def sync_project(connection_id: str, project_key: str) -> None:
     settings = JiraOAuthSettings.from_env()
     store = OAuthConnectorStore(OAUTH_STORE_PATH, "jira", settings.encryption_key)
     ledger = ConnectorLedger(LEDGER_PATH)
@@ -98,10 +95,6 @@ async def sync_project(connection_id: str, project_key: str, *, semantic_budget:
         print(f"  {issue.key}: {action}")
     print(f"issues by action: {counts}")
 
-    print("Running semantic pass...")
-    result = run_semantic_pass(graph, ledger, budget=semantic_budget)
-    print(result)
-
     node_counts = graph.query(
         "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS n ORDER BY label"
     ).result_set
@@ -114,7 +107,6 @@ def main() -> None:
     ap.add_argument("--list-connections", action="store_true")
     ap.add_argument("--connection", help="Jira OAuth connection_id")
     ap.add_argument("--project-key")
-    ap.add_argument("--semantic-budget", type=int, default=None)
     args = ap.parse_args()
 
     if args.list_connections:
@@ -123,7 +115,7 @@ def main() -> None:
     if not args.connection or not args.project_key:
         raise SystemExit("--connection and --project-key are required (or pass --list-connections)")
 
-    asyncio.run(sync_project(args.connection, args.project_key, semantic_budget=args.semantic_budget))
+    asyncio.run(sync_project(args.connection, args.project_key))
 
 
 if __name__ == "__main__":

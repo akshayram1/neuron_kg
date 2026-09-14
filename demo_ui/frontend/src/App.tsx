@@ -1,14 +1,15 @@
 import { BookOpenText, Database, Download, FileText, GitBranch, Github, GitFork, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { clearGraph, getConfig, getGraph, getSkosExportUrl, sendChat } from "./api";
+import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import EntityPanel from "./components/EntityPanel";
 import GraphCanvas from "./components/GraphCanvas";
+import GraphSelector from "./components/GraphSelector";
 import BitbucketPanel from "./components/BitbucketPanel";
 import GitHubPanel from "./components/GitHubPanel";
 import JiraPanel from "./components/JiraPanel";
 import NotionPanel from "./components/NotionPanel";
-import type { AppConfig, ConversationMessage, GitHubSource, GraphPayload, GraphSelection, Highlight, IngestionTokenUsage, NotionConnection, OAuthConnectorSource, TokenUsage } from "./types";
+import type { AppConfig, ConversationMessage, GitHubSource, GraphInfo, GraphPayload, GraphSelection, Highlight, IngestionTokenUsage, NotionConnection, OAuthConnectorSource, TokenUsage } from "./types";
 
 const EMPTY_HIGHLIGHT: Highlight = { nodes: [], edges: [] };
 const EMPTY_TOKEN_USAGE: TokenUsage = { input: 0, output: 0, total: 0 };
@@ -18,13 +19,25 @@ const WELCOME_MESSAGE: ConversationMessage = {
   content: "I’m connected to your company knowledge graph. Ask me about Jira work, GitHub and Bitbucket code and commits, Notion docs, owners, or decisions.",
 };
 const CHAT_STORAGE_KEY = "neuron.chat.messages";
+const GRAPH_STORAGE_KEY = "neuron.graph.selected";
+const DEFAULT_GRAPHS: GraphInfo[] = [{ name: "default", displayName: "Default", createdAt: "" }];
+
+function loadStoredGraphName(): string {
+  try { return localStorage.getItem(GRAPH_STORAGE_KEY) || "default"; } catch { return "default"; }
+}
+
+function chatStorageKey(graphName: string): string {
+  return `${CHAT_STORAGE_KEY}.${graphName}`;
+}
 
 // Chat history is never sent to the model or stored server-side (each turn
 // takes only the current question) -- this is purely a per-browser
-// convenience so a refresh doesn't wipe the visible conversation.
-function loadStoredMessages(): ConversationMessage[] {
+// convenience so a refresh doesn't wipe the visible conversation. Keyed by
+// graph so switching graphs shows that graph's own conversation, and a
+// brand-new graph starts with an empty one.
+function loadStoredMessages(graphName: string): ConversationMessage[] {
   try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    const raw = localStorage.getItem(chatStorageKey(graphName));
     if (!raw) return [WELCOME_MESSAGE];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) && parsed.length ? parsed : [WELCOME_MESSAGE];
@@ -52,12 +65,15 @@ function formatTokens(value: number): string {
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [providers, setProviders] = useState<string[]>(["jira", "github", "bitbucket", "notion"]);
+  const [graphName, setGraphNameState] = useState<string>(loadStoredGraphName);
+  const [graphs, setGraphs] = useState<GraphInfo[]>(DEFAULT_GRAPHS);
+  const [graphsLoading, setGraphsLoading] = useState(false);
   const [graph, setGraph] = useState<GraphPayload | null>(null);
   const [graphLoading, setGraphLoading] = useState(true);
   const [graphError, setGraphError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
-  const [messages, setMessages] = useState<ConversationMessage[]>(loadStoredMessages);
+  const [messages, setMessages] = useState<ConversationMessage[]>(() => loadStoredMessages(loadStoredGraphName()));
   const [highlight, setHighlight] = useState<Highlight>(EMPTY_HIGHLIGHT);
   const [selection, setSelection] = useState<GraphSelection>(null);
   const [jiraOpen, setJiraOpen] = useState(false);
@@ -77,8 +93,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages)); } catch { /* private mode, quota, etc. -- just skip persisting */ }
-  }, [messages]);
+    try { localStorage.setItem(chatStorageKey(graphName), JSON.stringify(messages)); } catch { /* private mode, quota, etc. -- just skip persisting */ }
+  }, [messages, graphName]);
 
   useEffect(() => {
     getConfig()
@@ -89,10 +105,45 @@ export default function App() {
       .catch((reason: Error) => setGraphError(reason.message));
   }, []);
 
+  const refreshGraphs = useCallback(async () => {
+    setGraphsLoading(true);
+    try {
+      const value = await getGraphs();
+      if (value.graphs.length) setGraphs(value.graphs);
+    } catch {
+      // Keep showing DEFAULT_GRAPHS -- the picker degrading to just
+      // "Default" is fine, it's the graph everything already points at.
+    } finally {
+      setGraphsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refreshGraphs(); }, [refreshGraphs]);
+
+  // Switching graphs swaps the visible chat log and resets per-session UI
+  // state, but never touches OAuth connections -- those are shared across
+  // every graph (see plan: multigraph.py's design note).
+  const selectGraph = useCallback((name: string) => {
+    setGraphNameState(name);
+    try { localStorage.setItem(GRAPH_STORAGE_KEY, name); } catch { /* ignore */ }
+    setMessages(loadStoredMessages(name));
+    setHighlight(EMPTY_HIGHLIGHT);
+    setSelection(null);
+    setChatError(null);
+    setRetrievalUsage(EMPTY_TOKEN_USAGE);
+    setIngestionUsage({});
+  }, []);
+
+  const handleCreateGraph = useCallback(async (name: string) => {
+    await createGraph(name);
+    await refreshGraphs();
+    selectGraph(name);
+  }, [refreshGraphs, selectGraph]);
+
   const loadGraph = useCallback(async () => {
     setGraphLoading(true);
     try {
-      const payload = await getGraph(providers);
+      const payload = await getGraph(providers, graphName);
       setGraph(payload);
       setGraphError(null);
     } catch (reason) {
@@ -100,7 +151,7 @@ export default function App() {
     } finally {
       setGraphLoading(false);
     }
-  }, [providers]);
+  }, [providers, graphName]);
 
   useEffect(() => {
     void loadGraph();
@@ -128,7 +179,7 @@ export default function App() {
     setRetrievalUsage(EMPTY_TOKEN_USAGE);
     setChatError(null);
     try {
-      const result = await sendChat(content, providers);
+      const result = await sendChat(content, providers, graphName);
       setMessages((current) => [...current, {
         id: `assistant-${crypto.randomUUID()}`,
         role: "assistant",
@@ -143,7 +194,7 @@ export default function App() {
     } finally {
       setChatBusy(false);
     }
-  }, [chatBusy, providers]);
+  }, [chatBusy, providers, graphName]);
 
   const clearChat = useCallback(() => {
     setMessages([WELCOME_MESSAGE]);
@@ -171,14 +222,14 @@ export default function App() {
     setClearing(true);
     setGraphError(null);
     try {
-      await clearGraph();
+      await clearGraph(graphName);
       await loadGraph();
     } catch (reason) {
       setGraphError(reason instanceof Error ? reason.message : "Could not clear the graph.");
     } finally {
       setClearing(false);
     }
-  }, [loadGraph]);
+  }, [loadGraph, graphName]);
 
   // A grand total across every provider's full sync history -- each entry in
   // `ingestionUsage` already sums that one provider's runs (see
@@ -203,6 +254,13 @@ export default function App() {
           <div className="brand-mark"><GitFork size={17} /></div>
           <div><strong>Neuron</strong><span>Company knowledge graph</span></div>
         </div>
+        <GraphSelector
+          graphs={graphs}
+          value={graphName}
+          loading={graphsLoading}
+          onSelect={selectGraph}
+          onCreate={handleCreateGraph}
+        />
         <div className="token-metrics" aria-label="Model token usage">
           <div
             className={`token-metric ${totalIngestion.active ? "active" : ""}`}
@@ -273,7 +331,7 @@ export default function App() {
               </button>
               <a
                 className="skos-export"
-                href={getSkosExportUrl(providers)}
+                href={getSkosExportUrl(providers, graphName)}
                 title="Download the currently selected sources as SKOS RDF (Turtle)"
               >
                 <Download size={13} /> Export SKOS
@@ -310,6 +368,7 @@ export default function App() {
               <EntityPanel
                 node={selection.value}
                 providers={providers}
+                graphName={graphName}
                 onClose={() => setSelection(null)}
                 onNavigate={(uid) => {
                   const next = graph?.nodes.find((item) => item.id === uid);
@@ -340,6 +399,7 @@ export default function App() {
 
       <JiraPanel
         open={jiraOpen}
+        graphName={graphName}
         onClose={() => setJiraOpen(false)}
         onSourcesChanged={setJiraSources}
         onSyncComplete={() => void loadGraph()}
@@ -347,6 +407,7 @@ export default function App() {
       />
       <GitHubPanel
         open={githubOpen}
+        graphName={graphName}
         onClose={() => setGitHubOpen(false)}
         onSourcesChanged={setGitHubSources}
         onSyncComplete={() => void loadGraph()}
@@ -354,6 +415,7 @@ export default function App() {
       />
       <BitbucketPanel
         open={bitbucketOpen}
+        graphName={graphName}
         onClose={() => setBitbucketOpen(false)}
         onSourcesChanged={setBitbucketSources}
         onSyncComplete={() => void loadGraph()}
@@ -361,6 +423,7 @@ export default function App() {
       />
       <NotionPanel
         open={notionOpen}
+        graphName={graphName}
         onClose={() => setNotionOpen(false)}
         onConnectionsChanged={setNotionConnections}
         onSyncComplete={() => void loadGraph()}

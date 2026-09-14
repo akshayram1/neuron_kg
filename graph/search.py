@@ -118,6 +118,7 @@ def _fulltext_search(
 def _vector_search(
     graph: Graph, label: str, embedding: list[float], limit: int,
     scope: AccessScope, providers: list[str] | None = None,
+    collection: str = vector_store.COLLECTION,
 ) -> list[tuple[str, str, str, float]]:
     """Dense-vector leg is served by Qdrant; authorization stays in FalkorDB.
 
@@ -131,7 +132,8 @@ def _vector_search(
     happens to return rows in.
     """
     hits = vector_store.search(
-        vector_store.client(), embedding, label=label, limit=limit * OVERFETCH_FACTOR
+        vector_store.client(), embedding, label=label, limit=limit * OVERFETCH_FACTOR,
+        collection=collection,
     )
     if not hits:
         return []
@@ -154,7 +156,10 @@ def _vector_search(
     return [visible[uid] for uid, _score in hits if uid in visible][:limit]
 
 
-def find_similar_uid(graph: Graph, label: str, embedding: list[float], max_distance: float = 0.1) -> str | None:
+def find_similar_uid(
+    graph: Graph, label: str, embedding: list[float], max_distance: float = 0.1,
+    collection: str = vector_store.COLLECTION,
+) -> str | None:
     """Lightweight entity dedup at write time (plan.md §5 Tier 1 extension):
     if a node of this label already exists with an embedding this close, the
     LLM almost certainly re-extracted the same real-world thing with slightly
@@ -178,7 +183,8 @@ def find_similar_uid(graph: Graph, label: str, embedding: list[float], max_dista
     it only ever reuses an EXISTING uid for what look like the same entity,
     never creates a new cross-entity edge on a similarity score alone."""
     return vector_store.find_similar_uid(
-        vector_store.client(), label, embedding, min_similarity=1.0 - max_distance
+        vector_store.client(), label, embedding, min_similarity=1.0 - max_distance,
+        collection=collection,
     )
 
 
@@ -193,6 +199,7 @@ def hybrid_search(
     providers: list[str] | None = None,
     scope: AccessScope,
     token_usage: TokenUsage | None = None,
+    collection: str = vector_store.COLLECTION,
 ) -> list[SearchHit]:
     """Search across every content-bearing label, fuse fulltext + vector
     rankings via RRF, return the top `limit` overall.
@@ -230,7 +237,9 @@ def hybrid_search(
             if "fulltext" not in hit.methods:
                 hit.methods.append("fulltext")
 
-        vector_hits = _vector_search(graph, label, embedding, per_method_limit, scope, providers)
+        vector_hits = _vector_search(
+            graph, label, embedding, per_method_limit, scope, providers, collection=collection
+        )
         for rank, (uid, name, summary, _score) in enumerate(vector_hits):
             rrf_scores[uid] = rrf_scores.get(uid, 0.0) + VECTOR_LEG_WEIGHT / (RRF_K + rank + 1)
             hit = info.setdefault(uid, SearchHit(uid, label, name, summary, 0.0))

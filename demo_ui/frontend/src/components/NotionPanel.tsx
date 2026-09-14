@@ -5,10 +5,10 @@ import type { IngestionTokenUsage, NotionConnection, NotionSyncRun } from "../ty
 import { totalIngestionUsage } from "../tokenUsage";
 import SyncProgress from "./SyncProgress";
 
-interface Props { open: boolean; onClose: () => void; onConnectionsChanged: (items: NotionConnection[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
+interface Props { open: boolean; graphName: string; onClose: () => void; onConnectionsChanged: (items: NotionConnection[]) => void; onSyncComplete: () => void; onTokenUsage: (usage: IngestionTokenUsage) => void; }
 function when(value: string | null) { return value ? `Synced ${new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))}` : "Never synced"; }
 
-export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyncComplete, onTokenUsage }: Props) {
+export default function NotionPanel({ open, graphName, onClose, onConnectionsChanged, onSyncComplete, onTokenUsage }: Props) {
   const [connections, setConnections] = useState<NotionConnection[]>([]);
   const [runs, setRuns] = useState<Record<string, NotionSyncRun>>({});
   const [loading, setLoading] = useState(false);
@@ -19,7 +19,7 @@ export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyn
   const loadStatus = useCallback(async () => {
     setLoading(true);
     try {
-      const status = await getNotionStatus();
+      const status = await getNotionStatus(graphName);
       setConnections(status.connections); onConnectionsChanged(status.connections);
       setRuns((current) => {
         const next = { ...current };
@@ -33,7 +33,7 @@ export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyn
       setError(null); return status;
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load Notion connections."); return null; }
     finally { setLoading(false); }
-  }, [onConnectionsChanged, onTokenUsage]);
+  }, [graphName, onConnectionsChanged, onTokenUsage]);
 
   useEffect(() => { if (open) void loadStatus(); }, [open, loadStatus]);
   useEffect(() => {
@@ -65,7 +65,7 @@ export default function NotionPanel({ open, onClose, onConnectionsChanged, onSyn
 
   const sync = async (workspaceId: string) => {
     try {
-      const started = await startNotionSync(workspaceId);
+      const started = await startNotionSync(workspaceId, graphName);
       setRuns((current) => ({ ...current, [workspaceId]: {
         run_id: started.run_id, workspace_id: workspaceId, status: "queued",
         started_at: new Date().toISOString(), finished_at: null,

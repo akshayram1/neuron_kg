@@ -1,8 +1,8 @@
 """Deterministic Bitbucket -> unified FalkorDB writer.
 
 Mirrors `graph/github_pipeline.py`: Repository, SourceFile, Commit and Person
-are provider facts and need no LLM. File bodies and commit messages are
-queued for the shared semantic pass (`software_knowledge` profile).
+are provider facts and need no LLM. File/commit/PR text stays on the node
+for search and exact ticket-key anchors; it is not queued for extraction.
 
 Unlike GitHub's App-installation model, Bitbucket uses classic per-user OAuth
 (like Jira) — `connection_id` is the OAuth connection's opaque id, not a
@@ -19,14 +19,16 @@ from urllib.parse import quote
 from falkordb import Graph
 
 from connectors.bitbucket.api import (
-    BitbucketCommit, BitbucketFile, BitbucketPullRequest, BitbucketRepository,
+    BitbucketCommit, BitbucketFile, BitbucketFileChange, BitbucketPullRequest,
+    BitbucketRepository,
 )
 from connectors.core.actions import RecordAction
 from connectors.core.ledger import ConnectorLedger, RecordEdgeRef, SemanticStatus
 from connectors.core.models import SourceAccess, SourceBreadcrumb, SourceRecord
 from connectors.core.runner import prepare_record
+from graph import vector_store
 from graph import writer as w
-from graph.jira_pipeline import delete_orphaned_shared_entities, delete_record
+from graph.jira_pipeline import _embed_now, delete_orphaned_shared_entities, delete_record
 from graph.resolver import (
     anchor_properties, link_verified_person_identity, resolve_backlinks_for_target,
     resolve_exact_anchors,
@@ -86,12 +88,20 @@ def file_record(
     )
 
 
+def _file_change_line(change: BitbucketFileChange) -> str:
+    return f"  {change.status}  {change.path}  +{change.lines_added}/-{change.lines_removed}"
+
+
 def commit_record(
     repository: BitbucketRepository, commit: BitbucketCommit, connection_id: str,
 ) -> SourceRecord:
+    files_block = ""
+    if commit.files:
+        files_block = "\n\nFiles:\n" + "\n".join(_file_change_line(c) for c in commit.files)
     source_text = (
         f"[SOURCE]\nKind: Commit\nName: {commit.commit_hash[:12]}\n"
-        f"Repository: {repository.full_name}\nAuthor: {commit.author_name}\n\n{commit.message}"
+        f"Repository: {repository.full_name}\nAuthor: {commit.author_name}\n\n"
+        f"{commit.message}{files_block}"
     )
     return SourceRecord(
         provider="bitbucket", connection_id=connection_id, entity_type="commit",
@@ -103,9 +113,29 @@ def commit_record(
         created_at=_time(commit.date), updated_at=_time(commit.date),
         mime_type="text/plain",
         metadata={"repository_uuid": repository.uuid, "commit_hash": commit.commit_hash,
-                  "branch": repository.main_branch, "pipeline_version": 1},
+                  "branch": repository.main_branch, "pipeline_version": 2},
         access=SourceAccess(public=not repository.private, policy_version="bitbucket-oauth-v1"),
     )
+
+
+def modifies_paths(
+    commit: BitbucketCommit, present_paths: set[str],
+) -> list[tuple[str, str]]:
+    """(path, evidence) for HEAD SourceFiles this commit still shares a path with.
+
+    Deleted / non-ingested extensions have no SourceFile — listed on the
+    commit record, not linked. Renames prefer `path` (new), then `old_path`.
+    """
+    linked: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for change in commit.files:
+        evidence = f"{change.status} +{change.lines_added}/-{change.lines_removed}"
+        for candidate in (change.path, change.old_path):
+            if candidate and candidate in present_paths and candidate not in seen:
+                seen.add(candidate)
+                linked.append((candidate, evidence))
+                break
+    return linked
 
 
 def pull_request_record(
@@ -144,6 +174,10 @@ def commit_uid(connection_id: str, repository_uuid: str, commit_hash: str) -> st
 
 def pull_request_uid(connection_id: str, repository_uuid: str, pr_id: int) -> str:
     return w.make_uid("PullRequest", "bitbucket", connection_id, repository_uuid, str(pr_id))
+
+
+def pull_request_ref(repository: BitbucketRepository, pr_id: int) -> str:
+    return f"{repository.full_name.lower()}#{pr_id}"
 
 
 def person_uid(commit: BitbucketCommit) -> str:
@@ -198,10 +232,11 @@ def _reset_support(
 def _write_edge(
     graph: Graph, rel: str, from_label: str, to_label: str,
     from_uid: str, to_uid: str, record_key: str, valid_at: datetime | None = None,
+    evidence: str | None = None,
 ) -> RecordEdgeRef:
     w.upsert_fact_edges(graph, rel, from_label, to_label, [{
         "from_uid": from_uid, "to_uid": to_uid, "source_record_keys": [record_key],
-        "evidence": None, "extraction_method": "deterministic", "confidence": 1.0,
+        "evidence": evidence, "extraction_method": "deterministic", "confidence": 1.0,
         "valid_at": valid_at.isoformat() if valid_at else None,
     }])
     return RecordEdgeRef(rel, from_uid, to_uid)
@@ -236,6 +271,7 @@ def write_repository(
 def write_file(
     graph: Graph, ledger: ConnectorLedger, repository: BitbucketRepository,
     file: BitbucketFile, connection_id: str,
+    collection: str = vector_store.COLLECTION,
 ) -> RecordAction:
     record = file_record(repository, file, connection_id)
     prepared = prepare_record(record, ledger)
@@ -255,15 +291,18 @@ def write_file(
                        record.record_key, record.reference_time)
     ledger.record_edge(record.record_key, edge.rel_type, edge.from_uid, edge.to_uid)
     resolve_exact_anchors(graph, ledger, record, uid, "SourceFile")
-    ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
+    if record.content.strip():
+        _embed_now(uid, "SourceFile", record.content, collection=collection)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
 
 
 def write_commit(
     graph: Graph, ledger: ConnectorLedger, repository: BitbucketRepository,
     commit: BitbucketCommit, connection_id: str,
+    collection: str = vector_store.COLLECTION,
+    present_paths: set[str] | None = None,
 ) -> RecordAction:
     record = commit_record(repository, commit, connection_id)
     prepared = prepare_record(record, ledger)
@@ -294,18 +333,26 @@ def write_commit(
         _write_edge(graph, "AUTHORED_BY", "Commit", "Person", uid, p_uid,
                     record.record_key, record.reference_time),
     ]
+    for path, evidence in modifies_paths(commit, present_paths or set()):
+        edges.append(_write_edge(
+            graph, "MODIFIES", "Commit", "SourceFile", uid,
+            file_uid(connection_id, repository.uuid, path),
+            record.record_key, record.reference_time, evidence=evidence,
+        ))
     ledger.record_edges_batch(record.record_key, edges)
     link_verified_person_identity(graph, ledger, p_uid, commit.author_email, record.record_key)
     resolve_exact_anchors(graph, ledger, record, uid, "Commit")
-    ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
+    if record.content.strip():
+        _embed_now(uid, "Commit", record.content, collection=collection)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
 
 
 def write_pull_request(
     graph: Graph, ledger: ConnectorLedger, repository: BitbucketRepository,
     pr: BitbucketPullRequest, connection_id: str,
+    collection: str = vector_store.COLLECTION,
 ) -> RecordAction:
     record = pull_request_record(repository, pr, connection_id)
     prepared = prepare_record(record, ledger)
@@ -320,11 +367,13 @@ def write_pull_request(
         "name": record.name, "search_text": record.content, "url": record.url,
         "state": pr.state, "source_branch": pr.source_branch,
         "destination_branch": pr.destination_branch,
+        "pr_id": pr.id, "pr_ref": pull_request_ref(repository, pr.id),
     }}])
     w.link_mentioned_in(graph, "PullRequest", [{"uid": uid, "record_key": record.record_key}])
     resolve_backlinks_for_target(
         graph, ledger, target_uid=uid, target_label="PullRequest",
         target_provider="bitbucket", url=pr.html_url,
+        pull_request_ref=pull_request_ref(repository, pr.id),
     )
     p_uid = pr_person_uid(pr)
     w.upsert_entities(graph, "Person", [{"uid": p_uid, "props": {"name": pr.author_name}}])
@@ -337,9 +386,10 @@ def write_pull_request(
     ]
     ledger.record_edges_batch(record.record_key, edges)
     resolve_exact_anchors(graph, ledger, record, uid, "PullRequest")
-    ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
+    if record.content.strip():
+        _embed_now(uid, "PullRequest", record.content, collection=collection)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
 
 
