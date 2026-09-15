@@ -7,6 +7,7 @@ call per question) happens once, not once per combination.
 
 Usage:
     uv run python -m scripts.sweep_retrieval_params eval/argus_golden.jsonl
+    uv run python -m scripts.sweep_retrieval_params eval/less_token_golden.jsonl --graph less_token
 """
 
 from __future__ import annotations
@@ -21,15 +22,25 @@ from openai import OpenAI
 
 from graph.access import AccessScope
 from graph.falkor_client import get_graph
-from graph.schema import FULLTEXT_LABELS, VECTOR_LABELS
-from graph.search import _fulltext_search, _vector_search, embed_query
+from graph.schema import FULLTEXT_LABELS
+from graph import vector_store
+from graph.search import (
+    _fulltext_search, _vector_search_global, embed_query, fuse_fulltext_labels, interleave,
+)
+from scripts.evaluate_retrieval import resolve_target
 from util import paths as _paths  # noqa: F401 - load repo .env
 
-SEARCH_LABELS = sorted(set(FULLTEXT_LABELS) & set(VECTOR_LABELS))
+# Must mirror `hybrid_search`'s own default exactly. This used to be
+# `FULLTEXT_LABELS & VECTOR_LABELS`, the same intersection that was removed
+# from production for excluding whole labels from search -- a sweep measuring
+# a different label set than the thing it is tuning reports numbers the
+# product can never reproduce.
+SEARCH_LABELS = list(FULLTEXT_LABELS)
 
 RRF_K_GRID = [10, 30, 60]
 VECTOR_WEIGHT_GRID = [1.0, 1.5, 2.0, 3.0]
 PER_METHOD_LIMIT_GRID = [10, 20, 30]
+FULLTEXT_STRATEGY_GRID = ["per_label_rank", "global_score", "normalized_merge"]
 MAX_LIMIT = max(PER_METHOD_LIMIT_GRID)
 
 
@@ -42,29 +53,56 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
-def fetch_raw_hits(graph, client, case: dict, scope: AccessScope) -> dict:
+def fetch_raw_hits(
+    graph, client, case: dict, scope: AccessScope, collection: str,
+) -> dict:
     """One fulltext + one vector fetch per label, at MAX_LIMIT -- reused for
-    every (rrf_k, vector_weight, per_method_limit) combination below."""
+    every (rrf_k, vector_weight, per_method_limit) combination below.
+
+    Scores are kept alongside the uids, not discarded: a fusion strategy that
+    normalizes across labels needs the raw score, and re-fetching per strategy
+    would defeat the whole point of caching here."""
     providers = case.get("providers")
     embedding = embed_query(client, case["query"])
-    per_label = {}
-    for label in SEARCH_LABELS:
-        fulltext_hits = _fulltext_search(graph, label, case["query"], MAX_LIMIT, scope, providers)
-        vector_hits = _vector_search(graph, label, embedding, MAX_LIMIT, scope, providers)
-        per_label[label] = {
-            "fulltext": [uid for uid, *_ in fulltext_hits],
-            "vector": [uid for uid, *_ in vector_hits],
-        }
-    return per_label
+    fulltext_by_label = {
+        label: _fulltext_search(graph, label, case["query"], MAX_LIMIT, scope, providers)
+        for label in SEARCH_LABELS
+    }
+    # Global vector fetches, one per named channel, interleaved exactly as
+    # production does -- a sweep that fuses differently tunes a system that
+    # does not exist.
+    budget = MAX_LIMIT * len(SEARCH_LABELS)
+    content_hits = _vector_search_global(
+        graph, embedding, budget, scope, providers, labels=SEARCH_LABELS,
+        collection=collection, using=vector_store.CONTENT_VECTOR,
+    )
+    name_hits = _vector_search_global(
+        graph, embedding, budget, scope, providers, labels=SEARCH_LABELS,
+        collection=collection, using=vector_store.NAME_VECTOR,
+    )
+    return {
+        "fulltext_by_label": fulltext_by_label,
+        "vector": [uid for uid, *_rest in interleave(content_hits, name_hits)],
+    }
 
 
-def rank_for_params(per_label: dict, rrf_k: int, vector_weight: float, per_method_limit: int, limit: int) -> list[str]:
+def rank_for_params(
+    raw: dict, rrf_k: int, vector_weight: float, per_method_limit: int,
+    fulltext_strategy: str, limit: int,
+) -> list[str]:
+    """Must stay a faithful replica of `hybrid_search`'s fusion, or the sweep
+    tunes something the product does not run."""
     scores: dict[str, float] = {}
-    for label, hits in per_label.items():
-        for rank, uid in enumerate(hits["fulltext"][:per_method_limit]):
-            scores[uid] = scores.get(uid, 0.0) + 1.0 / (rrf_k + rank + 1)
-        for rank, uid in enumerate(hits["vector"][:per_method_limit]):
-            scores[uid] = scores.get(uid, 0.0) + vector_weight / (rrf_k + rank + 1)
+    trimmed = {
+        label: hits[:per_method_limit]
+        for label, hits in raw["fulltext_by_label"].items()
+    }
+    for rank, (uid, _label, _name, _summary) in enumerate(
+        fuse_fulltext_labels(trimmed, fulltext_strategy)
+    ):
+        scores[uid] = scores.get(uid, 0.0) + 1.0 / (rrf_k + rank + 1)
+    for rank, uid in enumerate(raw["vector"][: per_method_limit * len(SEARCH_LABELS)]):
+        scores[uid] = scores.get(uid, 0.0) + vector_weight / (rrf_k + rank + 1)
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     return [uid for uid, _ in ranked[:limit]]
 
@@ -84,42 +122,59 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--limit", type=int, default=8, help="final top-N (matches chat's search_limit)")
+    parser.add_argument("--graph", default="default")
     args = parser.parse_args()
 
-    graph = get_graph()
+    target = resolve_target(args.graph)
+    graph = get_graph(name=target.falkor_name)
     client = OpenAI()
     scope = AccessScope.trusted_internal()
     cases = load_cases(args.dataset)
 
+    print(f"Graph: {target.name} ({target.falkor_name} / {target.qdrant_collection})")
     print(f"Fetching raw hits for {len(cases)} cases (one embedding + fulltext/vector fetch each)...")
-    raw_by_case = [fetch_raw_hits(graph, client, case, scope) for case in cases]
+    raw_by_case = [
+        fetch_raw_hits(graph, client, case, scope, target.qdrant_collection) for case in cases
+    ]
 
-    grid = list(itertools.product(RRF_K_GRID, VECTOR_WEIGHT_GRID, PER_METHOD_LIMIT_GRID))
+    grid = list(itertools.product(
+        RRF_K_GRID, VECTOR_WEIGHT_GRID, PER_METHOD_LIMIT_GRID, FULLTEXT_STRATEGY_GRID
+    ))
     results = []
-    for rrf_k, vector_weight, per_method_limit in grid:
-        mrrs, recalls = [], []
-        for case, per_label in zip(cases, raw_by_case):
-            retrieved = rank_for_params(per_label, rrf_k, vector_weight, per_method_limit, args.limit)
+    for rrf_k, vector_weight, per_method_limit, strategy in grid:
+        mrrs, recalls, passing = [], [], 0
+        for case, raw in zip(cases, raw_by_case):
+            retrieved = rank_for_params(
+                raw, rrf_k, vector_weight, per_method_limit, strategy, args.limit
+            )
             expected = case.get("expected_uids") or []
             if not expected:
                 continue
-            mrrs.append(reciprocal_rank(retrieved, expected))
+            rr = reciprocal_rank(retrieved, expected)
+            mrrs.append(rr)
             recalls.append(recall(retrieved, expected))
+            passing += rr > 0
         results.append({
-            "rrf_k": rrf_k, "vector_weight": vector_weight, "per_method_limit": per_method_limit,
+            "rrf_k": rrf_k, "vector_weight": vector_weight,
+            "per_method_limit": per_method_limit, "strategy": strategy,
             "mrr": mean(mrrs) if mrrs else 0.0, "recall": mean(recalls) if recalls else 0.0,
+            "passing": passing, "scored": len(mrrs),
         })
 
-    results.sort(key=lambda r: (r["mrr"], r["recall"]), reverse=True)
-    print(f"\n{'rrf_k':>6} {'vec_wt':>7} {'pm_limit':>9}   {'MRR':>6} {'recall':>7}")
+    # Rank by recall first: these cases fail by the right answer being absent
+    # entirely, not by it sitting at position 3 instead of 1.
+    results.sort(key=lambda r: (r["recall"], r["mrr"]), reverse=True)
+    print(f"\n{'rrf_k':>6} {'vec_wt':>7} {'pm_lim':>7} {'strategy':>18}   {'recall':>7} {'MRR':>7} {'pass':>6}")
     for r in results[:15]:
-        print(f"{r['rrf_k']:>6} {r['vector_weight']:>7} {r['per_method_limit']:>9}   {r['mrr']:.4f} {r['recall']:.4f}")
+        print(f"{r['rrf_k']:>6} {r['vector_weight']:>7} {r['per_method_limit']:>7} "
+              f"{r['strategy']:>18}   {r['recall']:.4f} {r['mrr']:.4f} "
+              f"{r['passing']:>3}/{r['scored']}")
 
-    # Baseline (current production config) for comparison.
-    baseline = next(r for r in results if r["rrf_k"] == 60 and r["vector_weight"] == 1.0 and r["per_method_limit"] == 20)
     best = results[0]
-    print(f"\nCurrent production config (k=60, vec_weight=1.0, per_method_limit=20): MRR={baseline['mrr']:.4f} recall={baseline['recall']:.4f}")
-    print(f"Best found: k={best['rrf_k']}, vec_weight={best['vector_weight']}, per_method_limit={best['per_method_limit']}: MRR={best['mrr']:.4f} recall={best['recall']:.4f}")
+    print(f"\nBest: k={best['rrf_k']} vec_weight={best['vector_weight']} "
+          f"per_method_limit={best['per_method_limit']} strategy={best['strategy']}"
+          f"  -> recall={best['recall']:.4f} MRR={best['mrr']:.4f} "
+          f"passing={best['passing']}/{best['scored']}")
 
 
 if __name__ == "__main__":

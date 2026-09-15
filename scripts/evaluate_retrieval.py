@@ -3,28 +3,47 @@
 Example:
     uv run python -m scripts.evaluate_retrieval eval/golden.jsonl --k 8
     uv run python -m scripts.evaluate_retrieval eval/golden.jsonl --with-chat
+    uv run python -m scripts.evaluate_retrieval eval/less_token_golden.jsonl --graph less_token
 
 Each JSONL row supports:
   query (required), expected_uids, expected_citation_record_keys, providers.
 Empty expectation lists are excluded from that metric rather than counted as
 perfect, so placeholder cases cannot inflate a score.
+
+`--graph` is not optional sugar: once multi-graph landed, a run without it
+silently measured the `default` graph's data and its own Qdrant collection,
+so a golden set written against another graph scored ~0 for reasons that had
+nothing to do with retrieval quality.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
 from openai import OpenAI
 
+from graph import multigraph, vector_store
 from graph.access import AccessScope
 from graph.chat import run_chat_turn
 from graph.falkor_client import get_graph
 from graph.search import hybrid_search
 from util import paths as _paths  # noqa: F401 — load repo .env
+from util.paths import DATA_DIR
+
+
+def resolve_target(graph_name: str) -> multigraph.GraphTarget:
+    """Same resolution the API routes use, so a benchmark and the product
+    never disagree about which physical graph/collection a name means."""
+    return multigraph.resolve(
+        graph_name, data_dir=DATA_DIR,
+        base_falkor_name=os.getenv("FALKOR_GRAPH", "neuron"),
+        base_collection=vector_store.COLLECTION,
+    )
 
 
 def _set_metric(actual: list[str], expected: list[str]) -> tuple[float, float]:
@@ -98,9 +117,11 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=8)
     parser.add_argument("--with-chat", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--graph", default=multigraph.DEFAULT_GRAPH_NAME)
     args = parser.parse_args()
 
-    graph = get_graph()
+    target = resolve_target(args.graph)
+    graph = get_graph(name=target.falkor_name)
     client = OpenAI()
     scope = AccessScope.trusted_internal()
     results = []
@@ -109,17 +130,19 @@ def main() -> None:
         hits = hybrid_search(
             graph, client, case["query"], limit=args.k,
             providers=providers, scope=scope,
+            collection=target.qdrant_collection,
         )
         citations = None
         if args.with_chat:
             answer = run_chat_turn(
                 graph, client, case["query"], search_limit=args.k,
                 providers=providers, scope=scope,
+                collection=target.qdrant_collection,
             )
             citations = [item.record_key for item in answer.citations]
         results.append(score_case(case, [hit.uid for hit in hits], citations))
 
-    payload = {"summary": summarize(results), "results": results}
+    payload = {"graph": target.name, "summary": summarize(results), "results": results}
     rendered = json.dumps(payload, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(rendered + "\n")

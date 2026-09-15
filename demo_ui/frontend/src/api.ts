@@ -184,10 +184,18 @@ export function getNotionStatus(graphName: string): Promise<NotionStatus> {
 export function startNotionOAuth(): Promise<{ authorization_url: string }> {
   return request("/api/connectors/notion/oauth/start", { method: "POST" });
 }
-export function startNotionSync(workspaceId: string, graphName: string): Promise<{ run_id: string; status: string }> {
+export function startNotionSync(
+  workspaceId: string,
+  graphName: string,
+  includeChildPages = true,
+): Promise<{ run_id: string; status: string }> {
   return request("/api/connectors/notion/sync", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspace_id: workspaceId, graph_name: graphName }),
+    body: JSON.stringify({
+      workspace_id: workspaceId,
+      graph_name: graphName,
+      include_child_pages: includeChildPages,
+    }),
   });
 }
 export function getNotionSyncRun(runId: string): Promise<NotionSyncRun> {

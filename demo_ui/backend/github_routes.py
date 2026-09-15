@@ -9,6 +9,7 @@ import os
 import secrets
 from uuid import uuid4
 
+from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
@@ -25,6 +26,7 @@ from connectors.github_app.auth import (
 from connectors.github_app.store import GitHubStore, github_state_db_path
 from graph import github_pipeline as gp
 from graph import multigraph
+from graph.embed_batch import close_batch, open_batch
 from graph import vector_store as vector_store_module
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
@@ -207,6 +209,11 @@ async def _run_sync(
             bootstrap_schema(graph)
             vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
             ledger = ConnectorLedger(target.ledger_path)
+                        # One request per batch instead of one per record -- see
+            # graph/embed_batch.py. Must be closed on every exit path below.
+            open_batch(OpenAI(timeout=30.0, max_retries=2),
+                       os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                       target.qdrant_collection)
             gp.write_repository(graph, ledger, repository, payload.installation_id)
             done = kept = written = without_text = 0
             present_file_keys = {
@@ -265,14 +272,17 @@ async def _run_sync(
             **TokenUsage().as_dict("ingestion"),
         }
         store.finish_source_sync(payload.installation_id, payload.repository_id)
+        close_batch()
         store.set_sync_run(run_id, "completed", result)
         logger.info("GitHub sync completed run=%s %s", run_id, result)
     except asyncio.CancelledError:
+        close_batch()
         store.set_sync_run(run_id, "failed", error="Sync worker stopped before completion")
         raise
     except Exception as exc:
         logger.exception("GitHub sync failed run=%s", run_id)
         store.finish_source_sync(payload.installation_id, payload.repository_id, str(exc)[:1_000])
+        close_batch()
         store.set_sync_run(run_id, "failed", error=str(exc)[:1_000])
         raise
 

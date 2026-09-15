@@ -150,7 +150,10 @@ class NotionApiClient:
                 return results
 
     async def fetch_pages(
-        self, on_progress: Callable[[int, str], None] | None = None
+        self,
+        on_progress: Callable[[int, str], None] | None = None,
+        *,
+        include_child_pages: bool = True,
     ) -> list[NotionPage]:
         raw_pages = await self.paginate(
             "POST",
@@ -160,53 +163,139 @@ class NotionApiClient:
                 "sort": {"direction": "ascending", "timestamp": "last_edited_time"},
             },
         )
-        pages: list[NotionPage] = []
+        queue: list[dict[str, Any]] = []
+        queued: set[str] = set()
         for page in raw_pages:
-            if page.get("archived") or page.get("in_trash"):
-                continue
+            self._offer_page(page, queue, queued)
+
+        pages: list[NotionPage] = []
+        seen: set[str] = set()
+        index = 0
+        while index < len(queue):
+            page = queue[index]
+            index += 1
             page_id = str(page.get("id") or "")
-            if not page_id:
+            if not page_id or page_id in seen:
                 continue
-            content = await self.render_children(page_id)
-            pages.append(
-                NotionPage(
-                    page_id=page_id,
-                    title=_page_title(page) or "Untitled",
-                    url=str(page.get("url") or ""),
-                    content=content,
-                    last_edited_time=str(page.get("last_edited_time") or ""),
-                    parent_page_id=(
-                        str((page.get("parent") or {}).get("page_id"))
-                        if (page.get("parent") or {}).get("type") == "page_id"
-                        else None
-                    ),
-                )
-            )
+            seen.add(page_id)
+            content, child_page_ids, child_database_ids = await self.render_children(page_id)
+            pages.append(_to_notion_page(page, content))
             if on_progress is not None:
                 on_progress(len(pages), pages[-1].title)
+            if not include_child_pages:
+                continue
+            for child_id in child_page_ids:
+                await self._enqueue_child_page(child_id, queue, queued)
+            for database_id in child_database_ids:
+                for db_page in await self._fetch_database_pages(database_id):
+                    self._offer_page(db_page, queue, queued)
         return pages
 
-    async def render_children(self, block_id: str, depth: int = 0) -> str:
+    def _offer_page(
+        self,
+        page: dict[str, Any],
+        queue: list[dict[str, Any]],
+        queued: set[str],
+    ) -> None:
+        if page.get("archived") or page.get("in_trash"):
+            return
+        page_id = str(page.get("id") or "")
+        if not page_id or page_id in queued:
+            return
+        queued.add(page_id)
+        queue.append(page)
+
+    async def _enqueue_child_page(
+        self,
+        page_id: str,
+        queue: list[dict[str, Any]],
+        queued: set[str],
+    ) -> None:
+        if page_id in queued:
+            return
+        queued.add(page_id)
+        fetched = await self._get_optional_page(page_id)
+        if fetched is not None:
+            queue.append(fetched)
+
+    async def _get_optional_page(self, page_id: str) -> dict[str, Any] | None:
+        try:
+            data = await self.request("GET", f"/pages/{page_id}")
+        except NotionApiError as exc:
+            if _is_inaccessible(exc):
+                logger.info(
+                    "Skipping Notion page %s — not shared with this integration", page_id
+                )
+                return None
+            raise
+        if data.get("archived") or data.get("in_trash"):
+            return None
+        return data
+
+    async def _fetch_database_pages(self, database_id: str) -> list[dict[str, Any]]:
+        try:
+            return await self.paginate("POST", f"/databases/{database_id}/query", json={})
+        except NotionApiError as exc:
+            if _is_inaccessible(exc):
+                logger.info(
+                    "Skipping Notion database %s — not shared with this integration",
+                    database_id,
+                )
+                return []
+            raise
+
+    async def render_children(
+        self, block_id: str, depth: int = 0
+    ) -> tuple[str, list[str], list[str]]:
         if depth > 20:
-            return ""
+            return "", [], []
         blocks = await self.paginate("GET", f"/blocks/{block_id}/children")
         lines: list[str] = []
+        child_page_ids: list[str] = []
+        child_database_ids: list[str] = []
         for block in blocks:
             rendered = _render_block(block)
             if rendered:
                 lines.append(rendered)
-            # Child pages are returned by /search and ingested independently.
+            block_type = str(block.get("type") or "")
+            nested_id = str(block.get("id") or "")
+            # Child pages and databases are ingested as their own documents.
             # Recursing into them here would duplicate their complete content
             # inside the parent page episode.
-            if (
-                block.get("has_children")
-                and block.get("id")
-                and block.get("type") not in {"child_page", "child_database"}
-            ):
-                nested = await self.render_children(str(block["id"]), depth + 1)
+            if block_type == "child_page" and nested_id:
+                child_page_ids.append(nested_id)
+                continue
+            if block_type == "child_database" and nested_id:
+                child_database_ids.append(nested_id)
+                continue
+            if block.get("has_children") and nested_id:
+                nested, nested_pages, nested_dbs = await self.render_children(
+                    nested_id, depth + 1
+                )
                 if nested:
                     lines.append(nested)
-        return "\n".join(lines).strip()
+                child_page_ids.extend(nested_pages)
+                child_database_ids.extend(nested_dbs)
+        return "\n".join(lines).strip(), child_page_ids, child_database_ids
+
+
+def _is_inaccessible(exc: NotionApiError) -> bool:
+    text = str(exc)
+    return "(403)" in text or "(404)" in text
+
+
+def _to_notion_page(page: dict[str, Any], content: str) -> NotionPage:
+    parent = page.get("parent") or {}
+    return NotionPage(
+        page_id=str(page.get("id") or ""),
+        title=_page_title(page) or "Untitled",
+        url=str(page.get("url") or ""),
+        content=content,
+        last_edited_time=str(page.get("last_edited_time") or ""),
+        parent_page_id=(
+            str(parent.get("page_id")) if parent.get("type") == "page_id" else None
+        ),
+    )
 
 
 def _page_title(page: dict[str, Any]) -> str:

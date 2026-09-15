@@ -34,13 +34,15 @@ from openai import OpenAI
 
 from connectors.core.ledger import (
     ConnectorLedger,
+    DropReason,
+    ExtractionDrop,
     PendingChunk,
     RecordEdgeRef,
     SemanticStatus,
 )
 from graph import vector_store
 from graph import writer as w
-from graph.ontology import is_relation_allowed
+from graph.axioms import SWAPPED, AxiomSet, DEFAULT_AXIOMS, load_axioms
 from graph.profiles import WorkManagementExtraction, profile_for_record_key
 from graph.search import find_similar_uid
 from graph.token_usage import TokenUsage
@@ -157,6 +159,19 @@ def _resolve_endpoint(
     return None
 
 
+
+def _drop(reason: str, fact, detail: str | None = None) -> ExtractionDrop:
+    """One discarded (or corrected) extraction, with enough of the original
+    triple to judge it later without re-reading the source chunk."""
+    return ExtractionDrop(
+        reason=str(reason),
+        subject_kind=fact.subject_kind, subject_name=fact.subject_name,
+        relation=fact.relation,
+        object_kind=fact.object_kind, object_name=fact.object_name,
+        detail=str(detail)[:500] if detail else None,
+    )
+
+
 def _embedding_text(label: str, item) -> str:
     if label == "Decision":
         return " — ".join(filter(None, [item.name, item.statement, item.rationale]))
@@ -178,6 +193,7 @@ def _write_extraction(
     profile_name: str,
     token_usage: TokenUsage,
     collection: str = vector_store.COLLECTION,
+    axioms: AxiomSet = DEFAULT_AXIOMS,
 ) -> tuple[int, int, int]:
     source_rows = graph.query(
         "MATCH (sr:SourceRecord {record_key: $record_key}) RETURN sr.source_time LIMIT 1",
@@ -192,9 +208,14 @@ def _write_extraction(
     # enforce it structurally: only keep an extracted entity if it actually
     # appears as a fact's subject or object. This makes "every semantic node
     # has a reason to exist" a property of the write path, not a prompt hope.
+    drops: list[ExtractionDrop] = []
     referenced: set[tuple[str, str]] = set()
     for fact in extraction.facts:
-        if not is_relation_allowed(fact.subject_kind, fact.relation, fact.object_kind):
+        # `resolve_direction`, not `is_relation_allowed`: a fact that is only
+        # valid reversed still names real endpoints, and counting it as
+        # unreferenced here would drop those entities before the write loop
+        # below ever gets the chance to swap it.
+        if axioms.resolve_direction(fact.subject_kind, fact.relation, fact.object_kind) is None:
             continue
         referenced.add((fact.subject_kind, fact.subject_name.strip().lower()))
         referenced.add((fact.object_kind, fact.object_name.strip().lower()))
@@ -211,6 +232,10 @@ def _write_extraction(
                 items.append(item)
             else:
                 logger.info("  dropped %s (no connecting fact): %r", label, item.name)
+                drops.append(ExtractionDrop(
+                    reason=DropReason.ENTITY_NO_CONNECTING_FACT,
+                    subject_kind=label, subject_name=item.name,
+                ))
         if not items:
             continue
 
@@ -290,9 +315,16 @@ def _write_extraction(
             )
 
         if label in _EMBEDDABLE_LABELS:
+            # The name channel gets the entity's bare name; `_embedding_text`
+            # already put name + definition/statement into the content one.
+            name_vectors = _embed(
+                client, embedding_model, [item.name for item in items], token_usage,
+            )
             vector_store.upsert_vectors(vector_store.client(), [
-                {"uid": uid, "label": label, "embedding": vector}
-                for uid, vector in zip(uids, vectors)
+                {"uid": uid, "label": label, "embedding": vector,
+                 "name_embedding": name_vector, "embedded_text": _embedding_text(label, item)[:400],
+                 "embedded_model": embedding_model}
+                for uid, item, vector, name_vector in zip(uids, items, vectors, name_vectors)
             ], collection=collection)
 
     facts_written = 0
@@ -305,30 +337,70 @@ def _write_extraction(
                 fact.subject_kind, fact.subject_name, fact.relation, fact.object_kind, fact.object_name,
                 fact.evidence,
             )
+            drops.append(_drop(DropReason.EVIDENCE_NOT_IN_CHUNK, fact, detail=fact.evidence))
             continue
-        if not is_relation_allowed(fact.subject_kind, fact.relation, fact.object_kind):
+
+        direction = axioms.resolve_direction(fact.subject_kind, fact.relation, fact.object_kind)
+        if direction is None:
             facts_rejected += 1
             logger.info(
                 "  rejected fact (relation not allowed): (%s) %r -%s-> (%s) %r",
                 fact.subject_kind, fact.subject_name, fact.relation, fact.object_kind, fact.object_name,
             )
+            # Neither direction is in the ontology. The triple is kept here
+            # with its evidence rather than written as some vague catch-all
+            # relation: an unnamed relation is honest, an invented one is an
+            # assertion nobody made.
+            drops.append(_drop(DropReason.RELATION_NOT_ALLOWED, fact))
+            # ...and counted as a gap in the vocabulary, so "the ontology is
+            # too narrow" becomes a number someone can act on rather than a
+            # suspicion. A term seen once is noise; the same one seen forty
+            # times is a missing relation.
+            ledger.record_miss(
+                "relation_type",
+                f"{fact.subject_kind} -{fact.relation}-> {fact.object_kind}",
+                example=f"{fact.subject_name} -> {fact.object_name}",
+            )
             continue
+
+        # The ontology says this relation runs the other way. Swap the
+        # endpoints and say so -- never silently.
+        subject_kind, subject_name = fact.subject_kind, fact.subject_name
+        object_kind, object_name = fact.object_kind, fact.object_name
+        if direction == SWAPPED:
+            subject_kind, object_kind = object_kind, subject_kind
+            subject_name, object_name = object_name, subject_name
+            logger.info(
+                "  direction corrected: (%s) %r -%s-> (%s) %r  [as extracted: %s -> %s]",
+                subject_kind, subject_name, fact.relation, object_kind, object_name,
+                fact.subject_kind, fact.object_kind,
+            )
+            drops.append(_drop(
+                DropReason.DIRECTION_CORRECTED, fact,
+                detail=f"written as ({subject_kind}) -{fact.relation}-> ({object_kind})",
+            ))
+
         subject_uid = _resolve_endpoint(
-            graph, fact.subject_kind, fact.subject_name,
+            graph, subject_kind, subject_name,
             primary_uid, record_own_kind, semantic_uids,
         )
         object_uid = _resolve_endpoint(
-            graph, fact.object_kind, fact.object_name,
+            graph, object_kind, object_name,
             primary_uid, record_own_kind, semantic_uids,
         )
         if subject_uid is None or object_uid is None:
             facts_rejected += 1
             logger.info(
                 "  rejected fact (endpoint unresolved): (%s) %r -%s-> (%s) %r",
-                fact.subject_kind, fact.subject_name, fact.relation, fact.object_kind, fact.object_name,
+                subject_kind, subject_name, fact.relation, object_kind, object_name,
             )
+            drops.append(_drop(
+                DropReason.ENDPOINT_UNRESOLVED, fact,
+                detail=("subject" if subject_uid is None else "") +
+                       ("+object" if object_uid is None else ""),
+            ))
             continue
-        w.upsert_fact_edges(graph, fact.relation, fact.subject_kind, fact.object_kind, [{
+        w.upsert_fact_edges(graph, fact.relation, subject_kind, object_kind, [{
             "from_uid": subject_uid, "to_uid": object_uid, "source_record_keys": [chunk.record_key],
             "evidence": fact.evidence, "extraction_method": "llm", "confidence": 0.9,
             "chunk_id": chunk.chunk_id,
@@ -336,16 +408,21 @@ def _write_extraction(
             "extractor_version": profile_name,
             "model": extraction_model,
             "valid_at": source_time,
+            "direction_corrected": direction == SWAPPED,
         }])
         edges_supported.append(RecordEdgeRef(fact.relation, subject_uid, object_uid))
         facts_written += 1
         logger.info(
             "  wrote fact: (%s) %r -%s-> (%s) %r  evidence=%r",
-            fact.subject_kind, fact.subject_name, fact.relation, fact.object_kind, fact.object_name, fact.evidence,
+            subject_kind, subject_name, fact.relation, object_kind, object_name, fact.evidence,
         )
 
     if edges_supported:
         ledger.record_edges_batch(chunk.record_key, edges_supported)
+    # Always written, even when empty: a chunk re-extracted after an ontology
+    # change must clear the drops its previous run recorded, or the counts
+    # describe a system that no longer exists.
+    ledger.record_drops(chunk.record_key, chunk.chunk_id, drops)
     return entities_written, facts_written, facts_rejected
 
 
@@ -397,6 +474,10 @@ def run_semantic_pass(
     embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     budget = budget if budget is not None else int(os.getenv("LLM_BUDGET_PER_RUN", "200"))
     max_concurrency = max_concurrency or int(os.getenv("LLM_CONCURRENCY", "6"))
+    # Read the vocabulary once per run, not once per fact: it is per-graph
+    # data now (seeded from code on first use), so it can differ between
+    # graphs and can be edited without a redeploy.
+    axioms = load_axioms(ledger)
 
     result = SemanticPassResult()
     touched_records: set[str] = set()
@@ -429,7 +510,7 @@ def run_semantic_pass(
             entities, facts, rejected = _write_extraction(
                 graph, ledger, chunk, extraction, entry.primary_node_uid,
                 _record_own_kind(chunk.record_key), client, embedding_model, model, profile.name,
-                result.token_usage, collection=collection,
+                result.token_usage, collection=collection, axioms=axioms,
             )
             result.chunks_processed += 1
             result.entities_written += entities
@@ -461,14 +542,20 @@ def run_semantic_pass(
         entry = ledger.get(record_key)
         if own_label in _EMBEDDABLE_LABELS and entry and entry.primary_node_uid:
             rows = graph.query(
-                "MATCH (n {uid: $uid}) RETURN n.search_text", params={"uid": entry.primary_node_uid}
+                "MATCH (n {uid: $uid}) RETURN n.search_text, n.name",
+                params={"uid": entry.primary_node_uid},
             ).result_set
             search_text = rows[0][0] if rows else None
+            node_name = (rows[0][1] if rows else None) or search_text
             if search_text:
-                vector = _embed(client, embedding_model, [search_text], result.token_usage)[0]
-                vector_store.upsert_vectors(vector_store.client(), [
-                    {"uid": entry.primary_node_uid, "label": own_label, "embedding": vector}
-                ], collection=collection)
+                vectors = _embed(
+                    client, embedding_model, [search_text, node_name], result.token_usage,
+                )
+                vector_store.upsert_vectors(vector_store.client(), [{
+                    "uid": entry.primary_node_uid, "label": own_label,
+                    "embedding": vectors[0], "name_embedding": vectors[1],
+                    "embedded_text": search_text[:400], "embedded_model": embedding_model,
+                }], collection=collection)
 
     logger.info(
         "semantic pass done: %d chunks, %d llm calls, %d entities, %d facts (%d rejected), %d records completed",

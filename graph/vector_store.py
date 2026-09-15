@@ -57,6 +57,10 @@ EMBEDDING_DIMENSION = 1536  # text-embedding-3-small
 # Changing the model or dimension requires recreating the collection:
 #   uv run python -m scripts.rebuild_vectors --recreate
 
+# Named vector channels. See `ensure_collection` for why there are two.
+NAME_VECTOR = "name"
+CONTENT_VECTOR = "content"
+
 _MAX_EMBEDDING_TOKENS = 8000  # OpenAI's hard cap is 8192; leave headroom
 _encoding = tiktoken.get_encoding("cl100k_base")
 
@@ -99,16 +103,32 @@ def client() -> QdrantClient:
 def ensure_collection(client: QdrantClient, collection: str = COLLECTION) -> None:
     """Idempotent. Quantized vectors stay in RAM (small, fast first pass),
     originals live on disk and are only read to rescore the shortlist — the
-    standard Qdrant memory-efficiency setup."""
+    standard Qdrant memory-efficiency setup.
+
+    TWO named vectors per point, not one. A question comes in two shapes —
+    a short one that names a thing ("which file handles the Vulcan client")
+    and a long one that describes it — and a single embedding of
+    `name + full content` serves the first shape badly: the short side
+    systematically produces smaller distances, so a 95-byte empty
+    `__init__.py` (whose entire embedded text IS its path) beat the real
+    19,564-byte `client.py` on exactly that query. Verified on real data
+    here, and independently arrived at by Utopia, which hit the same bias
+    four times before splitting its class vectors the same way
+    (`utopia/migrations/0003_graph.sql:3-13`).
+
+    So: `name` embeds the node's name/path alone, `content` embeds the full
+    `search_text`. Short queries are matched against short documents.
+    """
     if client.collection_exists(collection):
         return
+    params = VectorParams(
+        size=EMBEDDING_DIMENSION,
+        distance=Distance.COSINE,
+        on_disk=True,
+    )
     client.create_collection(
         collection_name=collection,
-        vectors_config=VectorParams(
-            size=EMBEDDING_DIMENSION,
-            distance=Distance.COSINE,
-            on_disk=True,
-        ),
+        vectors_config={NAME_VECTOR: params, CONTENT_VECTOR: params},
         quantization_config=ScalarQuantization(
             scalar=ScalarQuantizationConfig(
                 type=ScalarType.INT8,
@@ -121,14 +141,21 @@ def ensure_collection(client: QdrantClient, collection: str = COLLECTION) -> Non
     client.create_payload_index(
         collection_name=collection, field_name="label", field_schema="keyword"
     )
-    logger.info("created Qdrant collection %s", collection)
+    logger.info("created Qdrant collection %s (named vectors)", collection)
 
 
 def upsert_vectors(client: QdrantClient, rows: list[dict[str, Any]], collection: str = COLLECTION) -> None:
-    """rows: {uid, label, embedding}. `uid` is already a uuid5 string, which
-    Qdrant accepts directly as a point id — so a re-upsert of the same entity
-    overwrites in place rather than duplicating, matching the graph's MERGE
-    semantics."""
+    """rows: {uid, label, embedding, name_embedding, embedded_text?}.
+    `uid` is already a uuid5 string, which Qdrant accepts directly as a point
+    id — so a re-upsert of the same entity overwrites in place rather than
+    duplicating, matching the graph's MERGE semantics.
+
+    `embedded_text` (the exact string that was embedded) and
+    `embedded_model` go in the payload instead of an `embedded_at`
+    timestamp: a timestamp answers "was this embedded", but the question that
+    actually matters when backfilling is "is this embedding still of this
+    text", and only the text itself answers that.
+    """
     if not rows:
         return
     client.upsert(
@@ -136,8 +163,18 @@ def upsert_vectors(client: QdrantClient, rows: list[dict[str, Any]], collection:
         points=[
             PointStruct(
                 id=row["uid"],
-                vector=row["embedding"],
-                payload={"label": row["label"], "uid": row["uid"]},
+                vector={
+                    CONTENT_VECTOR: row["embedding"],
+                    # A node with no distinct name reuses its content vector
+                    # rather than leaving the channel empty, so the name
+                    # channel never silently drops a whole label.
+                    NAME_VECTOR: row.get("name_embedding") or row["embedding"],
+                },
+                payload={
+                    "label": row["label"], "uid": row["uid"],
+                    **({"embedded_text": row["embedded_text"]} if row.get("embedded_text") else {}),
+                    "embedded_model": row.get("embedded_model") or EMBEDDING_MODEL,
+                },
             )
             for row in rows
         ],
@@ -152,14 +189,20 @@ def _label_filter(label: str | None) -> Filter | None:
 
 def search(
     client: QdrantClient, embedding: list[float], *, label: str | None = None, limit: int = 20,
-    collection: str = COLLECTION,
+    collection: str = COLLECTION, using: str = CONTENT_VECTOR,
 ) -> list[tuple[str, float]]:
     """Returns (uid, similarity) pairs, best first. Similarity is cosine in
-    [-1, 1]; 1.0 means identical."""
+    [-1, 1]; 1.0 means identical.
+
+    `using` picks the named channel (`name` or `content`). Scores from the
+    two channels are NOT comparable and must never be merged by score — see
+    `graph.search.interleave`.
+    """
     try:
         result = client.query_points(
             collection_name=collection,
             query=embedding,
+            using=using,
             query_filter=_label_filter(label),
             limit=limit,
             search_params=SearchParams(
@@ -170,7 +213,9 @@ def search(
             ),
         )
     except Exception:
-        logger.exception("Qdrant search failed for label=%s collection=%s", label, collection)
+        logger.exception(
+            "Qdrant search failed for label=%s collection=%s using=%s", label, collection, using
+        )
         return []
     return [(str(point.payload.get("uid") or point.id), float(point.score)) for point in result.points]
 

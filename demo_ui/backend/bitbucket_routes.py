@@ -16,6 +16,7 @@ import secrets
 from dataclasses import replace
 from uuid import uuid4
 
+from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
@@ -32,6 +33,7 @@ from connectors.core.ledger import ConnectorLedger
 from connectors.core.oauth_store import OAuthConnectorStore, OAuthStoreError
 from graph import bitbucket_pipeline as bp
 from graph import multigraph
+from graph.embed_batch import close_batch, open_batch
 from graph import vector_store as vector_store_module
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
@@ -301,6 +303,11 @@ async def _run_sync(
         bootstrap_schema(graph)
         vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
         ledger = ConnectorLedger(target.ledger_path)
+                # One request per batch instead of one per record -- see
+        # graph/embed_batch.py. Must be closed on every exit path below.
+        open_batch(OpenAI(timeout=30.0, max_retries=2),
+                   os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                   target.qdrant_collection)
         bp.write_repository(graph, ledger, repository, payload.connection_id)
         done = kept = written = 0
         present_file_keys = {
@@ -385,13 +392,16 @@ async def _run_sync(
              "include_commit_messages": payload.include_commit_messages,
              "include_pull_requests": payload.include_pull_requests},
         )
+        close_batch()
         store.set_run(run_id, "completed", result)
         logger.info("Bitbucket sync completed run=%s %s", run_id, result)
     except asyncio.CancelledError:
+        close_batch()
         store.set_run(run_id, "failed", error="Sync worker stopped before completion")
         raise
     except Exception as exc:
         logger.exception("Bitbucket sync failed run=%s", run_id)
+        close_batch()
         store.set_run(run_id, "failed", error=str(exc)[:1_000])
         raise
 

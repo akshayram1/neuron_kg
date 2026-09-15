@@ -36,6 +36,20 @@ logger = logging.getLogger("neuron.search")
 # regresses on a larger/different golden set later.
 RRF_K = 10
 VECTOR_LEG_WEIGHT = 3.0
+# How the per-label fulltext results are fused into one ranking before RRF.
+# Swept against eval/less_token_golden.jsonl (k x vector_weight x
+# per_method_limit x strategy) at the production pool size (k=10,
+# vector_weight=3.0, per_method_limit=30), all three tied on recall (0.8571,
+# 6/7) and split on MRR: global_score 0.6000, per_label_rank 0.5476,
+# normalized_merge 0.5357.
+#
+# Worth knowing before re-tuning: this ranking FLIPPED when the vector leg
+# changed. Against the old single-vector leg, `global_score` was the worst
+# option on recall (0.5714 vs 0.7143). The legs are not independent, so a
+# strategy chosen against one vector configuration says nothing about
+# another -- re-sweep whenever either leg changes, never carry the constant
+# across.
+FULLTEXT_FUSION = "global_score"
 # Qdrant knows nothing about ACLs, so its results get filtered in the graph
 # afterwards; ask for more than we need so the filter doesn't starve the leg.
 OVERFETCH_FACTOR = 4
@@ -156,6 +170,128 @@ def _vector_search(
     return [visible[uid] for uid, _score in hits if uid in visible][:limit]
 
 
+def interleave(*channels: list[tuple]) -> list[tuple]:
+    """Round-robin several ranked lists into one, de-duplicating by uid.
+
+    Deliberately NOT a merge by score. The `name` and `content` vector
+    channels answer different question shapes and their cosine distances are
+    not on the same scale -- a short query against short text systematically
+    scores higher than a long query against a whole file, so sorting the
+    union by score lets one channel monopolize every top slot. Utopia
+    measured exactly this and reverted it
+    (`utopia/crates/utopia-server/src/type_resolution.rs:203-218`).
+    """
+    seen: set[str] = set()
+    merged: list[tuple] = []
+    for row_index in range(max((len(channel) for channel in channels), default=0)):
+        for channel in channels:
+            if row_index >= len(channel):
+                continue
+            row = channel[row_index]
+            if row[0] in seen:
+                continue
+            seen.add(row[0])
+            merged.append(row)
+    return merged
+
+
+def _vector_search_global(
+    graph: Graph, embedding: list[float], limit: int, scope: AccessScope,
+    providers: list[str] | None = None, labels: list[str] | None = None,
+    collection: str = vector_store.COLLECTION,
+    using: str = vector_store.CONTENT_VECTOR,
+) -> list[tuple[str, str, str, str, float]]:
+    """One Qdrant query across every label, ranked globally.
+
+    This replaces a per-label loop, and the reason is not performance. Cosine
+    similarity against one query, in one embedding space, IS comparable across
+    labels -- so splitting the vector leg per label and ranking within each
+    one threw that comparability away: the best of 5 `Document` nodes and the
+    best of 264 `SourceFile` nodes both came out at rank 0 and therefore
+    scored identically under RRF, even though outranking 263 competitors is a
+    far stronger signal than outranking 4. Measured on the `less_token`
+    graph: all 5 Documents in the entire graph occupied 5 of the top 8 slots
+    for a question about a source file.
+
+    Returns (uid, label, name, summary, score) in Qdrant's own order.
+    """
+    hits = vector_store.search(
+        vector_store.client(), embedding, label=None, limit=limit * OVERFETCH_FACTOR,
+        collection=collection, using=using,
+    )
+    if not hits:
+        return []
+    scores = {uid: score for uid, score in hits}
+    try:
+        acl, acl_params = scope.cypher("sr", "vector_acl")
+        provider_clause = "AND sr.provider IN $providers" if providers else ""
+        label_clause = "AND labels(node)[0] IN $labels" if labels else ""
+        rows = graph.query(
+            f"MATCH (node) WHERE node.uid IN $uids {label_clause} "
+            "MATCH (node)-[:MENTIONED_IN]->(sr:SourceRecord) "
+            f"WHERE sr.deleted_at IS NULL AND {acl} {provider_clause} "
+            "RETURN DISTINCT node.uid, labels(node)[0], node.name, node.search_text",
+            params={"uids": list(scores), **acl_params,
+                    **({"providers": providers} if providers else {}),
+                    **({"labels": labels} if labels else {})},
+        ).result_set
+    except Exception:
+        logger.exception("global vector post-filter failed")
+        return []
+    visible = {
+        r[0]: (r[0], r[1] or "", r[2] or "", r[3] or "", scores[r[0]])
+        for r in rows if r[0] in scores
+    }
+    return [visible[uid] for uid, _score in hits if uid in visible][:limit]
+
+
+def fuse_fulltext_labels(
+    per_label: dict[str, list[tuple[str, str, str, float]]], strategy: str,
+) -> list[tuple[str, str, str, str]]:
+    """Turn per-label fulltext results into ONE globally ordered list.
+
+    FalkorDB's fulltext index is per label (`db.idx.fulltext.queryNodes` takes
+    a label), so unlike the vector leg this one genuinely cannot be queried
+    globally -- BM25 scores come from separate RediSearch indexes over
+    different corpora. The strategies here are three different answers to
+    "how do you compare them anyway", and which one wins is a measurement,
+    not an opinion: run `scripts.sweep_retrieval_params`.
+
+    Pure function on purpose -- no graph, no network -- so the strategies are
+    unit-testable without a live FalkorDB.
+
+    Returns (uid, label, name, summary) ordered best-first.
+    """
+    if strategy == "per_label_rank":
+        # Historical behaviour, kept so the sweep has an honest baseline:
+        # interleave labels by their within-label rank.
+        ordered: list[tuple[str, str, str, str]] = []
+        depth = max((len(hits) for hits in per_label.values()), default=0)
+        for rank in range(depth):
+            for label, hits in per_label.items():
+                if rank < len(hits):
+                    uid, name, summary, _score = hits[rank]
+                    ordered.append((uid, label, name, summary))
+        return ordered
+
+    scored: list[tuple[float, str, str, str, str]] = []
+    for label, hits in per_label.items():
+        if not hits:
+            continue
+        if strategy == "normalized_merge":
+            top = max(score for *_rest, score in hits) or 1.0
+            divisor = top
+        elif strategy == "global_score":
+            divisor = 1.0
+        else:
+            raise ValueError(f"unknown fulltext fusion strategy: {strategy!r}")
+        for uid, name, summary, score in hits:
+            scored.append((score / divisor, uid, label, name, summary))
+
+    scored.sort(key=lambda row: row[0], reverse=True)
+    return [(uid, label, name, summary) for _score, uid, label, name, summary in scored]
+
+
 def find_similar_uid(
     graph: Graph, label: str, embedding: list[float], max_distance: float = 0.1,
     collection: str = vector_store.COLLECTION,
@@ -200,6 +336,7 @@ def hybrid_search(
     scope: AccessScope,
     token_usage: TokenUsage | None = None,
     collection: str = vector_store.COLLECTION,
+    fulltext_strategy: str = FULLTEXT_FUSION,
 ) -> list[SearchHit]:
     """Search across every content-bearing label, fuse fulltext + vector
     rankings via RRF, return the top `limit` overall.
@@ -229,25 +366,55 @@ def hybrid_search(
     rrf_scores: dict[str, float] = {}
     info: dict[str, SearchHit] = {}
 
-    for label in search_labels:
-        fulltext_hits = _fulltext_search(graph, label, query, per_method_limit, scope, providers)
-        for rank, (uid, name, summary, _score) in enumerate(fulltext_hits):
-            rrf_scores[uid] = rrf_scores.get(uid, 0.0) + 1.0 / (RRF_K + rank + 1)
-            hit = info.setdefault(uid, SearchHit(uid, label, name, summary, 0.0))
-            if "fulltext" not in hit.methods:
-                hit.methods.append("fulltext")
+    # Fulltext: fetch per label (the index requires it), then fuse into ONE
+    # global ranking before RRF ever sees a rank number.
+    per_label = {
+        label: _fulltext_search(graph, label, query, per_method_limit, scope, providers)
+        for label in search_labels
+    }
+    for rank, (uid, label, name, summary) in enumerate(
+        fuse_fulltext_labels(per_label, fulltext_strategy)
+    ):
+        rrf_scores[uid] = rrf_scores.get(uid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        hit = info.setdefault(uid, SearchHit(uid, label, name, summary, 0.0))
+        if "fulltext" not in hit.methods:
+            hit.methods.append("fulltext")
 
-        vector_hits = _vector_search(
-            graph, label, embedding, per_method_limit, scope, providers, collection=collection
-        )
-        for rank, (uid, name, summary, _score) in enumerate(vector_hits):
-            rrf_scores[uid] = rrf_scores.get(uid, 0.0) + VECTOR_LEG_WEIGHT / (RRF_K + rank + 1)
-            hit = info.setdefault(uid, SearchHit(uid, label, name, summary, 0.0))
-            if "vector" not in hit.methods:
-                hit.methods.append("vector")
+    # Vector: two global queries, one per named channel, interleaved.
+    # `name` catches "which file handles the Vulcan client" (a short query
+    # naming a thing); `content` catches questions about what the text says.
+    vector_budget = per_method_limit * len(search_labels)
+    content_hits = _vector_search_global(
+        graph, embedding, vector_budget, scope, providers,
+        labels=search_labels, collection=collection, using=vector_store.CONTENT_VECTOR,
+    )
+    name_hits = _vector_search_global(
+        graph, embedding, vector_budget, scope, providers,
+        labels=search_labels, collection=collection, using=vector_store.NAME_VECTOR,
+    )
+    vector_hits = interleave(content_hits, name_hits)[:vector_budget]
+    for rank, (uid, label, name, summary, _score) in enumerate(vector_hits):
+        rrf_scores[uid] = rrf_scores.get(uid, 0.0) + VECTOR_LEG_WEIGHT / (RRF_K + rank + 1)
+        hit = info.setdefault(uid, SearchHit(uid, label, name, summary, 0.0))
+        if "vector" not in hit.methods:
+            hit.methods.append("vector")
 
     for uid, score in rrf_scores.items():
         info[uid].score = score
 
     ranked = sorted(info.values(), key=lambda h: h.score, reverse=True)
+    # Each leg's own yield, before fusion flattens them into one score. A leg
+    # returning 0 is the single most useful thing in these logs: it separates
+    # "ranked badly" from "never a candidate", which look identical in the
+    # final list.
+    logger.info(
+        "  search legs    fulltext=%d vector=%d (content=%d name=%d) "
+        "labels=%d candidates=%d -> top %d",
+        sum(len(rows) for rows in per_label.values()), len(vector_hits),
+        len(content_hits), len(name_hits), len(search_labels), len(info),
+        min(limit, len(ranked)),
+    )
+    empty = [label for label, rows in per_label.items() if not rows]
+    if empty:
+        logger.debug("  fulltext empty for labels: %s", ", ".join(sorted(empty)))
     return ranked[:limit]

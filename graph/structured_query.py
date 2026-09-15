@@ -428,3 +428,40 @@ def _work_items_by_key(
         "this key. PARENT_OF points at the parent ticket, not children."
     )
     return StructuredHits("issue_key", hits, preamble)
+
+
+def find_window_activity(
+    graph: Graph, scope: AccessScope, providers: list[str] | None,
+    *, at: str, at_end: str, limit: int = 8,
+) -> list[SearchHit]:
+    """Entities whose facts land inside `[at, at_end)`, busiest first.
+
+    A dated question names a window that no amount of text similarity can
+    find: "what was worked on in August 2026" is not lexically closer to an
+    August commit than to a July one, so ranking alone returned roadmap
+    documents and two commits from June and July while 39 August commits sat
+    unretrieved. Time is a filter the index cannot express, so it is asked
+    of the graph directly and the results are merged into the text hits.
+    """
+    provider_filter = "AND sr.provider IN $providers" if providers else ""
+    acl, acl_params = scope.cypher("sr", "window_acl")
+    rows = graph.query(
+        f"""
+        MATCH (n)-[r]->(m)
+        WHERE r.valid_at >= $at AND r.valid_at < $at_end
+          AND type(r) <> 'MENTIONED_IN'
+        MATCH (n)-[:MENTIONED_IN]->(sr:SourceRecord)
+        WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
+        RETURN n.uid, labels(n)[0], n.name, n.search_text, count(r) AS weight
+        ORDER BY weight DESC
+        LIMIT $limit
+        """,
+        params={
+            "at": at, "at_end": at_end, "limit": limit, **acl_params,
+            **({"providers": providers} if providers else {}),
+        },
+    ).result_set
+    return [
+        SearchHit(uid, label, name or uid, (text or "")[:2500], float(weight), ["time_window"])
+        for uid, label, name, text, weight in rows
+    ]

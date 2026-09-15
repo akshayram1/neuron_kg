@@ -205,7 +205,7 @@ def write_file(
     ledger.record_edge(record.record_key, edge.rel_type, edge.from_uid, edge.to_uid)
     resolve_exact_anchors(graph, ledger, record, uid, "SourceFile")
     if record.content.strip():
-        _embed_now(uid, "SourceFile", record.content, collection=collection)
+        _embed_now(uid, "SourceFile", record.content, collection=collection, name=record.name)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
                   semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action
@@ -249,7 +249,7 @@ def write_commit(
     link_verified_person_identity(graph, ledger, p_uid, commit.author_email, record.record_key)
     resolve_exact_anchors(graph, ledger, record, uid, "Commit")
     if record.content.strip():
-        _embed_now(uid, "Commit", record.content, collection=collection)
+        _embed_now(uid, "Commit", record.content, collection=collection, name=record.name)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
                   semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action

@@ -25,6 +25,7 @@ from connectors.core.runner import prepare_record
 from connectors.jira.api import JiraIssue, JiraPerson, JiraProject, JiraSite, field_intervals
 from graph.derived import materialize_around
 from graph import vector_store
+from graph.embed_batch import active_batch
 from graph import writer as w
 from graph.resolver import (
     anchor_properties, link_verified_person_identity, resolve_backlinks_for_target,
@@ -36,7 +37,10 @@ logger = logging.getLogger("neuron.jira_pipeline")
 _embed_client: OpenAI | None = None
 
 
-def _embed_now(uid: str, label: str, text: str, collection: str = vector_store.COLLECTION) -> None:
+def _embed_now(
+    uid: str, label: str, text: str, collection: str = vector_store.COLLECTION,
+    name: str | None = None,
+) -> None:
     """Embed and upsert a single node immediately, at write time.
 
     Used for Pass A records that never reach the semantic pass
@@ -51,17 +55,42 @@ def _embed_now(uid: str, label: str, text: str, collection: str = vector_store.C
     Decision/Term/System reasoning), just the same embedding model call the
     semantic pass already makes for every other node -- Pass A stays
     deterministic in the sense that matters (no LLM judgment involved).
+
+    Both named channels are written in ONE request (two inputs, not two
+    calls): `name` embeds the node's own name/path, `content` the full text.
+    See `vector_store.ensure_collection` for why a single combined embedding
+    loses short-query matches.
     """
     global _embed_client
     if _embed_client is None:
-        _embed_client = OpenAI()
+        # An explicit timeout, because the SDK default is a 600s read with two
+        # retries -- up to 30 MINUTES stalled on one record inside a loop of
+        # hundreds. Observed live: an 11-minute silence mid-sync with the
+        # process at 0% CPU. Failing this call fast and letting
+        # `scripts/rebuild_vectors.py` repair the gap is strictly better than
+        # holding an entire ingestion hostage to one hung connection.
+        _embed_client = OpenAI(timeout=30.0, max_retries=2)
     model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    content = vector_store.truncate_for_embedding(text)
+    name_text = vector_store.truncate_for_embedding((name or "").strip() or content)
+
+    # Inside a sync, hand the record to the open batch instead of issuing a
+    # request per record -- see graph/embed_batch.py for the measurement.
+    batch = active_batch()
+    if batch is not None and batch.collection == collection:
+        batch.add(uid, label, content, name_text)
+        return
+
     response = _embed_client.embeddings.create(
-        model=model, input=[vector_store.truncate_for_embedding(text)],
+        model=model, input=[content, name_text],
     )
-    vector_store.upsert_vectors(vector_store.client(), [
-        {"uid": uid, "label": label, "embedding": response.data[0].embedding}
-    ], collection=collection)
+    vector_store.upsert_vectors(vector_store.client(), [{
+        "uid": uid, "label": label,
+        "embedding": response.data[0].embedding,
+        "name_embedding": response.data[1].embedding,
+        "embedded_text": content[:400],
+        "embedded_model": model,
+    }], collection=collection)
 
 
 def _time(value: str) -> datetime | None:
@@ -289,7 +318,7 @@ def write_issue(
         issue.key, len(edges_supported), [e.rel_type for e in edges_supported],
     )
 
-    _embed_now(wi_uid, "WorkItem", record.content, collection=collection)
+    _embed_now(wi_uid, "WorkItem", record.content, collection=collection, name=record.name)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=wi_uid,
                   semantic_status=SemanticStatus.NOT_APPLICABLE)
     return prepared.action

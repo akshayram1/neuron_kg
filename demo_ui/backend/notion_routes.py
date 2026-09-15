@@ -9,6 +9,7 @@ import os
 import secrets
 from uuid import uuid4
 
+from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -23,6 +24,7 @@ from connectors.notion.oauth import (
 )
 from graph import jira_pipeline as common_pipeline
 from graph import multigraph
+from graph.embed_batch import close_batch, open_batch
 from graph import notion_pipeline as np
 from graph import vector_store as vector_store_module
 from graph.falkor_client import get_graph
@@ -40,6 +42,7 @@ logger = logging.getLogger("uvicorn.error.notion_connector")
 class NotionSyncRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
     graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
+    include_child_pages: bool = True
 
 
 def _components() -> tuple[NotionOAuthSettings, NotionStore]:
@@ -127,7 +130,12 @@ async def _run_sync(
             "chunks_total": 0, "entities_written": 0, "facts_written": 0,
         }
         store.set_sync_run(run_id, "running", {
-            **base, "phase": "fetching", "current": "Discovering shared Notion pages…",
+            **base, "phase": "fetching",
+            "current": (
+                "Discovering shared Notion pages and their children…"
+                if payload.include_child_pages
+                else "Discovering shared Notion pages…"
+            ),
         })
 
         def fetch_progress(count: int, title: str) -> None:
@@ -137,7 +145,10 @@ async def _run_sync(
             })
 
         async with NotionApiClient(connection.access_token) as client:
-            pages = await client.fetch_pages(on_progress=fetch_progress)
+            pages = await client.fetch_pages(
+                on_progress=fetch_progress,
+                include_child_pages=payload.include_child_pages,
+            )
 
         total = len(pages)
         base.update({"pages_fetched": total, "records_total": total})
@@ -153,6 +164,11 @@ async def _run_sync(
         bootstrap_schema(graph)
         vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
         ledger = ConnectorLedger(target.ledger_path)
+                # One request per batch instead of one per record -- see
+        # graph/embed_batch.py. Must be closed on every exit path below.
+        open_batch(OpenAI(timeout=30.0, max_retries=2),
+                   os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                   target.qdrant_collection)
         np.write_workspace(graph, ledger, payload.workspace_id, connection.workspace_name)
         kept = written = 0
         for index, page in enumerate(pages, 1):
@@ -200,14 +216,17 @@ async def _run_sync(
             **semantic.token_usage.as_dict("ingestion"),
         }
         store.finish_connection_sync(payload.workspace_id)
+        close_batch()
         store.set_sync_run(run_id, "completed", result)
         logger.info("Notion sync completed run=%s %s", run_id, result)
     except asyncio.CancelledError:
+        close_batch()
         store.set_sync_run(run_id, "failed", error="Sync worker stopped before completion")
         raise
     except Exception as exc:
         logger.exception("Notion sync failed run=%s", run_id)
         store.finish_connection_sync(payload.workspace_id, str(exc)[:1_000])
+        close_batch()
         store.set_sync_run(run_id, "failed", error=str(exc)[:1_000])
         raise
 

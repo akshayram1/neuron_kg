@@ -10,7 +10,7 @@ entity detail and graph view cannot drift.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 _MONTHS = {
@@ -26,8 +26,13 @@ _ISO_RE = re.compile(
     r"(?<![A-Za-z0-9]-)\b((?:19|20)\d{2})"
     r"(?:-(\d{2})(?:-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:Z|[+-]\d{2}:?\d{2})?)?)?)?\b"
 )
+# `aug'26` and `Aug '26` are how people actually write a sprint month, and a
+# four-digit-only rule silently read them as no date at all. The apostrophe is
+# required for the two-digit form: a bare `aug 26` is a day, not a year.
 _MONTH_YEAR_RE = re.compile(
-    r"\b(" + "|".join(_MONTHS) + r")\s+(\d{4})\b", re.IGNORECASE
+    r"\b(" + "|".join(_MONTHS) + r")\s*['’]\s*(\d{2})\b"
+    r"|\b(" + "|".join(_MONTHS) + r")\s+(\d{4})\b",
+    re.IGNORECASE,
 )
 _RECORD_HINT = re.compile(
     r"\b(what did we (know|believe|have on record|learn)|before .+ arrived|"
@@ -48,16 +53,24 @@ def holds_at(
     valid_to: str | None,
     at: datetime | None,
     *,
+    at_end: datetime | None = None,
+    temporal: str = "state",
     attested_from: str | None = None,
     ended_unknown: bool = False,
 ) -> bool:
-    """World axis: did this fact hold at `at`?
+    """World axis: did this fact hold at `at` — or anywhere in `[at, at_end)`?
 
     `at is None` means every moment (show the full timeline).
     A missing start is anchored to `attested_from` (the document/source time),
     never to -infinity — an unknown date is not an open one.
     A missing end means still holds, unless `ended_unknown` (the text said it
     ended but not when), in which case the end is the attesting moment.
+
+    `at_end` turns the read into a window, because a month is an interval and
+    collapsing it to its first instant answers a question nobody asked: a
+    snapshot at 2026-08-01T00:00 excludes everything that happened *during*
+    August by construction. `temporal` decides what "in the window" means —
+    an `event` must fall inside it, a `state` need only overlap it.
     """
     if at is None:
         return True
@@ -66,6 +79,16 @@ def holds_at(
         end = parse_iso(valid_to) or parse_iso(attested_from)
     else:
         end = parse_iso(valid_to)
+    if at_end is not None:
+        if temporal == "eternal":
+            return True
+        if temporal == "event":
+            # An event's instant is its start; an open end says nothing about
+            # when it happened, so never widen an event to the whole window.
+            return start is not None and at <= start < at_end
+        if start is None and end is None:
+            return False
+        return (end is None or end > at) and (start is None or start < at_end)
     if start is not None and at < start:
         return False
     if end is not None and at >= end:
@@ -103,27 +126,67 @@ def infer_query_clocks(question: str) -> tuple[str | None, str | None]:
     A record-axis hint ("what did we believe") puts the date on `as_of`;
     otherwise a dated question is world time. The caller may still override
     either from the API.
+
+    Point form, kept for callers that read a single moment. A reader that can
+    honour an interval should call `infer_query_window` instead — see there
+    for why "August 2026" is not the instant 2026-08-01T00:00.
     """
-    date = _first_date(question)
-    if date is None:
-        return None, None
+    at, _, as_of = infer_query_window(question)
+    return at, as_of
+
+
+def infer_query_window(question: str) -> tuple[str | None, str | None, str | None]:
+    """`(at, at_end, as_of)` — the world-time *interval* a question names.
+
+    The precision of the phrase sets the width: "August 2026" and "2026-08"
+    are a month, "2026" a year, "2026-08-14" a day, and only an explicit time
+    is an instant (`at_end is None`). The record axis (`as_of`) stays a point
+    — "what did we believe in August" reads the ledger as it stood when the
+    month opened, which is a moment, not a span.
+    """
+    window = _first_window(question)
+    if window is None:
+        return None, None, None
+    start, end = window
     if _RECORD_HINT.search(question):
-        return None, date
-    return date, None
+        return None, None, start
+    return start, end, None
 
 
-def _first_date(text: str) -> str | None:
+def _first_window(text: str) -> tuple[str, str | None] | None:
+    """`(start, end)` for the first date in `text`; `end is None` = instant."""
     month = _MONTH_YEAR_RE.search(text)
     if month:
-        return f"{month.group(2)}-{_MONTHS[month.group(1).lower()]:02d}-01T00:00:00+00:00"
+        if month.group(1):                      # aug'26 — this century
+            year, mon = 2000 + int(month.group(2)), _MONTHS[month.group(1).lower()]
+        else:                                   # August 2026
+            year, mon = int(month.group(4)), _MONTHS[month.group(3).lower()]
+        return _iso(year, mon, 1), _month_after(year, mon)
     iso = _ISO_RE.search(text)
     if not iso:
         return None
-    year, mon, day = iso.group(1), iso.group(2) or "01", iso.group(3) or "01"
-    hour, minute, second = iso.group(4) or "00", iso.group(5) or "00", iso.group(6) or "00"
+    year, mon, day = int(iso.group(1)), iso.group(2), iso.group(3)
     if iso.group(4):
-        return f"{year}-{mon}-{day}T{hour}:{minute}:{second}+00:00"
-    return f"{year}-{mon}-{day}T00:00:00+00:00"
+        hour, minute, second = iso.group(4), iso.group(5), iso.group(6) or "00"
+        return f"{year:04d}-{mon}-{day}T{hour}:{minute}:{second}+00:00", None
+    if mon is None:
+        return _iso(year, 1, 1), _iso(year + 1, 1, 1)
+    if day is None:
+        return _iso(year, int(mon), 1), _month_after(year, int(mon))
+    start = _iso(year, int(mon), int(day))
+    return start, _add_day(start)
+
+
+def _iso(year: int, month: int, day: int) -> str:
+    return f"{year:04d}-{month:02d}-{day:02d}T00:00:00+00:00"
+
+
+def _month_after(year: int, month: int) -> str:
+    return _iso(year + 1, 1, 1) if month == 12 else _iso(year, month + 1, 1)
+
+
+def _add_day(start: str) -> str:
+    return (parse_iso(start) + timedelta(days=1)).isoformat()
 
 
 def interval_note(valid_from: str | None, valid_to: str | None, *, ended_unknown: bool = False) -> str | None:

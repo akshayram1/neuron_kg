@@ -215,3 +215,34 @@ def is_relation_allowed(subject_kind: str, relation: str, object_kind: str) -> b
     not stored. Callers (Block 7's extraction validation, Tier-3 adjudication)
     must check this before writing an edge."""
     return relation in RELATION_TYPE_MAP.get((subject_kind, object_kind), [])
+
+
+AS_IS = "as_is"
+SWAPPED = "swapped"
+
+
+def resolve_direction(subject_kind: str, relation: str, object_kind: str) -> str | None:
+    """Which way round this triple is allowed to be written, if either.
+
+    Returns `AS_IS`, `SWAPPED`, or None when neither direction is in the
+    ontology.
+
+    Why a swap instead of a rejection: argument order is an encoding
+    convention of the relation, not a claim about the world, and English
+    invites the model to state it backwards -- "X is an employee of Y" reads
+    as naturally as the declared `employee (organization -> person)`. The map
+    already knows which endpoint kinds each relation takes, so when the
+    reverse triple is valid and the stated one is not, the model got the
+    direction wrong, not the fact. Salvaging it is strictly better than
+    discarding a true statement, PROVIDED it is never silent: callers record
+    a `direction_corrected` trace.
+
+    Utopia reached the same conclusion after three rounds of prompt tuning
+    failed to suppress the reversal
+    (`utopia/docs/decisions/0012-the-ontology-is-a-contract-not-a-suggestion.md`).
+    """
+    if is_relation_allowed(subject_kind, relation, object_kind):
+        return AS_IS
+    if is_relation_allowed(object_kind, relation, subject_kind):
+        return SWAPPED
+    return None

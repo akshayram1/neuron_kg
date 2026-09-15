@@ -7,7 +7,9 @@ doesn't give you (plan.md §6, quoting the old `graph/ask.py`'s own framing).
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from dataclasses import dataclass, field
 
 from falkordb import Graph
@@ -17,10 +19,20 @@ from pydantic import BaseModel, Field
 from graph.search import SearchHit, hybrid_search
 from graph.access import AccessScope
 from graph.entity import fetch_entity_detail
-from graph.structured_query import find_named_persons, resolve_structured
-from graph.time_axis import infer_query_clocks
+from graph.structured_query import (
+    find_named_persons, find_window_activity, resolve_structured,
+)
+from graph.time_axis import infer_query_window
 from graph.token_usage import TokenUsage
 from graph import vector_store
+
+logger = logging.getLogger("neuron.chat")
+
+# One INFO line per retrieval stage. A wrong answer is almost never "the LLM
+# hallucinated" -- it is the wrong evidence reaching it, and until these lines
+# existed the only way to tell an empty window from an empty graph was to
+# re-run the query by hand in a REPL.
+_HIT_PREVIEW = 8
 
 SYSTEM_PROMPT = """\
 You answer questions about a company's Jira/GitHub/Bitbucket/Notion
@@ -91,6 +103,21 @@ class ChatResult:
     token_usage: TokenUsage = field(default_factory=TokenUsage)
 
 
+def _log_hits(stage: str, hits: list[SearchHit]) -> None:
+    """Names + scores, not just a count: two hits at 0.25 and 0.03 is a very
+    different retrieval from two at 0.25 and 0.24."""
+    if not hits:
+        logger.info("  %-14s none", stage)
+        return
+    shown = ", ".join(
+        f"[{hit.label}] {hit.name[:44]}={hit.score:.4f}"
+        f"{'/' + '+'.join(hit.methods) if hit.methods else ''}"
+        for hit in hits[:_HIT_PREVIEW]
+    )
+    more = f" (+{len(hits) - _HIT_PREVIEW} more)" if len(hits) > _HIT_PREVIEW else ""
+    logger.info("  %-14s %d: %s%s", stage, len(hits), shown, more)
+
+
 def _format_fact(fact: dict) -> str:
     inferred = " [inferred]" if fact.get("derived") else ""
     interval = f"  ({fact['interval']})" if fact.get("interval") else ""
@@ -135,9 +162,11 @@ def _assignment_facts(facts: list[dict]) -> tuple[list[dict], list[str]]:
 
 def _entity_evidence(
     graph: Graph, uid: str, scope: AccessScope, providers: list[str] | None,
-    *, at: str | None, as_of: str | None,
+    *, at: str | None, at_end: str | None, as_of: str | None,
 ) -> tuple[list[dict], list[str], set[str]]:
-    detail = fetch_entity_detail(graph, scope, uid, at=at, as_of=as_of, providers=providers)
+    detail = fetch_entity_detail(
+        graph, scope, uid, at=at, at_end=at_end, as_of=as_of, providers=providers,
+    )
     if detail is None:
         return [], [], set()
     facts = detail["facts"] + detail["past"] + detail["derived"]
@@ -264,7 +293,7 @@ def run_chat_turn(
     graph: Graph, client: OpenAI, question: str, *, model: str | None = None,
     search_limit: int = 6, providers: list[str] | None = None,
     scope: AccessScope, at: str | None = None, as_of: str | None = None,
-    collection: str = vector_store.COLLECTION,
+    at_end: str | None = None, collection: str = vector_store.COLLECTION,
 ) -> ChatResult:
     # Deliberately NOT the same model/env var as semantic_pass's extraction
     # call. Extraction needs gpt-5.6-sol's reliability at filling typed
@@ -276,7 +305,16 @@ def run_chat_turn(
     # answer omitted). Defaulting to luna here, not to $LLM_MODEL.
     model = model or os.getenv("CHAT_MODEL", "gpt-5.6-luna")
     token_usage = TokenUsage()
-    inferred_at, inferred_as_of = infer_query_clocks(question)
+    started = time.monotonic()
+    logger.info(
+        "chat q=%r model=%s collection=%s limit=%d providers=%s",
+        question[:160], model, collection, search_limit, providers or "all",
+    )
+    inferred_at, inferred_at_end, inferred_as_of = infer_query_window(question)
+    # Only inherit the inferred end when the caller did not pin `at` itself:
+    # a caller-supplied instant must not silently acquire a month's width.
+    if at is None:
+        at, at_end = inferred_at, at_end or inferred_at_end
     at = at or inferred_at
     as_of = as_of or inferred_as_of
     structured = resolve_structured(graph, question, scope, providers)
@@ -287,13 +325,30 @@ def run_chat_turn(
             graph, client, question, limit=search_limit, providers=providers, scope=scope,
             token_usage=token_usage, collection=collection,
         )
+        _log_hits("hybrid", hits)
         # Inject the whole SAME_AS cluster, not the first equal-ratio name.
         # Bitbucket Aashish and Jira Aashish score the same; first-wins hid
         # the four live ASSIGNED_TO edges on the Jira node.
         seen = {hit.uid for hit in hits}
         extras = [p for p in find_named_persons(graph, question, scope, providers) if p.uid not in seen]
         if extras:
+            _log_hits("named-person", extras)
             hits = extras + hits
+        # A window is a filter the text index cannot express: an August commit
+        # is not lexically closer to "what was worked on in August" than a July
+        # one. Ask the graph for the window directly, or the dated question is
+        # answered from whatever happened to rank well.
+        if at and at_end:
+            seen = {hit.uid for hit in hits}
+            in_window = [
+                w for w in find_window_activity(
+                    graph, scope, providers, at=at, at_end=at_end, limit=search_limit,
+                )
+                if w.uid not in seen
+            ]
+            if in_window:
+                _log_hits("time-window", in_window)
+                hits = in_window + hits
 
     if not hits and structured is None:
         return ChatResult(
@@ -319,7 +374,7 @@ def run_chat_turn(
     context_blocks = []
     for hit in hits:
         facts, edge_ids, record_keys = _entity_evidence(
-            graph, hit.uid, scope, providers, at=at, as_of=as_of,
+            graph, hit.uid, scope, providers, at=at, at_end=at_end, as_of=as_of,
         )
         if structured is not None and structured.kind in {"unassigned", "assigned_to"}:
             facts, edge_ids = _assignment_facts(facts)
@@ -331,10 +386,23 @@ def run_chat_turn(
         source_keys = record_keys_by_source.setdefault(hit.name.strip(), set())
         source_keys.update(record_keys)
         fact_lines = "\n".join(_format_fact(fact) for fact in facts) or "  (no recorded facts)"
-        context_blocks.append(f"[{hit.label}] {hit.name}\n{hit.summary}\n{fact_lines}")
+        block = f"[{hit.label}] {hit.name}\n{hit.summary}\n{fact_lines}"
+        context_blocks.append(block)
+        # Per block, because one block routinely dominates: a merge commit
+        # touching 400 files contributed 46% of a 54k-token context while
+        # twelve blocks looked evenly sized from the outside.
+        logger.info(
+            "  evidence       [%s] %s facts=%d records=%d chars=%d",
+            hit.label, hit.name[:48], len(facts), len(record_keys), len(block),
+        )
 
     clock = []
-    if at:
+    if at and at_end:
+        # Name the interval, not just its start: the model previously read a
+        # month's opening instant as the whole question and answered "nothing
+        # had happened yet", which is true and useless.
+        clock.append(f"world time window [{at}, {at_end})")
+    elif at:
         clock.append(f"world time at={at}")
     if as_of:
         clock.append(f"record time as_of={as_of}")
@@ -342,6 +410,13 @@ def run_chat_turn(
     if structured is not None:
         header += structured.preamble + "\n\n"
     context = header + "\n\n".join(context_blocks)
+    # Chars, not an estimated token count: chars/4 read 40k against a real
+    # 54,835 here. The exact figure arrives on the `answer` line a few
+    # seconds later, so a wrong guess would only be something to unlearn.
+    logger.info(
+        "  context        blocks=%d facts=%d chars=%d",
+        len(context_blocks), len(all_facts), len(context),
+    )
 
     response = client.responses.parse(
         model=model,
@@ -364,6 +439,15 @@ def run_chat_turn(
     else:
         used_record_keys = _used_record_keys(parsed.used_sources, record_keys_by_source)
     citations_by_key = _resolve_records(graph, used_record_keys, scope)
+    logger.info(
+        "  answer         cited_blocks=%d citations=%d answer_chars=%d "
+        "tokens_in=%d tokens_out=%d %.2fs",
+        len(parsed.used_sources), len(citations_by_key), len(parsed.answer),
+        token_usage.input_tokens, token_usage.output_tokens,
+        time.monotonic() - started,
+    )
+    if parsed.used_sources:
+        logger.info("  cited          %s", ", ".join(parsed.used_sources)[:400])
 
     return ChatResult(
         answer=parsed.answer,

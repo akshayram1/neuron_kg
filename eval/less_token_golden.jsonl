@@ -1,0 +1,15 @@
+# Golden set for the `less_token` graph (no-LLM ingestion for Jira/GitHub/Bitbucket).
+# Run: uv run python -m scripts.evaluate_retrieval eval/less_token_golden.jsonl --graph less_token --k 8
+#
+# Cases 1-3 are CONFIRMED FAILURES reproduced by hand before this set existed:
+# retrieval returned an empty stub file, or omitted the named file entirely,
+# because short/near-empty documents outrank substantive ones and because RRF
+# ranks are computed per label (best-of-5 Documents scores the same as
+# best-of-264 SourceFiles). Cases 4-7 are regression anchors that pass today.
+{"query": "which file handles the Vulcan client", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["3e403dee-d1a9-5355-ab30-47b8827b2f0d"]}
+{"query": "what does src/argus/schemas/lineage.py do", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["1d2a9e67-bcee-598a-bdb9-b65044e09d0e"]}
+{"query": "what does Animesh do", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["9cafb1d7-56fa-56e0-ba21-128c3e62244d", "bbd440f8-02be-5f85-ba6d-9c808e44231e", "99fc3d3e-d709-5fdd-a1e9-c1acea27b130", "92d0244f-8fb9-55a5-a860-275c7fc37a72"]}
+{"query": "Is Argus deployed to the dev environment yet?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["1226f48b-16a2-55c7-b9de-1885b27e2273"]}
+{"query": "Why is usage hidden or stubbed in v1?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["53f06b2d-333d-5eb3-b0fc-8d593db60458"]}
+{"query": "What are the known gaps in Argus's Glossary and Context Cards?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["365c58b1-4bd7-5cb1-b0a4-1a6543434a80"]}
+{"query": "Which commit refactored the Argus tools and middleware structure?", "providers": ["jira", "bitbucket", "notion"], "expected_uids": ["e71bd9b4-82ae-5129-9dc3-e9e7d00fce8b"]}

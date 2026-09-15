@@ -151,7 +151,24 @@ def write_page(
                            parent_uid, uid, record.record_key, record.reference_time))
     ledger.record_edges_batch(record.record_key, edges)
     resolve_exact_anchors(graph, ledger, record, uid, "Document")
-    ledger.save_chunks(record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks])
+    # A page that moved keeps its text but not its record_key, and chunk ids
+    # are namespaced by record_key -- without this the whole page would be
+    # re-extracted for a rename alone.
+    moved_from = (
+        ledger.find_moved_from(record.record_key, prepared.content_hash)
+        if prepared.action == RecordAction.INSERT else None
+    )
+    diff = ledger.save_chunks(
+        record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks],
+        adopt_from=moved_from.record_key if moved_from else None,
+    )
+    if moved_from:
+        logger.info("page %s looks moved from %s", page.title, moved_from.record_key)
+    if diff.kept or diff.superseded or diff.reused_done:
+        logger.info(
+            "page %s chunks: %d new, %d unchanged (%d already extracted -- no LLM call), %d superseded",
+            page.title, diff.added, diff.kept, diff.reused_done, diff.superseded,
+        )
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
                   semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
     return prepared.action

@@ -5,6 +5,7 @@ from __future__ import annotations
 from falkordb import Graph
 
 from graph.access import AccessScope
+from graph.axioms import DEFAULT_AXIOMS
 from graph.time_axis import as_fact_dict, held_at, holds_at, parse_iso
 from graph.writer import make_uid
 
@@ -15,6 +16,7 @@ def fetch_entity_detail(
     uid: str,
     *,
     at: str | None = None,
+    at_end: str | None = None,
     as_of: str | None = None,
     providers: list[str] | None = None,
 ) -> dict | None:
@@ -22,11 +24,18 @@ def fetch_entity_detail(
     if entity is None:
         return None
     at_point, as_of_point = parse_iso(at), parse_iso(as_of)
+    # `at_end` makes the read a window rather than a snapshot; an event
+    # relation must land inside it, a state need only overlap it, so the
+    # relation's temporal class comes from the axiom store.
+    end_point = parse_iso(at_end)
+    axioms = DEFAULT_AXIOMS if end_point is not None else None
     facts = _facts(graph, scope, uid, providers)
     visible = [
         fact for fact in facts
         if holds_at(
             fact["validFrom"], fact["validTo"], at_point,
+            at_end=end_point,
+            temporal="state" if axioms is None else axioms.temporal_of(fact["relation"]),
             attested_from=fact.get("attestedFrom"),
             ended_unknown=bool(fact.get("endedUnknown")),
         ) and (as_of_point is None or held_at(fact["observedFrom"], fact["observedTo"], as_of_point))

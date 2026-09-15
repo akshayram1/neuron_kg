@@ -359,6 +359,7 @@ body {
 .connection-disconnect { padding: 0 9px !important; border-color: rgba(255, 108, 108, .35) !important; background: rgba(255, 108, 108, .08) !important; color: #ff9d9d !important; }
 .connection-disconnect:hover:not(:disabled) { border-color: rgba(255, 108, 108, .6) !important; background: rgba(255, 108, 108, .14) !important; }
 .connection-card code { display: block; width: fit-content; max-width: 100%; overflow: hidden; margin: 11px 0 0 36px; padding: 4px 6px; border: 1px solid #273343; border-radius: 5px; color: #718198; font-size: 8px; text-overflow: ellipsis; }
+.notion-child-check { margin: 10px 0 0 36px; }
 .sync-result, .sync-failed { margin: 10px 0 0 36px; font-size: 8px; line-height: 1.5; }
 .sync-result { color: #71c9aa; }
 .sync-failed { color: #d89589; }

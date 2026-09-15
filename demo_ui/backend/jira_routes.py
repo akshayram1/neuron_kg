@@ -20,6 +20,7 @@ import os
 import secrets
 from uuid import uuid4
 
+from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -30,6 +31,7 @@ from connectors.jira.api import JiraApiClient, JiraApiError, JiraSite, JiraUnaut
 from connectors.jira.oauth import JiraConfigurationError, JiraOAuthError, JiraOAuthSettings
 from graph import jira_pipeline as jp
 from graph import multigraph
+from graph.embed_batch import close_batch, open_batch
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
 from graph import vector_store as vector_store_module
@@ -222,6 +224,11 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
                 lambda c: c.issues(payload.cloud_id, project.key, on_progress=fetch_progress),
             )
 
+                # One request per batch instead of one per record -- see
+        # graph/embed_batch.py. Must be closed on every exit path below.
+        open_batch(OpenAI(timeout=30.0, max_retries=2),
+                   os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                   target.qdrant_collection)
         jp.write_project(graph, ledger, project, site, payload.connection_id)
         total = len(issues)
         kept = written = 0
@@ -267,10 +274,12 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
                 "project_name": project.name,
             },
         )
+        close_batch()
         store.set_run(run_id, "completed", result)
         logger.info("Jira sync completed run=%s %s", run_id, result)
     except Exception as exc:
         logger.exception("Jira sync failed run=%s", run_id)
+        close_batch()
         store.set_run(run_id, "failed", error=str(exc)[:1000])
         raise
 

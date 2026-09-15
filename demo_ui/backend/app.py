@@ -191,6 +191,7 @@ async def sources(
 async def entity_detail(
     uid: str, request: Request,
     at: str | None = Query(default=None),
+    at_end: str | None = Query(default=None),
     as_of: str | None = Query(default=None),
     providers: list[str] | None = Query(default=None),
     graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
@@ -200,7 +201,7 @@ async def entity_detail(
     try:
         detail = fetch_entity_detail(
             get_graph(name=target.falkor_name), access_scope_for_request(request), uid,
-            at=at, as_of=as_of, providers=providers,
+            at=at, at_end=at_end, as_of=as_of, providers=providers,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="at and as_of must be ISO-8601 timestamps") from exc

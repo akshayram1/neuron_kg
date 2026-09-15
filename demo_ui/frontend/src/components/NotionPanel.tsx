@@ -15,6 +15,7 @@ export default function NotionPanel({ open, graphName, onClose, onConnectionsCha
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [includeChildPages, setIncludeChildPages] = useState(true);
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -65,7 +66,7 @@ export default function NotionPanel({ open, graphName, onClose, onConnectionsCha
 
   const sync = async (workspaceId: string) => {
     try {
-      const started = await startNotionSync(workspaceId, graphName);
+      const started = await startNotionSync(workspaceId, graphName, includeChildPages);
       setRuns((current) => ({ ...current, [workspaceId]: {
         run_id: started.run_id, workspace_id: workspaceId, status: "queued",
         started_at: new Date().toISOString(), finished_at: null,
@@ -86,10 +87,10 @@ export default function NotionPanel({ open, graphName, onClose, onConnectionsCha
   return <div className="connector-overlay" role="presentation" onMouseDown={onClose}>
     <aside className="connector-drawer" role="dialog" aria-modal="true" aria-label="Notion connection" onMouseDown={(event) => event.stopPropagation()}>
       <div className="connector-header"><div className="notion-logo">N</div><div><span className="eyebrow">Knowledge source</span><h2>Connect Notion</h2></div><button className="connector-close" onClick={onClose}><X size={18} /></button></div>
-      <p className="connector-copy">Select pages in Notion’s secure OAuth window. Their titles, hierarchy and content become one connected workspace graph.</p>
+      <p className="connector-copy">Select a parent page in Notion’s OAuth window. Sync walks that page and ingests child pages the integration can read — you do not have to tick every nested page.</p>
       {error && <div className="connector-error">{error}</div>}
       <div className="connector-actions oauth-only"><button className="connect-notion" onClick={() => void connect()} disabled={connecting}>{connecting ? <LoaderCircle className="spin" size={15} /> : <ExternalLink size={15} />} Continue with Notion</button></div>
-      <div className="oauth-note">Only pages shared with this integration can be read.</div>
+      <div className="oauth-note">Child pages with their own permissions still need to be shared with this integration in Notion.</div>
       <div className="connection-list-title"><span>Connected workspaces</span><span>{connections.length}</span></div>
       {loading && !connections.length && <div className="connection-empty"><LoaderCircle className="spin" size={16} /> Checking workspaces…</div>}
       {!loading && !connections.length && <div className="connection-empty">No Notion workspace connected yet.</div>}
@@ -101,6 +102,10 @@ export default function NotionPanel({ open, graphName, onClose, onConnectionsCha
             <button className="connection-disconnect" onClick={() => void disconnect(connection)} disabled={disconnecting === connection.workspace_id}>{disconnecting === connection.workspace_id ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}</button>
           </div></div>
           <code>{connection.workspace_id}</code>
+          <label className="github-check notion-child-check">
+            <input type="checkbox" checked={includeChildPages} disabled={syncing} onChange={(event) => setIncludeChildPages(event.target.checked)} />
+            Include child pages
+          </label>
           <SyncProgress progress={run?.result} provider="Notion" syncing={syncing} />
           {run?.status === "completed" && run.result && <div className="sync-result">{run.result.pages_fetched ?? 0} pages · {run.result.records_written ?? 0} written · {run.result.facts_written ?? 0} facts</div>}
           {connection.last_sync_error && !syncing && <div className="sync-failed">Last sync: {connection.last_sync_error}</div>}
