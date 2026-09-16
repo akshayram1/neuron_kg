@@ -182,7 +182,8 @@ def upsert_fact_edges(
             r.derived_rule = row.derived_rule,
             r.premise_fact_uids = row.premise_fact_uids,
             r.ended_unknown = coalesce(row.ended_unknown, false),
-            r.attested_from = row.attested_from
+            r.attested_from = row.attested_from,
+            r.adopted_batch = row.adopted_batch
         ON MATCH SET
             r.last_confirmed_at = $now,
             r.valid_at = CASE WHEN r.invalid_at IS NULL THEN r.valid_at ELSE coalesce(row.valid_at, $now) END,
@@ -192,6 +193,7 @@ def upsert_fact_edges(
             r.premise_fact_uids = CASE WHEN row.premise_fact_uids IS NULL THEN r.premise_fact_uids ELSE row.premise_fact_uids END,
             r.ended_unknown = CASE WHEN row.ended_unknown IS NULL THEN r.ended_unknown ELSE row.ended_unknown END,
             r.attested_from = CASE WHEN row.attested_from IS NULL THEN r.attested_from ELSE row.attested_from END,
+            r.adopted_batch = CASE WHEN row.adopted_batch IS NULL THEN r.adopted_batch ELSE row.adopted_batch END,
             r.source_record_keys = CASE
                 WHEN row.source_record_keys[0] IN coalesce(r.source_record_keys, [])
                 THEN r.source_record_keys

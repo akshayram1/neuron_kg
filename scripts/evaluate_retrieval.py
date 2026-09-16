@@ -29,9 +29,8 @@ from openai import OpenAI
 
 from graph import multigraph, vector_store
 from graph.access import AccessScope
-from graph.chat import run_chat_turn
+from graph.chat import retrieve, run_chat_turn
 from graph.falkor_client import get_graph
-from graph.search import hybrid_search
 from util import paths as _paths  # noqa: F401 — load repo .env
 from util.paths import DATA_DIR
 
@@ -127,7 +126,11 @@ def main() -> None:
     results = []
     for case in load_cases(args.dataset):
         providers = case.get("providers")
-        hits = hybrid_search(
+        # `retrieve`, not `hybrid_search`: the product composes the ranker with
+        # the structured resolver, the name matcher and the time window. Scoring
+        # the ranker alone measured a narrower path than ships -- three nilus
+        # cases read 0 while answering correctly in chat.
+        _structured, hits = retrieve(
             graph, client, case["query"], limit=args.k,
             providers=providers, scope=scope,
             collection=target.qdrant_collection,

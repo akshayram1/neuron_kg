@@ -446,3 +446,56 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ---- ontology adoption ------------------------------------------------ */
+.ontology-panel {
+  position: absolute; right: 16px; bottom: 16px; width: 330px; max-height: 62%;
+  display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
+  padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-raised); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+  font-size: 12px;
+}
+.ontology-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ontology-switch { display: flex; align-items: center; gap: 6px; color: var(--soft); cursor: pointer; }
+.ontology-switch input { accent-color: var(--blue); cursor: pointer; }
+.ontology-lede { margin: 0; color: var(--soft); line-height: 1.5; }
+.ontology-lede strong { color: var(--gold); }
+.ontology-muted { margin: 0; color: var(--muted); line-height: 1.5; }
+
+.ontology-shapes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ontology-shapes li {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 7px 9px; border-radius: 7px; background: rgba(255, 255, 255, 0.025);
+  border-left: 2px solid var(--blue);
+}
+.ontology-shapes code { font-size: 11px; color: #eaf0f8; word-break: break-word; }
+.ontology-counts { color: var(--muted); font-size: 11px; }
+/* The sample is the point: a threshold says a shape is common, only an
+   example shows it is a tautology. */
+.ontology-example { color: var(--soft); font-size: 11px; font-style: italic; word-break: break-word; }
+
+.ontology-adopt {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px; border-radius: 7px; cursor: pointer;
+  border: 1px solid rgba(100, 168, 255, 0.4); background: rgba(100, 168, 255, 0.12);
+  color: var(--blue); font-weight: 500;
+}
+.ontology-adopt:disabled { opacity: 0.55; cursor: default; }
+.ontology-fineprint {
+  display: flex; align-items: flex-start; gap: 5px; margin: 0;
+  color: var(--muted); font-size: 11px; line-height: 1.45;
+}
+.ontology-fineprint svg { flex-shrink: 0; margin-top: 2px; }
+
+.ontology-history { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+.ontology-batch { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ontology-batch > div { display: flex; flex-direction: column; gap: 2px; }
+.ontology-batch code { font-size: 11px; color: var(--soft); }
+.ontology-undo {
+  display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px;
+  border: 1px solid var(--line); background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 11px;
+}
+.ontology-undo:hover:not(:disabled) { color: var(--gold); border-color: rgba(255, 209, 102, 0.4); }
+.ontology-undo:disabled { opacity: 0.5; cursor: default; }
+.ontology-note { margin: 0; color: var(--green); line-height: 1.45; }

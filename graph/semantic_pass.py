@@ -416,6 +416,11 @@ def _write_extraction(
             "model": extraction_model,
             "valid_at": source_time,
             "direction_corrected": direction == SWAPPED,
+            # Stamped only when this triple entered the vocabulary through an
+            # adoption. It is what makes the batch revertible: `unadopt` drops
+            # the axiom rows, then deletes exactly the edges they let in --
+            # edges from the seeded vocabulary carry NULL and are never touched.
+            "adopted_batch": axioms.adopted_batch_for(subject_kind, fact.relation, object_kind),
         }])
         edges_supported.append(RecordEdgeRef(fact.relation, subject_uid, object_uid))
         facts_written += 1

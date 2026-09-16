@@ -43,6 +43,7 @@ from demo_ui.backend.job_worker import run_worker
 from graph import multigraph
 from graph import vector_store
 from graph.chat import run_chat_turn
+from graph import adoption
 from graph.entity import fetch_entity_detail
 from graph.falkor_client import get_graph
 from graph.graph_view import fetch_graph, fetch_sources
@@ -288,6 +289,85 @@ async def clear_graph(graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_N
         target.name, before,
     )
     return {"cleared": True, "nodes_removed": before, "graph": target.name}
+
+
+
+# --------------------------------------------------------- ontology adoption
+#
+# After a sync, the refused facts are the one thing the user cannot see: the
+# graph looks complete because what is missing was never written. These
+# endpoints surface that, and make widening the vocabulary a decision rather
+# than a SQL statement.
+
+
+class AdoptRequest(BaseModel):
+    graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
+    min_docs: int = Field(default=adoption.MIN_DOCS, ge=1, le=50)
+    min_facts: int = Field(default=adoption.MIN_FACTS, ge=1, le=1000)
+
+
+class AutoExtendRequest(BaseModel):
+    graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
+    enabled: bool
+
+
+@app.get("/api/ontology/pending")
+async def ontology_pending(
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+    min_docs: int = Query(default=adoption.MIN_DOCS, ge=1, le=50),
+    min_facts: int = Query(default=adoption.MIN_FACTS, ge=1, le=1000),
+) -> dict:
+    """What this sync left out of the graph, and what adopting would recover."""
+    ledger = ConnectorLedger(_resolve(graph_name).ledger_path)
+    return adoption.pending_report(ledger, min_docs=min_docs, min_facts=min_facts)
+
+
+@app.get("/api/ontology/adoptions")
+async def ontology_adoptions(
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+    include_undone: bool = Query(default=False),
+) -> dict:
+    target = _resolve(graph_name)
+    return {"adoptions": adoption.adoptions_with_edges(
+        get_graph(name=target.falkor_name), ConnectorLedger(target.ledger_path),
+        include_undone=include_undone,
+    )}
+
+
+@app.post("/api/ontology/adopt")
+async def ontology_adopt(payload: AdoptRequest) -> dict:
+    """Adopt every eligible shape as one revertible batch. Explicit, so it
+    runs whatever the switch says."""
+    ledger = ConnectorLedger(_resolve(payload.graph_name).ledger_path)
+    result = adoption.adopt(
+        ledger, min_docs=payload.min_docs, min_facts=payload.min_facts, force=True,
+    )
+    return {
+        "adopted": result.adopted, "batch_id": result.batch_id,
+        "shapes": result.shapes, "facts_expected": result.facts_expected,
+        "chunks_requeued": result.chunks_requeued,
+        "skipped_reason": result.skipped_reason,
+        # The chunks are queued, not extracted. Saying so here stops the UI
+        # from reporting a recovery that has not happened yet.
+        "note": "re-run the sync to extract the requeued chunks",
+    }
+
+
+@app.post("/api/ontology/unadopt/{batch_id}")
+async def ontology_unadopt(
+    batch_id: str,
+    graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_NAME),
+) -> dict:
+    target = _resolve(graph_name)
+    ledger = ConnectorLedger(target.ledger_path)
+    return adoption.unadopt(get_graph(name=target.falkor_name), ledger, batch_id)
+
+
+@app.post("/api/ontology/auto-extend")
+async def ontology_auto_extend(payload: AutoExtendRequest) -> dict:
+    ledger = ConnectorLedger(_resolve(payload.graph_name).ledger_path)
+    adoption.set_auto_extend(ledger, payload.enabled)
+    return {"auto_extend": adoption.auto_extend_enabled(ledger)}
 
 
 @app.post("/api/chat")

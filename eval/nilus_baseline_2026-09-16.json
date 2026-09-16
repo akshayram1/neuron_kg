@@ -1,0 +1,820 @@
+{
+  "graph": "nilus",
+  "results": [
+    {
+      "expected_uids": [
+        "321312ef-a407-53c9-8084-8772e96d82b0"
+      ],
+      "query": "What is DS-1026 about and who is it assigned to?",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 1.0,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "321312ef-a407-53c9-8084-8772e96d82b0"
+      ]
+    },
+    {
+      "expected_uids": [
+        "e9554793-f695-512a-bedc-50fb8c4337d7"
+      ],
+      "query": "Tell me about the Nilus epic DS-576",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 1.0,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "e9554793-f695-512a-bedc-50fb8c4337d7"
+      ]
+    },
+    {
+      "expected_uids": [
+        "0ff3b782-4e8d-5fae-a313-4db369e22e6a"
+      ],
+      "query": "What is the ticket about Nilus documentation for customers?",
+      "reciprocal_rank": 0.5,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "6991f5ad-37cd-575b-8636-ea649f30f141",
+        "0ff3b782-4e8d-5fae-a313-4db369e22e6a",
+        "0c326e5f-12ac-5484-b9ab-ccc42d6ab7eb",
+        "d837df9a-29c7-5365-be20-f2401bca786d",
+        "d91235f3-e03f-5478-85bd-5a11ee10571f",
+        "aa26b97a-9598-5968-813b-e94725339f65",
+        "7d35ef86-e287-5f90-afe6-94773fd38b49",
+        "416b223e-ce5b-5fbf-b95d-9be8ee5e241a"
+      ]
+    },
+    {
+      "expected_uids": [
+        "d9c84600-e1f2-539b-be49-6b6124914fe1"
+      ],
+      "query": "Nilus performance benchmarking ticket",
+      "reciprocal_rank": 0.5,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "e5267205-36cc-57db-b884-7e47b3633dc8",
+        "d9c84600-e1f2-539b-be49-6b6124914fe1",
+        "1e5f03b0-3c70-5c62-ac05-8ffbe10ec34b",
+        "3361d02e-28ef-5ce4-865b-5955914bb35c",
+        "2765db81-ecf7-5e2a-a240-63c95180a607",
+        "416b223e-ce5b-5fbf-b95d-9be8ee5e241a",
+        "20c1f438-9f5f-5479-a585-90c714119a5a",
+        "369ea5e7-db1b-5f7b-bb2f-fe84020c1756"
+      ]
+    },
+    {
+      "expected_uids": [
+        "6c0859e7-7fce-58ee-8a4e-7ecbb895d5b2"
+      ],
+      "query": "Which ticket covers the Azure lakehouse to Postgres batch pipeline failure?",
+      "reciprocal_rank": 0.5,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "b5f65951-c63f-5169-b208-8738f8eaeed2",
+        "6c0859e7-7fce-58ee-8a4e-7ecbb895d5b2",
+        "0b8b443b-0189-5668-81f2-598fd6a29c78",
+        "b3002d26-0c77-5a92-a612-2ad61e5ae19d",
+        "7dbba2b7-12e8-5ae8-a7a9-f0efa9260839",
+        "e0084930-23a5-5f29-8432-87fc6c8f5390",
+        "1024181f-55b5-5b5e-8281-33a79de63380",
+        "04fdda9e-9493-5fde-8aa3-853936485d29"
+      ]
+    },
+    {
+      "expected_uids": [
+        "16c12a07-8e92-525c-af42-06e068b443f4"
+      ],
+      "query": "DS-1237",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 1.0,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "16c12a07-8e92-525c-af42-06e068b443f4"
+      ]
+    },
+    {
+      "expected_uids": [
+        "bb4208c2-43a8-57ac-a353-2eb7175ff3c7"
+      ],
+      "query": "which file handles hera ingestion metadata workflow",
+      "reciprocal_rank": 0.25,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "e51ea7c8-511d-5fef-8e8b-20109d262d1f",
+        "26946293-8cf0-552c-8670-13e1bac315d4",
+        "50a5c25d-36b4-5b1f-8247-47109016dde4",
+        "bb4208c2-43a8-57ac-a353-2eb7175ff3c7",
+        "cc42f546-b33b-56fa-9939-84449a37a1bc",
+        "9edc90e3-abae-536b-b486-bc56f5e0bc64",
+        "f2490d3f-d707-5faf-be3c-4fff5729e88b",
+        "6ab43b95-dd86-5c80-8b04-5264558f147c"
+      ]
+    },
+    {
+      "expected_uids": [
+        "a1ce97b6-8033-5447-8cbe-7ae1834c346b"
+      ],
+      "query": "what does nilus/src/projection_reader.py do",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "a1ce97b6-8033-5447-8cbe-7ae1834c346b",
+        "2e3c456a-4ab0-5219-b0a9-ed2f3819ae28",
+        "c58b1c77-33b2-5c12-97d3-1ec7bd15cf19",
+        "7d35ef86-e287-5f90-afe6-94773fd38b49",
+        "30354d4d-c0cb-577d-8bd9-e92af5f238aa",
+        "b37d29c7-9872-5855-8cb1-9d0dd7222a17",
+        "c92b9953-de1e-5083-8d3b-fde3a54df4cc",
+        "0aec0df1-ba59-564f-9442-1cd1c1d37cca"
+      ]
+    },
+    {
+      "expected_uids": [
+        "c94393e3-e0c4-5504-9e1d-e52aabfecef5"
+      ],
+      "query": "where is the Google Ads field handling code",
+      "reciprocal_rank": 0.2,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "7de603b2-7b99-528d-bf81-5dc9e4ce7b04",
+        "58753dc7-1123-5a3e-93f0-cb4ad9250cac",
+        "2efc388c-0326-57a0-9e7b-2d5d2eae54f6",
+        "e52b2cfa-4949-5d11-a259-c15d7390394c",
+        "c94393e3-e0c4-5504-9e1d-e52aabfecef5",
+        "1c8cb048-4751-50b0-922f-2c8f5051fb87",
+        "4abafe3d-57ac-5eae-8718-b92773d5a4fa",
+        "9dbf6ff9-f10f-541a-afd4-e7f8016109e7"
+      ]
+    },
+    {
+      "expected_uids": [
+        "e086e5e8-8ddd-5ad3-923f-bd016106c91a"
+      ],
+      "query": "nilus/src/hera_ingestion/workflows/classification.py",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "e086e5e8-8ddd-5ad3-923f-bd016106c91a",
+        "26946293-8cf0-552c-8670-13e1bac315d4",
+        "9edc90e3-abae-536b-b486-bc56f5e0bc64",
+        "2189a043-1291-5b5a-a744-8fb839ee0723",
+        "bb4208c2-43a8-57ac-a353-2eb7175ff3c7",
+        "6ab43b95-dd86-5c80-8b04-5264558f147c",
+        "22d32f6b-a1c2-5a63-a990-d17e66a7a651",
+        "cc42f546-b33b-56fa-9939-84449a37a1bc"
+      ]
+    },
+    {
+      "expected_uids": [
+        "aebeb0ea-60b2-53f6-9edf-596aeb5517c7"
+      ],
+      "query": "which file has the Monday.com helpers",
+      "reciprocal_rank": 0.3333333333333333,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "fae99c3a-b605-5b3f-8831-24f8223e63e0",
+        "2f9e531e-9488-5d81-a59d-f12ac4837b89",
+        "aebeb0ea-60b2-53f6-9edf-596aeb5517c7",
+        "9db3e970-584a-5b91-8754-a7ce55457800",
+        "428f509a-2631-58c5-bd1e-e6b4aecf9f41",
+        "be1510cc-bef5-513c-adb5-c306087e321f",
+        "596abb0b-3611-5214-9e80-7e58d67c3582",
+        "dfa6a440-1493-5f46-958a-db7ea4fb6aad"
+      ]
+    },
+    {
+      "expected_uids": [
+        "60110067-e843-57fe-b577-269b72830906"
+      ],
+      "query": "which pull request changed the credentials to service account credentials",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "60110067-e843-57fe-b577-269b72830906",
+        "f7703b5d-a2cd-5e02-8503-bcfa7606f787",
+        "21f1fd25-4fdc-5754-ad19-eb26c2a6bd62",
+        "f4a52d51-2d0b-5407-9ed5-fc9de44ca533",
+        "2efc388c-0326-57a0-9e7b-2d5d2eae54f6",
+        "836ccb53-c459-508c-b4d3-2056f5b852db",
+        "7599de3e-5d20-578e-9b6e-1be38c26a2c4",
+        "cdb39339-ed11-5871-8b70-d1a123d38867"
+      ]
+    },
+    {
+      "expected_uids": [
+        "166b5bbc-0594-5056-ae78-daab1c67880e"
+      ],
+      "query": "PR that set Hera DatabaseService displayName without the engine prefix",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "166b5bbc-0594-5056-ae78-daab1c67880e",
+        "b8b35480-c37b-5352-8f20-08d46cbd1308",
+        "896c1c21-c8ba-5977-a081-fb647044a1f1",
+        "876abd30-14df-5dba-ad70-7c2bd2593a0a",
+        "7009059f-ffba-570e-97a1-ad3c3f6c0720",
+        "e51ea7c8-511d-5fef-8e8b-20109d262d1f",
+        "ed547fd5-7451-52ba-b203-cb1105c1f59b",
+        "a264c2f5-b02d-5f15-a425-0d2f6ca5cf16"
+      ]
+    },
+    {
+      "expected_uids": [
+        "30b4141f-1052-5f0d-bd62-d12a424b99fb"
+      ],
+      "query": "which PR defaulted max-table-nesting to 0",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "30b4141f-1052-5f0d-bd62-d12a424b99fb",
+        "189f50cb-2227-5d94-8443-c8bb6e5429ae",
+        "9ab0ff3e-dca1-5c44-a080-45e35cba96fd",
+        "415f73dc-234f-5e8a-b731-64ca5f49ebed",
+        "5c5ba914-41be-5a17-86a9-2131863b909a",
+        "daaba2d8-0622-5a8a-ac87-e274f52a2f61",
+        "10488c67-cd5a-58ac-b778-ddfee46b63fd",
+        "2cecd139-e6cf-55e2-9999-11de153982b8"
+      ]
+    },
+    {
+      "expected_uids": [
+        "d69fdefb-8d0f-5578-a31a-b442d98c39a8"
+      ],
+      "query": "pull request implementing the nilus alias delegation pattern",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "d69fdefb-8d0f-5578-a31a-b442d98c39a8",
+        "99fca123-48f8-56aa-bf2c-c769a4453b7e",
+        "6991f5ad-37cd-575b-8636-ea649f30f141",
+        "de7abca6-19ca-5cec-bfe4-2aa33e09fffb",
+        "527a736c-eeac-51da-9a38-78be74e90984",
+        "dd978ab4-854b-587a-8c60-3dd9334f404a",
+        "8d817b4d-3712-5803-89fe-a6b07012c543",
+        "42feb924-82ca-510e-9931-42ff5470a6ab"
+      ]
+    },
+    {
+      "expected_uids": [
+        "a782ceec-10e1-5982-a4d3-8ae92cdf21b1"
+      ],
+      "query": "Understanding Metadata Pipeline Config",
+      "reciprocal_rank": 0.5,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "ea3e2123-148e-5696-9a66-36e7859e937f",
+        "a782ceec-10e1-5982-a4d3-8ae92cdf21b1",
+        "ea096b0e-c974-5d0b-ba73-5baa9fa8e79a",
+        "a81fe853-55a4-5881-ad5d-755719b07ff0",
+        "9ec1090e-a4a5-5adf-8937-2a7526293319",
+        "0194880b-4e93-5a64-8bc7-2835ae3cc834",
+        "dd1f7433-950e-51d8-b07a-d9d61e34322b",
+        "9e8e37ea-6b87-5540-8de0-4f4fd76716f9"
+      ]
+    },
+    {
+      "expected_uids": [
+        "0194880b-4e93-5a64-8bc7-2835ae3cc834"
+      ],
+      "query": "how do I configure a stream pipeline",
+      "reciprocal_rank": 0.5,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "dba8ed0a-d5c1-5ce1-99f8-9da9f961c396",
+        "0194880b-4e93-5a64-8bc7-2835ae3cc834",
+        "f7deb91b-7a3c-5a74-a404-0a7e67372622",
+        "87e12d72-198e-5998-bad6-7abbb486a357",
+        "0d4c4eea-8567-5a35-8768-8edfdf005fcb",
+        "e833fa0a-c428-5147-b75d-ca17207a0069",
+        "ffb55b98-6f06-5c5b-91ca-c557a2f2ce06",
+        "1f19559d-19ca-57c1-b30b-b3104c564c4a"
+      ]
+    },
+    {
+      "expected_uids": [
+        "8087121b-dbe7-553d-89c3-9c1db1f9453e"
+      ],
+      "query": "documentation maintenance guide",
+      "reciprocal_rank": 0.3333333333333333,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "dbac0db0-fb58-5c19-87c6-ee89dbc712a1",
+        "574c8cd6-8e80-548b-90c1-879dc335e980",
+        "8087121b-dbe7-553d-89c3-9c1db1f9453e",
+        "d9ce84ab-b32f-5d14-bae2-7c378127a208",
+        "b6455cf8-0a93-509c-9f76-1280a5833358",
+        "6991f5ad-37cd-575b-8636-ea649f30f141",
+        "0ff3b782-4e8d-5fae-a313-4db369e22e6a",
+        "75e27ce3-8f37-5aaf-a365-cfeec5dee9fc"
+      ]
+    },
+    {
+      "expected_uids": [
+        "ad49086c-dda6-5e65-8048-c96c9315c6fd"
+      ],
+      "query": "how do I create a custom source in Nilus?",
+      "reciprocal_rank": 0.2,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "8443042c-ed69-57b0-9478-965505eaed1f",
+        "87f75519-e700-5583-b1bb-e42d0d2c0477",
+        "bdb6c028-76af-5753-bfe8-a6acab59518f",
+        "244c05e7-5393-576e-88bb-e992ed0f8eeb",
+        "ad49086c-dda6-5e65-8048-c96c9315c6fd",
+        "34bdbc0c-7ef0-566e-8a22-142e76b7345f",
+        "8fe03167-631d-5845-89a2-a175c71ea9b5",
+        "f69084f7-7bd0-54f4-bc46-7d30062de2b6"
+      ]
+    },
+    {
+      "expected_uids": [
+        "6707a7fc-2128-58ff-b53e-0c0d2a32ec55"
+      ],
+      "query": "how do I optimize sink datasets",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "6707a7fc-2128-58ff-b53e-0c0d2a32ec55",
+        "f9efa671-c39d-5b4b-99d0-8528fdfa0c5c",
+        "7316fad9-7b62-5bd3-bc11-c4c60f3d4e88",
+        "2a20adba-f9dc-5481-8ae3-6cf062de4f56",
+        "cddf1c23-4626-5512-8d00-ec364de380cf",
+        "374df276-d486-50ea-92a2-17ad5be01430",
+        "f514a242-de05-52a4-9359-edab2614a97b",
+        "dba8ed0a-d5c1-5ce1-99f8-9da9f961c396"
+      ]
+    },
+    {
+      "expected_uids": [
+        "d837df9a-29c7-5365-be20-f2401bca786d"
+      ],
+      "query": "Is Nilus GA, and which customers are live in production?",
+      "reciprocal_rank": 0.16666666666666666,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "0c326e5f-12ac-5484-b9ab-ccc42d6ab7eb",
+        "20c1f438-9f5f-5479-a585-90c714119a5a",
+        "dd38f555-f142-5bf6-880b-2d7d107afaee",
+        "1e5f03b0-3c70-5c62-ac05-8ffbe10ec34b",
+        "416b223e-ce5b-5fbf-b95d-9be8ee5e241a",
+        "d837df9a-29c7-5365-be20-f2401bca786d",
+        "369ea5e7-db1b-5f7b-bb2f-fe84020c1756",
+        "2765db81-ecf7-5e2a-a240-63c95180a607"
+      ]
+    },
+    {
+      "expected_uids": [
+        "942f5ba4-b1fc-5841-a98f-c65070bc8309"
+      ],
+      "query": "Why did we decide to use a workspace-qualified nilus-server URL?",
+      "reciprocal_rank": 0.3333333333333333,
+      "retrieval_precision": 0.1,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "43ad1975-2169-5485-b8e5-7118a2bd90d9",
+        "8ff5e292-02fd-51a6-a455-8e45aa32e50d",
+        "942f5ba4-b1fc-5841-a98f-c65070bc8309",
+        "1dc996ed-ff24-5291-95ef-316e0922783c",
+        "0fcab603-590c-5260-bc76-74c113ca78b2",
+        "94d76c72-f83f-58d1-9694-7d9e913cdc81",
+        "df9ba28d-e499-5980-b96a-4b65d363cef1",
+        "8e400c50-7eb4-5358-854f-50f07a70107c",
+        "3d221486-572a-5132-abd1-e73d5fd65f40",
+        "db83d089-1858-5c96-835a-b9c1a2736b98"
+      ]
+    },
+    {
+      "expected_uids": [
+        "3e497f2d-d798-5c74-9184-904fbe92e646"
+      ],
+      "query": "when do we use merge versus replace for resources?",
+      "reciprocal_rank": 0.3333333333333333,
+      "retrieval_precision": 0.1,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "43ad1975-2169-5485-b8e5-7118a2bd90d9",
+        "8ff5e292-02fd-51a6-a455-8e45aa32e50d",
+        "3e497f2d-d798-5c74-9184-904fbe92e646",
+        "f6758b7b-5960-5b86-99cc-2e12e88a89df",
+        "c55735d2-493c-5c05-8180-e7d92f257874",
+        "74398a23-3fb9-57c6-b95b-263caa83170f",
+        "4f9f0a4d-6e27-5cc1-831b-e2e85ea2f488",
+        "bc43c9e3-fbae-5bbb-9d46-fdf9939a40a1",
+        "f64ad5bb-8a29-5cae-bb18-beb087f3b932",
+        "fde0676c-f243-562d-913c-badf939e7bd8"
+      ]
+    },
+    {
+      "expected_uids": [
+        "999314de-2820-5efd-a6e7-67aca37a6fdc"
+      ],
+      "query": "how are credentials projected into a pipeline?",
+      "reciprocal_rank": 0.3333333333333333,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "3e16df04-bc1c-5f17-8ca8-fd6536ec80f8",
+        "e3e6cda7-5064-5a1d-b3b1-4607c978146f",
+        "999314de-2820-5efd-a6e7-67aca37a6fdc",
+        "34da10f5-d829-564a-818d-3095ae4a49fe",
+        "02ea1f64-4291-5f35-9eba-8d87619a995b",
+        "fab6a37f-5e27-5716-bfb3-55fae39825e4",
+        "e36275bf-b9f7-5793-9650-584beee051c2",
+        "0d4c4eea-8567-5a35-8768-8edfdf005fcb"
+      ]
+    },
+    {
+      "expected_uids": [
+        "a264c2f5-b02d-5f15-a425-0d2f6ca5cf16"
+      ],
+      "query": "why should topic.prefix stay stable after production deployment?",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "a264c2f5-b02d-5f15-a425-0d2f6ca5cf16",
+        "1aec0298-7fbd-594d-aaa0-26d900af80ce",
+        "cf373c7e-652c-573a-a101-b0cddfdeed77",
+        "b9e2fd93-0c19-5185-aa07-3ab5c99f747b",
+        "a4f3f8ed-1485-5ad2-b5a1-8d2765bc6b72",
+        "4f912717-2489-51a4-a3ec-fa7bd8ea8a26",
+        "e29650b3-5428-537f-9675-fcfd711d20b2",
+        "05861cde-9772-5217-b486-7437cf791a5c"
+      ]
+    },
+    {
+      "expected_uids": [
+        "75680b35-038c-59de-8027-413a6f24a87b"
+      ],
+      "query": "what is the decision about using a depot address for connections?",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "75680b35-038c-59de-8027-413a6f24a87b",
+        "b6d6dd96-a2b1-5553-a743-6c8875cb303c",
+        "7616b75b-3fe6-5309-bbfa-795f445015db",
+        "c2f60011-899e-5bf7-be00-504d3025fe94",
+        "0fcab603-590c-5260-bc76-74c113ca78b2",
+        "16a0ffde-9649-536a-ace9-0adba1b08a1f",
+        "527a736c-eeac-51da-9a38-78be74e90984",
+        "a04eaac2-5b67-5b51-82b7-b5c26fca3ae7"
+      ]
+    },
+    {
+      "expected_uids": [
+        "cb9cce5c-33a2-5fac-9c0f-8d0d420a757d"
+      ],
+      "query": "What does incremental_key mean and how is it used?",
+      "reciprocal_rank": 0.3333333333333333,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "74a8a40d-8a4a-5f42-b166-64e8fd9ef560",
+        "899b7e67-e916-5e92-8c00-1ea2c1bba4e1",
+        "cb9cce5c-33a2-5fac-9c0f-8d0d420a757d",
+        "19702591-4d78-5b72-9d0f-91746346277f",
+        "3b19d4be-59d0-5736-a476-1f52606005b7",
+        "191048b0-02e2-5d5d-b330-8ee07213c2af",
+        "a584de11-79b3-524e-b04a-49659cf00af7",
+        "bc43c9e3-fbae-5bbb-9d46-fdf9939a40a1"
+      ]
+    },
+    {
+      "expected_uids": [
+        "d75915f8-8699-5e95-bfa6-77da2a72b6b4"
+      ],
+      "query": "what is a batch source",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "d75915f8-8699-5e95-bfa6-77da2a72b6b4",
+        "c710f863-99c8-5401-9f02-a2bd2ad31c94",
+        "6997c407-a3ca-59fa-a67f-33608642086d",
+        "1d495ec4-0417-517e-94c6-5b85afcfdf18",
+        "a723e107-2159-5b67-9128-9a555dc8bcc5",
+        "d7f65546-06b3-5615-a142-967a1b61669d",
+        "c0fa30a0-8e3a-5ad0-9d31-6f907180e8ac",
+        "983f8b01-4261-5b14-99d8-0efffd5be303"
+      ]
+    },
+    {
+      "expected_uids": [
+        "aad2a335-cf09-587c-9e93-3ddbdecd8a1b",
+        "08132d70-8218-5a2d-858b-94650a4a5de5"
+      ],
+      "query": "difference between shallow mode and deep mode",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.25,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "aad2a335-cf09-587c-9e93-3ddbdecd8a1b",
+        "f7deb91b-7a3c-5a74-a404-0a7e67372622",
+        "08132d70-8218-5a2d-858b-94650a4a5de5",
+        "53d1f060-8a56-51fa-8de8-8921167121bc",
+        "8e89ac6a-81fa-588c-a6e0-58e06c1ea273",
+        "8538c228-eee9-5136-839e-9f83e14eac81",
+        "f727f0ef-975d-5d57-9911-1a271012daa4",
+        "fca30c8f-e0eb-5dcd-a72a-24168423ac84"
+      ]
+    },
+    {
+      "expected_uids": [
+        "19702591-4d78-5b72-9d0f-91746346277f"
+      ],
+      "query": "what is an incremental cursor",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.125,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "19702591-4d78-5b72-9d0f-91746346277f",
+        "191048b0-02e2-5d5d-b330-8ee07213c2af",
+        "03034728-24c2-559c-b2c6-fe94e96c1396",
+        "910fa100-1e96-5973-a2cb-b66836f32c16",
+        "40584ffc-312e-566d-bcb8-d1f81690c9fb",
+        "899b7e67-e916-5e92-8c00-1ea2c1bba4e1",
+        "a14caf0c-97eb-5659-b9cf-5ec126c3f700",
+        "218e45bd-a63e-58a5-b771-83d66091e24c"
+      ]
+    },
+    {
+      "expected_uids": [
+        "bb179089-bc6b-58f1-a0a5-280ebeadbea2"
+      ],
+      "query": "What has Darpan Vyas been working on?",
+      "reciprocal_rank": 1.0,
+      "retrieval_precision": 0.1111111111111111,
+      "retrieval_recall": 1.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "bb179089-bc6b-58f1-a0a5-280ebeadbea2",
+        "e9554793-f695-512a-bedc-50fb8c4337d7",
+        "8301a64b-edfd-5e86-9fe7-851ac62d85cf",
+        "1b5c2003-ebde-507d-8f4c-c7c515830ae6",
+        "1e7b4377-66b4-5758-99f1-df5086cf0733",
+        "aa54ab7a-16f4-5b6f-a339-53de5a0f3a58",
+        "87abadff-727a-58bd-8dde-349373d35912",
+        "321312ef-a407-53c9-8084-8772e96d82b0",
+        "7fec5b45-b3b6-55d7-937e-a71a1f1fc829"
+      ]
+    },
+    {
+      "expected_uids": [
+        "7c2474fc-ed44-5163-a3b2-cff3ebf92074"
+      ],
+      "query": "What does WAL_LEVEL have to do with PostgreSQL CDC?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "03958376-64ba-55eb-9612-923e3733fc1d",
+        "cee9d0f0-efc4-5574-84b4-c0539bee4e53",
+        "e8c6ef89-89f1-5df9-be41-fe19da3981de",
+        "8c5a067d-764d-566f-bc7a-8d2f44340c1a",
+        "8fc56cf5-c00c-58a9-8671-dd082d8cc983",
+        "665f696a-13a4-59dd-81cb-e84679605c9e",
+        "f462f46a-8b9c-5636-bf90-72f86890e0ac",
+        "13ca1394-32a3-587d-adba-2552a964c825"
+      ]
+    },
+    {
+      "expected_uids": [
+        "aea961b0-47fa-5c5a-ac30-b8ad593a587e"
+      ],
+      "query": "What is the binlog retention caveat for MySQL?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "03958376-64ba-55eb-9612-923e3733fc1d",
+        "dc637d34-77ba-5de8-b77d-ee729e9582ab",
+        "e1a15808-7323-5659-9d34-687f3de5913a",
+        "1735f5d1-8fe0-55f6-a1a5-0dafdc02e01f",
+        "675cd2f7-7e36-571d-abea-88e87fca3b14",
+        "29067861-4aef-5e6d-87b6-adaaa21af0e5",
+        "6134318d-e566-5df0-9b2b-cd69b548aa05",
+        "4ae0f717-474a-5921-85ca-1aa10484e7f6"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f2044d60-2bf8-5602-a5a4-5325e33580e9"
+      ],
+      "query": "What causes the BufferingChangeStreamCursor warning?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "b0fe0e64-d3e2-5282-9d95-46cd1c775056",
+        "5fe201eb-f22f-5e4f-b5b6-e26d034aa120",
+        "779c213b-f764-5828-ad9b-ff23fab01462",
+        "a14caf0c-97eb-5659-b9cf-5ec126c3f700",
+        "8e89ac6a-81fa-588c-a6e0-58e06c1ea273",
+        "f727f0ef-975d-5d57-9911-1a271012daa4",
+        "d0f0bbe5-6cad-5ae9-8265-94bb2a136ede",
+        "3c082b63-af45-5a86-aa0c-56625aa8aace"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f2044d60-2bf8-5602-a5a4-5325e33580e9"
+      ],
+      "query": "Which systems does rate limiting apply to?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "d02c37ab-fbb1-54e6-af44-ab10f711ed4b",
+        "d1431b41-dba2-5eb9-bfe0-e4c78f1c6ee8",
+        "82e9faa1-2441-5eef-abd0-16febc93758a",
+        "ee731dfe-5064-5bda-b567-40b2f5f7c85b",
+        "88bc6f18-0420-5f9a-8cfe-d2ec1a988d37",
+        "0e0dd27e-396d-5586-8f73-b09a1fd9b952",
+        "b7180282-f8b4-5af2-919e-10d338ee0ecb",
+        "f727f0ef-975d-5d57-9911-1a271012daa4"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f2044d60-2bf8-5602-a5a4-5325e33580e9"
+      ],
+      "query": "What are the API token caveats for Zendesk?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "ef00434b-1e2a-50fe-9cbc-814e2001b627",
+        "c0d09def-7dee-5d6c-a889-7eb7d8a3c6f9",
+        "43d8ac03-7426-55e5-8f8f-8ed72aed2db2",
+        "84581490-785c-5337-bc08-5b656a6934c3",
+        "d02c37ab-fbb1-54e6-af44-ab10f711ed4b",
+        "004daa65-15cb-5132-8e73-01f2dffd09a5",
+        "dae8d8a2-3316-5ca8-a44c-a54ad558bde2",
+        "bfe20096-261e-5e1c-abc9-f2d32901740d"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f2044d60-2bf8-5602-a5a4-5325e33580e9"
+      ],
+      "query": "How does Stripe handle incremental date ranges?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "485c5695-36fc-5920-8ee9-24c88019f30d",
+        "82e9faa1-2441-5eef-abd0-16febc93758a",
+        "40584ffc-312e-566d-bcb8-d1f81690c9fb",
+        "8d6e561d-a599-5fb5-90ec-bd46eb1047e9",
+        "1cd17213-a3c9-5e63-ba84-d10b8a37bc12",
+        "311a4b1f-e2fd-55fa-9a90-97544b5ca712",
+        "140b2aa3-1675-55e1-a3cf-583a2c67ebde",
+        "191048b0-02e2-5d5d-b330-8ee07213c2af"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f6b385fc-d301-5d8d-b93c-f7f9b1deebc7"
+      ],
+      "query": "Which release notes mention DataOS Lakehouse caveats?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "fc71e304-de47-5dbc-86f3-5dacc1834d70",
+        "b6c0ec70-a857-5b4d-8f76-0cdbbfa8d282",
+        "abdb681d-466b-55d1-9d34-3ea69584e308",
+        "8181e522-04a1-539a-a6a8-f2d4edc14030",
+        "14df9270-a82b-55fc-86ad-927d5488680a",
+        "7a82f9ab-ca6c-55c5-a662-2f398f130918",
+        "75a65728-7a1c-5847-8989-bf49046178c9",
+        "ae0b96a0-db94-5b53-b392-6528749c243f"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f2044d60-2bf8-5602-a5a4-5325e33580e9"
+      ],
+      "query": "Does Oracle support CDC in Nilus?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "3a068c88-21df-52ef-a71f-9b2ae186c73a",
+        "d3af058d-f73c-527d-8213-1f352f433436",
+        "0225ce1c-f147-59d5-b499-b78d6843d9e8",
+        "20c1f438-9f5f-5479-a585-90c714119a5a",
+        "ad5a4ee4-571a-56ca-ac9e-13bd38bddf60",
+        "9497863c-7858-55f2-aa45-4f0c167d31d5",
+        "3361d02e-28ef-5ce4-865b-5955914bb35c",
+        "5fbc2c92-eb0d-54c8-97e7-077256bc357e"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f2044d60-2bf8-5602-a5a4-5325e33580e9"
+      ],
+      "query": "What is the Athena source scheme caveat?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "14028a84-c146-58a4-934a-b82d547acd51",
+        "2c2d70ff-f22b-54d3-bdf5-05b7cca40d4c",
+        "8111394a-313a-5f68-b378-886bf17c41b9",
+        "e7b8b676-b087-5320-a66d-415127127566",
+        "3067efc3-d7b2-5cb8-9bcb-aa45f12b7aa7",
+        "34bdbc0c-7ef0-566e-8a22-142e76b7345f",
+        "a9440602-467c-50f7-bde2-abf44999b503",
+        "8ad4509c-970e-5ea6-b124-199c5a89d3e2"
+      ]
+    },
+    {
+      "expected_uids": [
+        "f966bc68-e627-5b2e-a43b-57a47255aee9"
+      ],
+      "query": "What is MongoDB Error 286 and when does it happen?",
+      "reciprocal_rank": 0.0,
+      "retrieval_precision": 0.0,
+      "retrieval_recall": 0.0,
+      "retrieval_scored": true,
+      "retrieved_uids": [
+        "9c57968c-603a-5e66-863b-26b83411adfe",
+        "0ef1e885-3d82-5051-85f9-15dc03592568",
+        "08a4da3e-f2d5-5775-8bb2-9e6e4e455687",
+        "90822f43-b0e6-54a1-acee-609dbebe1659",
+        "1286ceba-c39a-59bb-bca5-0d9da15f1fd5",
+        "196b40f0-be31-53cb-8555-bc832f3cd6f6",
+        "b3f36a27-a736-5c19-aab1-db8803705ebb",
+        "f0150e84-5e32-5d7f-9e1a-de2996424d6e"
+      ]
+    }
+  ],
+  "summary": {
+    "cases": 41,
+    "citation_cases_scored": 0,
+    "citation_precision": null,
+    "citation_recall": null,
+    "mrr": 0.5199186991869919,
+    "precision_at_k": 0.1600271002710027,
+    "recall_at_k": 0.7560975609756098,
+    "retrieval_cases_scored": 41
+  }
+}

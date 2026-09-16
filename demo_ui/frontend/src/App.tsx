@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import EntityPanel from "./components/EntityPanel";
+import OntologyPanel from "./components/OntologyPanel";
 import GraphCanvas from "./components/GraphCanvas";
 import GraphSelector from "./components/GraphSelector";
 import BitbucketPanel from "./components/BitbucketPanel";
@@ -376,6 +377,8 @@ export default function App() {
                 }}
               />
             )}
+            <OntologyPanel graphName={graphName} onChanged={() => void loadGraph()} />
+
             {selection?.kind === "edge" && (
               <aside className="selection-card">
                 <button className="selection-close" onClick={() => setSelection(null)} aria-label="Close details">×</button>

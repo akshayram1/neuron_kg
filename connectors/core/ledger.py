@@ -21,11 +21,13 @@ Two things beyond simple hash-based KEEP/INSERT/UPDATE/DELETE live here:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from uuid import uuid4
 
 from connectors.core.actions import RecordAction, resolve_action
 
@@ -233,6 +235,32 @@ class ConnectorLedger:
                     sub_property_of TEXT,
                     temporal TEXT NOT NULL DEFAULT 'state',
                     PRIMARY KEY(relation, subject_kind, object_kind)
+                )
+                """
+            )
+            axiom_columns = {
+                str(row["name"]) for row in
+                connection.execute("PRAGMA table_info(relation_axioms)").fetchall()
+            }
+            if "adopted_batch" not in axiom_columns:
+                connection.execute("ALTER TABLE relation_axioms ADD COLUMN adopted_batch TEXT")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS axiom_adoptions (
+                    batch_id       TEXT PRIMARY KEY,
+                    adopted_at     TEXT NOT NULL,
+                    shapes         TEXT NOT NULL,   -- JSON list of adopted triples
+                    facts_expected INTEGER NOT NULL DEFAULT 0,
+                    min_docs       INTEGER NOT NULL DEFAULT 0,
+                    undone_at      TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS graph_settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 )
                 """
             )
@@ -616,8 +644,8 @@ class ConnectorLedger:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT relation, subject_kind, object_kind, extractable, functional, "
-                "is_transitive, is_symmetric, is_asymmetric, inverse_of, sub_property_of, temporal "
-                "FROM relation_axioms"
+                "is_transitive, is_symmetric, is_asymmetric, inverse_of, sub_property_of, "
+                "temporal, adopted_batch FROM relation_axioms"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -655,6 +683,168 @@ class ConnectorLedger:
             connection.execute(
                 "UPDATE ontology_misses SET dismissed_at = ? WHERE kind = ? AND key = ?",
                 (datetime.now(UTC).isoformat(), kind, key),
+            )
+
+    # --------------------------------------------------- ontology adoption
+
+    def adoption_candidates(
+        self, *, min_docs: int = 2, min_facts: int = 1,
+    ) -> list[dict]:
+        """Refused shapes that clear the bar, widest evidence first.
+
+        `min_docs` counts DISTINCT source records, never a sum. Utopia's note
+        on the same rule: one document may use two wordings, and summing lets
+        a single document push a shape past a "seen in >= 2 documents" bar.
+        Their reason for the bar at all: **a statement that appears in only
+        one document is that document's wording, not the organization's
+        vocabulary** -- and the ontology feeds back into the extraction
+        prompt, so one accident becomes a standing instruction.
+
+        Tautologies are excluded outright. In this graph, `Document -DEFINES->
+        System` is the widest candidate (33 documents) and 19 of its 84 facts
+        say a thing defines itself ("AWS-backed DataOS Lakehouse defines
+        AWS-backed DataOS Lakehouse"). Counting cannot tell that from a real
+        claim, so the shape-level threshold alone would adopt it.
+
+        A dismissed miss is never a candidate, no matter how often it recurs:
+        with adoption running unattended, re-proposing a dismissed shape is
+        the system overruling an explicit human decision.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT d.subject_kind, d.relation, d.object_kind,
+                       COUNT(*)                   AS facts,
+                       COUNT(DISTINCT d.record_key) AS docs,
+                       MIN(d.subject_name || ' -> ' || d.object_name) AS example
+                FROM extraction_drops d
+                WHERE d.reason = ?
+                  AND d.relation != ''
+                  AND LOWER(d.subject_name) != LOWER(d.object_name)
+                  AND NOT EXISTS (
+                        SELECT 1 FROM ontology_misses m
+                        WHERE m.kind = 'relation_type'
+                          AND m.key = d.subject_kind || ' -' || d.relation || '-> ' || d.object_kind
+                          AND m.dismissed_at IS NOT NULL)
+                  AND NOT EXISTS (
+                        SELECT 1 FROM relation_axioms a
+                        WHERE a.relation = d.relation
+                          AND a.subject_kind = d.subject_kind
+                          AND a.object_kind = d.object_kind)
+                GROUP BY d.subject_kind, d.relation, d.object_kind
+                HAVING docs >= ? AND facts >= ?
+                ORDER BY docs DESC, facts DESC
+                """,
+                (DropReason.RELATION_NOT_ALLOWED, min_docs, min_facts),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def adopt_shapes(self, shapes: list[dict], *, min_docs: int) -> str | None:
+        """Write the shapes as extractable axioms under one revertible batch.
+
+        Only the allow-list is widened. Every axiom column stays at its
+        default -- `functional`, `is_transitive`, `is_symmetric` are NOT
+        guessed from counts. Utopia's carve-out is the sharp end of this:
+        `functional` drives the temporal engine to auto-close facts, and by
+        the time a wrong one is noticed those closures are already a chain of
+        supersedes. Counting says a shape is common; it says nothing about
+        whether it holds one value at a time.
+        """
+        if not shapes:
+            return None
+        batch_id = uuid4().hex
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO relation_axioms(relation, subject_kind, object_kind, "
+                "extractable, temporal, adopted_batch) VALUES (?,?,?,1,'state',?)",
+                [(s["relation"], s["subject_kind"], s["object_kind"], batch_id) for s in shapes],
+            )
+            connection.execute(
+                "INSERT INTO axiom_adoptions(batch_id, adopted_at, shapes, facts_expected, min_docs) "
+                "VALUES (?,?,?,?,?)",
+                (batch_id, now, json.dumps(shapes), sum(int(s["facts"]) for s in shapes), min_docs),
+            )
+        return batch_id
+
+    def unadopt(self, batch_id: str) -> list[dict]:
+        """Remove a batch's axioms and report the shapes, so the caller can
+        delete the edges they produced.
+
+        This is the precondition for adopting at all, not a nicety. Utopia:
+        *"the precondition for daring to do this is that adoption is
+        revertible -- if wrong, one click goes back. So the axis is not how
+        confident we are, but how expensive it is if wrong."*
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT shapes FROM axiom_adoptions WHERE batch_id = ? AND undone_at IS NULL",
+                (batch_id,),
+            ).fetchone()
+            if rows is None:
+                return []
+            shapes = json.loads(str(rows["shapes"]))
+            connection.execute("DELETE FROM relation_axioms WHERE adopted_batch = ?", (batch_id,))
+            connection.execute(
+                "UPDATE axiom_adoptions SET undone_at = ? WHERE batch_id = ?",
+                (datetime.now(UTC).isoformat(), batch_id),
+            )
+        return shapes
+
+    def adoptions(self, include_undone: bool = False) -> list[dict]:
+        query = ("SELECT batch_id, adopted_at, shapes, facts_expected, min_docs, undone_at "
+                 "FROM axiom_adoptions")
+        if not include_undone:
+            query += " WHERE undone_at IS NULL"
+        query += " ORDER BY adopted_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query).fetchall()
+        return [{**dict(r), "shapes": json.loads(str(r["shapes"]))} for r in rows]
+
+    def requeue_chunks_for_shapes(self, shapes: list[dict]) -> int:
+        """Re-open every chunk whose refusal these shapes would now allow.
+
+        Adoption alone changes nothing: the facts were refused at extraction
+        time and the graph has never seen them. Only the chunks that actually
+        hit one of these shapes are re-opened -- the whole point of the chunk
+        diff is not to re-extract text that has nothing to gain.
+        """
+        if not shapes:
+            return 0
+        clauses = " OR ".join(
+            ["(subject_kind = ? AND relation = ? AND object_kind = ?)"] * len(shapes)
+        )
+        params: list[str] = []
+        for shape in shapes:
+            params += [shape["subject_kind"], shape["relation"], shape["object_kind"]]
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE source_chunks SET status = 'pending'
+                WHERE superseded_at IS NULL
+                  AND (record_key, chunk_id) IN (
+                        SELECT record_key, chunk_id FROM extraction_drops
+                        WHERE reason = ? AND ({clauses}))
+                """,
+                (DropReason.RELATION_NOT_ALLOWED, *params),
+            )
+            return int(cursor.rowcount)
+
+    # ------------------------------------------------------------- settings
+
+    def setting(self, key: str, default: str | None = None) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM graph_settings WHERE key = ?", (key,)
+            ).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO graph_settings(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
             )
 
     # ------------------------------------------------------------ edge side-index

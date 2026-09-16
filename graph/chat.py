@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from falkordb import Graph
 from openai import OpenAI
@@ -289,6 +290,64 @@ def _resolve_records(
     return {row[0]: Citation(row[0], row[1], row[2]) for row in rows}
 
 
+def retrieve(
+    graph: Graph, client: OpenAI, question: str, *,
+    limit: int, providers: list[str] | None, scope: AccessScope,
+    token_usage: TokenUsage | None = None,
+    collection: str = vector_store.COLLECTION,
+    at: str | None = None, at_end: str | None = None,
+) -> tuple[Any, list[SearchHit]]:
+    """Everything the product does to turn a question into candidate hits.
+
+    Extracted so the evaluation harness measures THIS and not `hybrid_search`
+    alone. It used to call the ranker directly, which is a narrower path than
+    the product: three golden cases scored 0 while working perfectly in chat
+    ("DS-1237" and "what is DS-1026 about" resolve structurally, "what has
+    Darpan Vyas been working on" through the name matcher). An instrument that
+    measures less than the product reports losses that are not real, and can
+    miss ones that are.
+
+    Returns `(structured_result_or_None, hits)` — the caller needs the first to
+    know whether the hit list is already the complete answer.
+    """
+    structured = resolve_structured(graph, question, scope, providers)
+    if structured is not None:
+        logger.info("  structured     kind=%s hits=%d", structured.kind, len(structured.hits))
+        return structured, structured.hits
+
+    hits = hybrid_search(
+        graph, client, question, limit=limit, providers=providers, scope=scope,
+        token_usage=token_usage, collection=collection,
+    )
+    _log_hits("hybrid", hits)
+
+    # Inject the whole SAME_AS cluster, not the first equal-ratio name.
+    # Bitbucket Aashish and Jira Aashish score the same; first-wins hid
+    # the four live ASSIGNED_TO edges on the Jira node.
+    seen = {hit.uid for hit in hits}
+    extras = [p for p in find_named_persons(graph, question, scope, providers) if p.uid not in seen]
+    if extras:
+        _log_hits("named-person", extras)
+        hits = extras + hits
+
+    # A window is a filter the text index cannot express: an August commit
+    # is not lexically closer to "what was worked on in August" than a July
+    # one. Ask the graph for the window directly, or the dated question is
+    # answered from whatever happened to rank well.
+    if at and at_end:
+        seen = {hit.uid for hit in hits}
+        in_window = [
+            w for w in find_window_activity(
+                graph, scope, providers, at=at, at_end=at_end, limit=limit,
+            )
+            if w.uid not in seen
+        ]
+        if in_window:
+            _log_hits("time-window", in_window)
+            hits = in_window + hits
+    return None, hits
+
+
 def run_chat_turn(
     graph: Graph, client: OpenAI, question: str, *, model: str | None = None,
     search_limit: int = 6, providers: list[str] | None = None,
@@ -317,38 +376,10 @@ def run_chat_turn(
         at, at_end = inferred_at, at_end or inferred_at_end
     at = at or inferred_at
     as_of = as_of or inferred_as_of
-    structured = resolve_structured(graph, question, scope, providers)
-    if structured is not None:
-        hits = structured.hits
-    else:
-        hits = hybrid_search(
-            graph, client, question, limit=search_limit, providers=providers, scope=scope,
-            token_usage=token_usage, collection=collection,
-        )
-        _log_hits("hybrid", hits)
-        # Inject the whole SAME_AS cluster, not the first equal-ratio name.
-        # Bitbucket Aashish and Jira Aashish score the same; first-wins hid
-        # the four live ASSIGNED_TO edges on the Jira node.
-        seen = {hit.uid for hit in hits}
-        extras = [p for p in find_named_persons(graph, question, scope, providers) if p.uid not in seen]
-        if extras:
-            _log_hits("named-person", extras)
-            hits = extras + hits
-        # A window is a filter the text index cannot express: an August commit
-        # is not lexically closer to "what was worked on in August" than a July
-        # one. Ask the graph for the window directly, or the dated question is
-        # answered from whatever happened to rank well.
-        if at and at_end:
-            seen = {hit.uid for hit in hits}
-            in_window = [
-                w for w in find_window_activity(
-                    graph, scope, providers, at=at, at_end=at_end, limit=search_limit,
-                )
-                if w.uid not in seen
-            ]
-            if in_window:
-                _log_hits("time-window", in_window)
-                hits = in_window + hits
+    structured, hits = retrieve(
+        graph, client, question, limit=search_limit, providers=providers, scope=scope,
+        token_usage=token_usage, collection=collection, at=at, at_end=at_end,
+    )
 
     if not hits and structured is None:
         return ChatResult(

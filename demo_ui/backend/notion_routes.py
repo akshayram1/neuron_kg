@@ -23,6 +23,7 @@ from connectors.notion.oauth import (
     NotionOAuthSettings, NotionStore, notion_state_db_path,
 )
 from graph import jira_pipeline as common_pipeline
+from graph import adoption
 from graph import multigraph
 from graph.embed_batch import close_batch, open_batch
 from graph import notion_pipeline as np
@@ -206,6 +207,11 @@ async def _run_sync(
             collection=target.qdrant_collection,
         )
         orphans_removed = common_pipeline.delete_orphaned_shared_entities(graph)
+        # What this sync refused is invisible in the graph -- the missing facts
+        # were never written, so it looks complete. Report it, and adopt only
+        # if this graph has asked to widen unattended.
+        auto = adoption.adopt(ledger)
+        pending = adoption.pending_report(ledger)
         result = {
             **base, "phase": "done", "current": f"Finished {total} Notion pages",
             "records_done": total, "records_kept": kept, "records_written": written,
@@ -213,6 +219,11 @@ async def _run_sync(
             "chunks_ingested": semantic.chunks_processed,
             "entities_written": semantic.entities_written, "facts_written": semantic.facts_written,
             "orphans_removed": orphans_removed,
+            "ontology_pending_shapes": pending["eligible_shapes"],
+            "ontology_pending_facts": pending["eligible_facts"],
+            "ontology_auto_extend": pending["auto_extend"],
+            "ontology_adopted_batch": auto.batch_id,
+            "ontology_chunks_requeued": auto.chunks_requeued,
             **semantic.token_usage.as_dict("ingestion"),
         }
         store.finish_connection_sync(payload.workspace_id)

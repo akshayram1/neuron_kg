@@ -1,0 +1,83 @@
+# Golden set for the `nilus` graph (3,833 nodes / 7,007 edges; Jira + Bitbucket + Notion).
+# Run: uv run python -m scripts.evaluate_retrieval eval/nilus_golden.jsonl --graph nilus --k 8
+#
+# Purpose: this set exists to answer ONE question about ontology auto-adoption —
+#   "after expanding the rulebook, is anything lost and do answers stay the same?"
+# So it is a REGRESSION set first and an improvement set second.
+#
+#   kind=control (30) — pass today. MUST still pass after adoption. This is the
+#                       "no information is lost" half. A drop here blocks the change.
+#   kind=target  (10) — about the 473 facts currently refused as relation_not_allowed.
+#                       Expected to be weak today and to improve after adoption.
+#
+# `kind` and `note` are ignored by the scorer (extra fields are tolerated).
+#
+# ---------------------------------------------------------------- BASELINE
+# Recorded 2026-09-16, before any ontology adoption. Full run in
+# eval/nilus_baseline_2026-09-16.json.
+#
+#   control  31/31 passing   MRR=0.6876   recall@8=1.0000
+#   target    0/10 passing   MRR=0.0000   recall@8=0.0000
+#   overall                  MRR=0.5199   recall@8=0.7561   precision@8=0.1600
+#
+# Control recall is exactly 1.0 by construction: every control case's expected
+# node is in the top 8 today. That is what makes this usable as a regression
+# gate -- ANY drop below 1.0 after adoption is unambiguous and blocks the change.
+# Target is exactly 0.0 for the same reason in reverse: any rise is attributable
+# to adoption and nothing else.
+#
+# Measured through `graph.chat.retrieve`, which is the composition the product
+# uses (structured resolver + ranker + name matcher + time window). An earlier
+# run scored the ranker alone and reported 28/31 -- three false failures.
+#
+# ---------------------------------------------------------------- CONTROL: Jira
+{"kind":"control","query":"What is DS-1026 about and who is it assigned to?","providers":["jira","bitbucket","notion"],"expected_uids":["321312ef-a407-53c9-8084-8772e96d82b0"]}
+{"kind":"control","query":"Tell me about the Nilus epic DS-576","providers":["jira","bitbucket","notion"],"expected_uids":["e9554793-f695-512a-bedc-50fb8c4337d7"]}
+{"kind":"control","query":"What is the ticket about Nilus documentation for customers?","providers":["jira","bitbucket","notion"],"expected_uids":["0ff3b782-4e8d-5fae-a313-4db369e22e6a"]}
+{"kind":"control","query":"Nilus performance benchmarking ticket","providers":["jira","bitbucket","notion"],"expected_uids":["d9c84600-e1f2-539b-be49-6b6124914fe1"]}
+{"kind":"control","query":"Which ticket covers the Azure lakehouse to Postgres batch pipeline failure?","providers":["jira","bitbucket","notion"],"expected_uids":["6c0859e7-7fce-58ee-8a4e-7ecbb895d5b2"]}
+{"kind":"control","query":"DS-1237","providers":["jira","bitbucket","notion"],"expected_uids":["16c12a07-8e92-525c-af42-06e068b443f4"]}
+# ------------------------------------------------------------ CONTROL: Bitbucket code
+{"kind":"control","query":"which file handles hera ingestion metadata workflow","providers":["jira","bitbucket","notion"],"expected_uids":["bb4208c2-43a8-57ac-a353-2eb7175ff3c7"]}
+{"kind":"control","query":"what does nilus/src/projection_reader.py do","providers":["jira","bitbucket","notion"],"expected_uids":["a1ce97b6-8033-5447-8cbe-7ae1834c346b"]}
+{"kind":"control","query":"where is the Google Ads field handling code","providers":["jira","bitbucket","notion"],"expected_uids":["c94393e3-e0c4-5504-9e1d-e52aabfecef5"]}
+{"kind":"control","query":"nilus/src/hera_ingestion/workflows/classification.py","providers":["jira","bitbucket","notion"],"expected_uids":["e086e5e8-8ddd-5ad3-923f-bd016106c91a"]}
+{"kind":"control","query":"which file has the Monday.com helpers","providers":["jira","bitbucket","notion"],"expected_uids":["aebeb0ea-60b2-53f6-9edf-596aeb5517c7"]}
+# -------------------------------------------------------- CONTROL: pull requests
+{"kind":"control","query":"which pull request changed the credentials to service account credentials","providers":["jira","bitbucket","notion"],"expected_uids":["60110067-e843-57fe-b577-269b72830906"]}
+{"kind":"control","query":"PR that set Hera DatabaseService displayName without the engine prefix","providers":["jira","bitbucket","notion"],"expected_uids":["166b5bbc-0594-5056-ae78-daab1c67880e"]}
+{"kind":"control","query":"which PR defaulted max-table-nesting to 0","providers":["jira","bitbucket","notion"],"expected_uids":["30b4141f-1052-5f0d-bd62-d12a424b99fb"]}
+{"kind":"control","query":"pull request implementing the nilus alias delegation pattern","providers":["jira","bitbucket","notion"],"expected_uids":["d69fdefb-8d0f-5578-a31a-b442d98c39a8"]}
+# ----------------------------------------------------------- CONTROL: Notion docs
+{"kind":"control","query":"Understanding Metadata Pipeline Config","providers":["jira","bitbucket","notion"],"expected_uids":["a782ceec-10e1-5982-a4d3-8ae92cdf21b1"]}
+{"kind":"control","query":"how do I configure a stream pipeline","providers":["jira","bitbucket","notion"],"expected_uids":["0194880b-4e93-5a64-8bc7-2835ae3cc834"]}
+{"kind":"control","query":"documentation maintenance guide","providers":["jira","bitbucket","notion"],"expected_uids":["8087121b-dbe7-553d-89c3-9c1db1f9453e"]}
+{"kind":"control","query":"how do I create a custom source in Nilus?","providers":["jira","bitbucket","notion"],"expected_uids":["ad49086c-dda6-5e65-8048-c96c9315c6fd"]}
+{"kind":"control","query":"how do I optimize sink datasets","providers":["jira","bitbucket","notion"],"expected_uids":["6707a7fc-2128-58ff-b53e-0c0d2a32ec55"]}
+{"kind":"control","query":"Is Nilus GA, and which customers are live in production?","providers":["jira","bitbucket","notion"],"expected_uids":["d837df9a-29c7-5365-be20-f2401bca786d"]}
+# ------------------------------------------------------------- CONTROL: decisions
+{"kind":"control","query":"Why did we decide to use a workspace-qualified nilus-server URL?","providers":["jira","bitbucket","notion"],"expected_uids":["942f5ba4-b1fc-5841-a98f-c65070bc8309"]}
+{"kind":"control","query":"when do we use merge versus replace for resources?","providers":["jira","bitbucket","notion"],"expected_uids":["3e497f2d-d798-5c74-9184-904fbe92e646"]}
+{"kind":"control","query":"how are credentials projected into a pipeline?","providers":["jira","bitbucket","notion"],"expected_uids":["999314de-2820-5efd-a6e7-67aca37a6fdc"]}
+{"kind":"control","query":"why should topic.prefix stay stable after production deployment?","providers":["jira","bitbucket","notion"],"expected_uids":["a264c2f5-b02d-5f15-a425-0d2f6ca5cf16"]}
+{"kind":"control","query":"what is the decision about using a depot address for connections?","providers":["jira","bitbucket","notion"],"expected_uids":["75680b35-038c-59de-8027-413a6f24a87b"]}
+# ----------------------------------------------------------------- CONTROL: terms
+{"kind":"control","query":"What does incremental_key mean and how is it used?","providers":["jira","bitbucket","notion"],"expected_uids":["cb9cce5c-33a2-5fac-9c0f-8d0d420a757d"]}
+{"kind":"control","query":"what is a batch source","providers":["jira","bitbucket","notion"],"expected_uids":["d75915f8-8699-5e95-bfa6-77da2a72b6b4"]}
+{"kind":"control","query":"difference between shallow mode and deep mode","providers":["jira","bitbucket","notion"],"expected_uids":["aad2a335-cf09-587c-9e93-3ddbdecd8a1b","08132d70-8218-5a2d-858b-94650a4a5de5"]}
+{"kind":"control","query":"what is an incremental cursor","providers":["jira","bitbucket","notion"],"expected_uids":["19702591-4d78-5b72-9d0f-91746346277f"]}
+# ---------------------------------------------------------------- CONTROL: people
+{"kind":"control","query":"What has Darpan Vyas been working on?","providers":["jira","bitbucket","notion"],"expected_uids":["bb179089-bc6b-58f1-a0a5-280ebeadbea2"]}
+# ============================================================== TARGET: recoverable
+# These depend on facts currently refused as `relation_not_allowed`. Weak today by
+# design; the adoption job should lift them. `note` names the shape each needs.
+{"kind":"target","note":"System -APPLIES_TO-> Term","query":"What does WAL_LEVEL have to do with PostgreSQL CDC?","providers":["jira","bitbucket","notion"],"expected_uids":["7c2474fc-ed44-5163-a3b2-cff3ebf92074"]}
+{"kind":"target","note":"Term -CAVEAT_OF-> System","query":"What is the binlog retention caveat for MySQL?","providers":["jira","bitbucket","notion"],"expected_uids":["aea961b0-47fa-5c5a-ac30-b8ad593a587e"]}
+{"kind":"target","note":"System -CAVEAT_OF-> Term","query":"What causes the BufferingChangeStreamCursor warning?","providers":["jira","bitbucket","notion"],"expected_uids":["f2044d60-2bf8-5602-a5a4-5325e33580e9"]}
+{"kind":"target","note":"Term -APPLIES_TO-> System","query":"Which systems does rate limiting apply to?","providers":["jira","bitbucket","notion"],"expected_uids":["f2044d60-2bf8-5602-a5a4-5325e33580e9"]}
+{"kind":"target","note":"Term -CAVEAT_OF-> System","query":"What are the API token caveats for Zendesk?","providers":["jira","bitbucket","notion"],"expected_uids":["f2044d60-2bf8-5602-a5a4-5325e33580e9"]}
+{"kind":"target","note":"System -APPLIES_TO-> Term","query":"How does Stripe handle incremental date ranges?","providers":["jira","bitbucket","notion"],"expected_uids":["f2044d60-2bf8-5602-a5a4-5325e33580e9"]}
+{"kind":"target","note":"Document -APPLIES_TO-> System","query":"Which release notes mention DataOS Lakehouse caveats?","providers":["jira","bitbucket","notion"],"expected_uids":["f6b385fc-d301-5d8d-b93c-f7f9b1deebc7"]}
+{"kind":"target","note":"System -APPLIES_TO-> Term","query":"Does Oracle support CDC in Nilus?","providers":["jira","bitbucket","notion"],"expected_uids":["f2044d60-2bf8-5602-a5a4-5325e33580e9"]}
+{"kind":"target","note":"Term -APPLIES_TO-> System","query":"What is the Athena source scheme caveat?","providers":["jira","bitbucket","notion"],"expected_uids":["f2044d60-2bf8-5602-a5a4-5325e33580e9"]}
+{"kind":"target","note":"System -CAVEAT_OF-> Term","query":"What is MongoDB Error 286 and when does it happen?","providers":["jira","bitbucket","notion"],"expected_uids":["f966bc68-e627-5b2e-a43b-57a47255aee9"]}

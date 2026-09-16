@@ -18,6 +18,10 @@ import type {
   JiraSyncRun,
   NotionStatus,
   NotionSyncRun,
+  OntologyAdoptResult,
+  OntologyAdoption,
+  OntologyPending,
+  OntologyUnadoptResult,
   SourceRecord,
 } from "./types";
 
@@ -203,4 +207,35 @@ export function getNotionSyncRun(runId: string): Promise<NotionSyncRun> {
 }
 export function deleteNotionConnection(workspaceId: string): Promise<DeleteConnectionResult> {
   return request(`/api/connectors/notion/connections/${encodeURIComponent(workspaceId)}`, { method: "DELETE" });
+}
+
+export function getOntologyPending(graphName: string): Promise<OntologyPending> {
+  return request(`/api/ontology/pending?graph_name=${encodeURIComponent(graphName)}`);
+}
+
+export function getOntologyAdoptions(graphName: string): Promise<{ adoptions: OntologyAdoption[] }> {
+  return request(`/api/ontology/adoptions?graph_name=${encodeURIComponent(graphName)}`);
+}
+
+export function adoptOntology(graphName: string): Promise<OntologyAdoptResult> {
+  return request("/api/ontology/adopt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ graph_name: graphName }),
+  });
+}
+
+export function unadoptOntology(graphName: string, batchId: string): Promise<OntologyUnadoptResult> {
+  return request(
+    `/api/ontology/unadopt/${encodeURIComponent(batchId)}?graph_name=${encodeURIComponent(graphName)}`,
+    { method: "POST" },
+  );
+}
+
+export function setAutoExtend(graphName: string, enabled: boolean): Promise<{ auto_extend: boolean }> {
+  return request("/api/ontology/auto-extend", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ graph_name: graphName, enabled }),
+  });
 }

@@ -59,6 +59,10 @@ class RelationAxiom:
     inverse_of: str | None = None
     sub_property_of: str | None = None
     temporal: str = "state"        # state | event | eternal
+    # NULL for anything seeded from code. Set only by the adoption job, and the
+    # handle `unadopt` uses to find both the axiom rows and the edges they let
+    # in -- an adoption that cannot be undone is one you should not have made.
+    adopted_batch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,15 @@ class AxiomSet:
 
     def for_relation(self, relation: str) -> list[RelationAxiom]:
         return [axiom for axiom in self.axioms if axiom.relation == relation]
+
+    def adopted_batch_for(self, subject_kind: str, relation: str, object_kind: str) -> str | None:
+        """The adoption batch that let this triple in, or None when it was
+        seeded from code. Stamped onto every edge written under it."""
+        for axiom in self.axioms:
+            if (axiom.relation == relation and axiom.subject_kind == subject_kind
+                    and axiom.object_kind == object_kind):
+                return axiom.adopted_batch
+        return None
 
     def temporal_of(self, relation: str) -> str:
         """`state` | `event` | `eternal` for a relation, `state` when unknown.
@@ -185,6 +198,7 @@ def _as_row(axiom: RelationAxiom) -> dict:
         "is_symmetric": axiom.is_symmetric, "is_asymmetric": axiom.is_asymmetric,
         "inverse_of": axiom.inverse_of, "sub_property_of": axiom.sub_property_of,
         "temporal": axiom.temporal,
+        "adopted_batch": axiom.adopted_batch,
     }
 
 
@@ -212,6 +226,7 @@ def load_axioms(ledger) -> AxiomSet:
             inverse_of=row["inverse_of"] or None,
             sub_property_of=row["sub_property_of"] or None,
             temporal=str(row["temporal"] or "state"),
+            adopted_batch=row["adopted_batch"] or None,
         )
         for row in rows
     ])

@@ -272,3 +272,56 @@ export interface DeleteConnectionResult {
   deleted: boolean;
   records_removed: number;
 }
+
+/** One (subject, relation, object) shape the extraction proposed and the
+ *  ontology refused, with the evidence behind it. */
+export interface OntologyShape {
+  subject_kind: string;
+  relation: string;
+  object_kind: string;
+  facts: number;
+  /** DISTINCT source records, never a sum -- one document using two wordings
+   *  must not push a shape past the "seen in >= N documents" bar on its own. */
+  docs: number;
+  example: string | null;
+}
+
+export interface OntologyPending {
+  eligible: OntologyShape[];
+  eligible_shapes: number;
+  eligible_facts: number;
+  total_shapes: number;
+  total_facts: number;
+  min_docs: number;
+  min_facts: number;
+  auto_extend: boolean;
+}
+
+export interface OntologyAdoption {
+  batch_id: string;
+  adopted_at: string;
+  shapes: OntologyShape[];
+  facts_expected: number;
+  min_docs: number;
+  undone_at: string | null;
+  /** Edges this batch has actually produced. Adopting only widens the
+   *  vocabulary and queues chunks -- the facts do not exist until the next
+   *  extraction runs, and 0 here is what says so. */
+  edges: number;
+}
+
+export interface OntologyAdoptResult {
+  adopted: boolean;
+  batch_id: string | null;
+  shapes: OntologyShape[];
+  facts_expected: number;
+  chunks_requeued: number;
+  skipped_reason: string | null;
+  note: string;
+}
+
+export interface OntologyUnadoptResult {
+  batch_id: string;
+  shapes: number;
+  edges_removed: number;
+}
