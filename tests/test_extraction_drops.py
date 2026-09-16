@@ -108,3 +108,38 @@ def test_drop_counts_can_be_scoped_to_one_provider(tmp_path):
 
     assert ledger.drop_counts(record_prefix="notion:") == {"relation_not_allowed": 1}
     assert ledger.drop_counts(record_prefix="jira:") == {"endpoint_unresolved": 1}
+
+
+# ------------------------------------------------- the evidence must survive
+
+def test_an_unmodelled_relation_keeps_the_sentence_it_came_from():
+    """"No relation is no relation" only works if the drop is reviewable.
+
+    The write path originally passed the triple and not the quote, so 490
+    live rows read `Term GA -APPLIES_TO-> System Nilus` with no evidence at
+    all. Kinds and names alone cannot answer the one question the row exists
+    for -- is the ontology too narrow, or was the model wrong -- because that
+    judgement needs the sentence.
+    """
+    from graph.semantic_pass import _drop
+
+    class _Fact:
+        subject_kind, subject_name = "Term", "GA"
+        relation = "APPLIES_TO"
+        object_kind, object_name = "System", "Nilus"
+        evidence = "GA is enabled for Nilus in the production workspace."
+
+    drop = _drop(DropReason.RELATION_NOT_ALLOWED, _Fact(), detail=_Fact.evidence)
+    assert drop.detail == "GA is enabled for Nilus in the production workspace."
+    assert drop.subject_name == "GA" and drop.object_name == "Nilus"
+
+
+def test_no_catch_all_relation_exists_to_fall_back_on():
+    """The failure mode this guards against is a future `RELATES_TO` added
+    "so the connection isn't lost". Once a placeholder is an edge, nothing
+    downstream can tell it from a relation somebody actually asserted."""
+    from graph.axioms import DEFAULT_AXIOMS
+
+    relations = {axiom.relation for axiom in DEFAULT_AXIOMS.axioms}
+    for catch_all in ("RELATES_TO", "RELATED_TO", "RELATED", "ASSOCIATED_WITH"):
+        assert catch_all not in relations

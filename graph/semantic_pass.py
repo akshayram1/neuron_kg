@@ -351,7 +351,14 @@ def _write_extraction(
             # with its evidence rather than written as some vague catch-all
             # relation: an unnamed relation is honest, an invented one is an
             # assertion nobody made.
-            drops.append(_drop(DropReason.RELATION_NOT_ALLOWED, fact))
+            #
+            # The evidence is the whole point of keeping it. Without the
+            # sentence, a reviewer sees `Term GA -APPLIES_TO-> System Nilus`
+            # and cannot tell whether the ontology is too narrow or the model
+            # was wrong -- which is the one judgement this row exists to
+            # support. (This argument was missing at first: 490 rows were
+            # stored with no evidence at all.)
+            drops.append(_drop(DropReason.RELATION_NOT_ALLOWED, fact, detail=fact.evidence))
             # ...and counted as a gap in the vocabulary, so "the ontology is
             # too narrow" becomes a number someone can act on rather than a
             # suspicion. A term seen once is noise; the same one seen forty
