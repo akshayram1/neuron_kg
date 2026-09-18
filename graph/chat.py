@@ -17,7 +17,7 @@ from falkordb import Graph
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from graph.search import SearchHit, hybrid_search
+from graph.search import SearchHit, embed_query, hybrid_search
 from graph.access import AccessScope
 from graph.entity import fetch_entity_detail
 from graph.structured_query import (
@@ -56,11 +56,31 @@ Facts marked [inferred] were derived (parent lift, shared term, verified
 email). Say they are inferred and name the premise. An asserted Jira/GitHub
 fact always beats an inferred one if they disagree.
 
+Source authority for implementation state: current Bitbucket/GitHub source
+code is authoritative for what production code calls. Jira and Notion may
+state a plan or completion claim, but they do not prove the code changed.
+When claim time and code-confirmation time differ, report both explicitly and
+never backdate the implementation change to the earlier documentation claim.
+A commit/merged PR date confirms the code transition; a document date only
+confirms when the claim was recorded.
+
+Wisdom and Finding blocks are first-class graph knowledge, not text to infer
+again. Their explicit STATUS fields are authoritative: `active` means reviewed
+and approved, `proposed` means awaiting review, and `rejected` must not guide
+the answer. Use active Wisdom silently as guidance for the answer. Do not
+announce that Wisdom was retrieved, its status, internal relationship names
+such as DERIVED_FROM, or its Finding provenance unless the user explicitly
+asks about wisdom, approval status, findings, provenance, lineage, or evidence.
+For an ordinary advice question, give the advice directly and let
+`used_sources` drive the separate graph-knowledge/source drawer. If the user
+does explicitly ask, report the stored status and provenance accurately.
+
 Cite sources inline using the record names given, e.g. "(HERA-101)".
 
 Format the answer as short markdown: `###` headings per source or topic,
 blank lines between sections, and bullet lists. Do not write one unbroken
-paragraph.
+paragraph. Never emit a bare `#`, `##`, or `###`; every heading must have a
+descriptive title.
 
 If the evidence starts with STRUCTURED RESULT, that list is complete for
 the question. Do not add tickets or commits that appear only inside
@@ -96,9 +116,21 @@ class Citation:
 
 
 @dataclass
+class KnowledgeCitation:
+    uid: str
+    label: str
+    name: str
+    status: str | None
+    severity: str | None
+    created_at: str | None
+    stale_at: str | None
+
+
+@dataclass
 class ChatResult:
     answer: str
     citations: list[Citation]
+    knowledge_citations: list[KnowledgeCitation] = field(default_factory=list)
     highlighted_nodes: list[str] = field(default_factory=list)
     highlighted_edges: list[str] = field(default_factory=list)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
@@ -117,6 +149,100 @@ def _log_hits(stage: str, hits: list[SearchHit]) -> None:
     )
     more = f" (+{len(hits) - _HIT_PREVIEW} more)" if len(hits) > _HIT_PREVIEW else ""
     logger.info("  %-14s %d: %s%s", stage, len(hits), shown, more)
+
+
+_WISDOM_INTENT = (
+    "wisdom", "lesson", "principle", "policy", "playbook", "heuristic",
+    "organizational", "organisation", "best practice", "should we follow",
+)
+_FINDING_INTENT = (
+    "finding", "impact", "risk", "contradiction", "mismatch", "conflict",
+    "breaking change", "stale", "blast radius",
+)
+
+
+def _requested_knowledge_layers(question: str) -> tuple[bool, bool]:
+    lowered = question.lower()
+    wisdom = any(term in lowered for term in _WISDOM_INTENT)
+    findings = wisdom or any(term in lowered for term in _FINDING_INTENT)
+    return wisdom, findings
+
+
+def _linked_finding_hits(
+    graph: Graph, wisdom_hits: list[SearchHit], scope: AccessScope,
+    providers: list[str] | None,
+) -> list[SearchHit]:
+    """Resolve Wisdom provenance deterministically instead of hoping its
+    supporting Finding independently survives a global text-search cutoff."""
+    if not wisdom_hits:
+        return []
+    acl, acl_params = scope.cypher("sr", "wisdom_lineage_acl")
+    provider_filter = "AND sr.provider IN $providers" if providers else ""
+    rows = graph.query(
+        f"""
+        MATCH (wisdom:Wisdom)-[:DERIVED_FROM]->(finding:Finding)
+        WHERE wisdom.uid IN $wisdom_uids
+        MATCH (finding)-[:MENTIONED_IN]->(sr:SourceRecord)
+        WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
+        RETURN DISTINCT finding.uid, finding.name, finding.search_text
+        """,
+        params={
+            "wisdom_uids": [hit.uid for hit in wisdom_hits],
+            **acl_params, **({"providers": providers} if providers else {}),
+        },
+    ).result_set
+    return [
+        SearchHit(row[0], "Finding", row[1] or row[0], row[2] or "", 1.0, ["wisdom-lineage"])
+        for row in rows
+    ]
+
+
+def _actionable_wisdom_hits(graph: Graph, hits: list[SearchHit]) -> list[SearchHit]:
+    """Rejected/superseded proposals remain auditable but cannot guide chat."""
+    if not hits:
+        return []
+    rows = graph.query(
+        "MATCH (wisdom:Wisdom) WHERE wisdom.uid IN $uids "
+        "AND wisdom.status IN ['active', 'proposed'] RETURN wisdom.uid",
+        params={"uids": [hit.uid for hit in hits]},
+    ).result_set
+    allowed = {row[0] for row in rows}
+    return [hit for hit in hits if hit.uid in allowed]
+
+
+def _knowledge_metadata(graph: Graph, hit: SearchHit) -> str:
+    if hit.label not in {"Wisdom", "Finding"}:
+        return ""
+    rows = graph.query(
+        """
+        MATCH (node {uid: $uid})
+        RETURN node.status, node.statement, node.rationale,
+               node.recommended_action, node.severity, node.created_at,
+               node.updated_at, node.stale_at, node.stale_reason
+        """,
+        params={"uid": hit.uid},
+    ).result_set
+    if not rows:
+        return ""
+    status, statement, rationale, action, severity, created_at, updated_at, stale_at, stale_reason = rows[0]
+    fields = [f"STATUS: {status or 'unknown'}"]
+    if severity:
+        fields.append(f"SEVERITY: {severity}")
+    if statement:
+        fields.append(f"STATEMENT: {statement}")
+    if rationale:
+        fields.append(f"RATIONALE: {rationale}")
+    if action:
+        fields.append(f"RECOMMENDED ACTION: {action}")
+    if created_at:
+        fields.append(f"CREATED AT: {created_at}")
+    if updated_at:
+        fields.append(f"UPDATED AT: {updated_at}")
+    if stale_at:
+        fields.append(f"STALE AT: {stale_at}")
+    if stale_reason:
+        fields.append(f"STALE REASON: {stale_reason}")
+    return "\n".join(fields)
 
 
 def _format_fact(fact: dict) -> str:
@@ -276,6 +402,55 @@ def _used_record_keys(
     return used
 
 
+def _name_was_used(name: str, used_sources: list[str]) -> bool:
+    block_name = name.strip()
+    for used_name in used_sources:
+        stripped = used_name.strip()
+        if stripped == block_name:
+            return True
+        if (
+            stripped.startswith(block_name + " ")
+            or stripped.startswith(block_name + "—")
+            or stripped.startswith(block_name + "–")
+            or block_name.startswith(stripped + " ")
+            or block_name.startswith(stripped + "—")
+            or block_name.startswith(stripped + "–")
+        ):
+            return True
+    return False
+
+
+def _resolve_knowledge_citations(
+    graph: Graph, hits: list[SearchHit], used_sources: list[str],
+) -> list[KnowledgeCitation]:
+    selected = [
+        hit for hit in hits
+        if hit.label in {"Wisdom", "Finding"} and _name_was_used(hit.name, used_sources)
+    ]
+    if not selected:
+        return []
+    rows = graph.query(
+        """
+        MATCH (node)
+        WHERE node.uid IN $uids
+        RETURN node.uid, labels(node)[0], node.name, node.status,
+               node.severity, node.created_at, node.stale_at
+        """,
+        params={"uids": [hit.uid for hit in selected]},
+    ).result_set
+    by_uid = {row[0]: row for row in rows}
+    citations: list[KnowledgeCitation] = []
+    for hit in selected:
+        row = by_uid.get(hit.uid)
+        if not row:
+            continue
+        citations.append(KnowledgeCitation(
+            uid=row[0], label=row[1], name=row[2] or hit.name,
+            status=row[3], severity=row[4], created_at=row[5], stale_at=row[6],
+        ))
+    return citations
+
+
 def _resolve_records(
     graph: Graph, record_keys: set[str], scope: AccessScope,
 ) -> dict[str, Citation]:
@@ -315,10 +490,48 @@ def retrieve(
         logger.info("  structured     kind=%s hits=%d", structured.kind, len(structured.hits))
         return structured, structured.hits
 
-    hits = hybrid_search(
-        graph, client, question, limit=limit, providers=providers, scope=scope,
-        token_usage=token_usage, collection=collection,
-    )
+    wants_wisdom, wants_findings = _requested_knowledge_layers(question)
+    if wants_wisdom or wants_findings:
+        # One query embedding feeds every retrieval lane. Wisdom and Findings
+        # get reserved slots so a dense graph of ordinary entities cannot
+        # crowd them out of the final top-K.
+        query_embedding = embed_query(client, question, token_usage=token_usage)
+        general_hits = hybrid_search(
+            graph, client, question, limit=limit, providers=providers, scope=scope,
+            token_usage=token_usage, collection=collection,
+            query_embedding=query_embedding,
+        )
+        wisdom_hits = _actionable_wisdom_hits(
+            graph,
+            hybrid_search(
+                graph, client, question, labels=["Wisdom"], limit=2,
+                providers=providers, scope=scope, token_usage=token_usage,
+                collection=collection, query_embedding=query_embedding,
+            ) if wants_wisdom else [],
+        )
+        lineage_hits = _linked_finding_hits(graph, wisdom_hits, scope, providers)
+        finding_hits = hybrid_search(
+            graph, client, question, labels=["Finding"], limit=2,
+            providers=providers, scope=scope, token_usage=token_usage,
+            collection=collection, query_embedding=query_embedding,
+        ) if wants_findings else []
+        _log_hits("wisdom-lane", wisdom_hits)
+        _log_hits("finding-lineage", lineage_hits)
+        _log_hits("finding-lane", finding_hits)
+
+        layer_hits: list[SearchHit] = []
+        seen: set[str] = set()
+        for hit in wisdom_hits + lineage_hits + finding_hits:
+            if hit.uid not in seen:
+                layer_hits.append(hit)
+                seen.add(hit.uid)
+        general_budget = max(2, limit - len(layer_hits))
+        hits = layer_hits + [hit for hit in general_hits if hit.uid not in seen][:general_budget]
+    else:
+        hits = hybrid_search(
+            graph, client, question, limit=limit, providers=providers, scope=scope,
+            token_usage=token_usage, collection=collection,
+        )
     _log_hits("hybrid", hits)
 
     # Inject the whole SAME_AS cluster, not the first equal-ratio name.
@@ -417,7 +630,9 @@ def run_chat_turn(
         source_keys = record_keys_by_source.setdefault(hit.name.strip(), set())
         source_keys.update(record_keys)
         fact_lines = "\n".join(_format_fact(fact) for fact in facts) or "  (no recorded facts)"
-        block = f"[{hit.label}] {hit.name}\n{hit.summary}\n{fact_lines}"
+        metadata = _knowledge_metadata(graph, hit)
+        metadata_section = f"\n{metadata}" if metadata else ""
+        block = f"[{hit.label}] {hit.name}\n{hit.summary}{metadata_section}\n{fact_lines}"
         context_blocks.append(block)
         # Per block, because one block routinely dominates: a merge commit
         # touching 400 files contributed 46% of a 54k-token context while
@@ -470,6 +685,7 @@ def run_chat_turn(
     else:
         used_record_keys = _used_record_keys(parsed.used_sources, record_keys_by_source)
     citations_by_key = _resolve_records(graph, used_record_keys, scope)
+    knowledge_citations = _resolve_knowledge_citations(graph, hits, parsed.used_sources)
     logger.info(
         "  answer         cited_blocks=%d citations=%d answer_chars=%d "
         "tokens_in=%d tokens_out=%d %.2fs",
@@ -483,6 +699,7 @@ def run_chat_turn(
     return ChatResult(
         answer=parsed.answer,
         citations=list(citations_by_key.values()),
+        knowledge_citations=knowledge_citations,
         highlighted_nodes=highlighted_nodes,
         highlighted_edges=all_edge_ids,
         token_usage=token_usage,

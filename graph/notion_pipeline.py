@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from falkordb import Graph
@@ -12,7 +13,14 @@ from connectors.core.models import SourceAccess, SourceBreadcrumb, SourceRecord
 from connectors.core.runner import prepare_record
 from connectors.notion.api import NotionPage
 from graph import writer as w
-from graph.resolver import anchor_properties, resolve_backlinks_for_target, resolve_exact_anchors
+from graph.resolver import (
+    anchor_properties, resolve_backlinks_for_target, resolve_exact_anchors,
+    resolved_anchor_values,
+)
+from graph.selective_ingestion import has_pending, selective_chunk_writes
+
+
+logger = logging.getLogger("neuron.notion_pipeline")
 
 
 def _time(value: str) -> datetime | None:
@@ -158,8 +166,11 @@ def write_page(
         ledger.find_moved_from(record.record_key, prepared.content_hash)
         if prepared.action == RecordAction.INSERT else None
     )
+    chunk_writes = selective_chunk_writes(
+        prepared.chunks, resolved_anchors=resolved_anchor_values(graph, record, uid),
+    )
     diff = ledger.save_chunks(
-        record.record_key, [(c.chunk_id, c.chunk_index, c.text) for c in prepared.chunks],
+        record.record_key, chunk_writes,
         adopt_from=moved_from.record_key if moved_from else None,
     )
     if moved_from:
@@ -170,5 +181,5 @@ def write_page(
             page.title, diff.added, diff.kept, diff.reused_done, diff.superseded,
         )
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.PENDING if prepared.chunks else SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=SemanticStatus.PENDING if has_pending(chunk_writes) else SemanticStatus.NOT_APPLICABLE)
     return prepared.action

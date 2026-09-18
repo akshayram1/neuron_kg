@@ -1,0 +1,78 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-bitbucket-connection",
+  "workspace": {
+    "uuid": "{00000000-0000-4000-8000-000000000001}",
+    "slug": "story-labs",
+    "name": "Story Labs"
+  },
+  "repository": {
+    "uuid": "{10000000-0000-4000-8000-000000000003}",
+    "workspace": "story-labs",
+    "slug": "auth-service",
+    "name": "Auth Service",
+    "full_name": "story-labs/auth-service",
+    "main_branch": "main",
+    "html_url": "https://bitbucket.story.test/story-labs/auth-service",
+    "private": true,
+    "description": "Internal authentication service providing versioned token APIs."
+  },
+  "files": [
+    {
+      "path": "src/api.py",
+      "commit_hash": "d900d900d900d900d900d900d900d900d900d900",
+      "size": 691,
+      "content": "\"\"\"Auth Service HTTP contract and approved v1 sunset.\"\"\"\n\nfrom dataclasses import dataclass\n\nV1_SUNSET_DATE = \"2026-10-01\"\n\n\n@dataclass(frozen=True)\nclass Token:\n    access_token: str\n    version: str\n\n\ndef authenticate_v1(client_id: str, credential: str) -> Token:\n    \"\"\"Deprecated endpoint POST /v1/auth; remove on V1_SUNSET_DATE.\"\"\"\n    return Token(access_token=f\"v1:{client_id}:{credential}\", version=\"v1\")\n\n\ndef authenticate_v2(client_id: str, credential: str) -> Token:\n    \"\"\"Replacement endpoint POST /v2/auth.\"\"\"\n    return Token(access_token=f\"v2:{client_id}:{credential}\", version=\"v2\")\n\n\nROUTES = {\n    \"POST /v1/auth\": authenticate_v1,\n    \"POST /v2/auth\": authenticate_v2,\n}\n",
+      "language": "python"
+    },
+    {
+      "path": "README.md",
+      "commit_hash": "d900d900d900d900d900d900d900d900d900d900",
+      "size": 329,
+      "content": "# Auth Service\n\nAUTH-900 approves removal of `POST /v1/auth` on 2026-10-01. `POST /v2/auth` replaces it.\n\nKnown v1 consumers are MCP Gateway and Argo Orchestrator. Both must migrate before the sunset date. The v1 route remains live until the scheduled removal; this commit announces the change but does not remove the route yet.\n",
+      "language": "markdown"
+    }
+  ],
+  "commits": [
+    {
+      "commit_hash": "d900d900d900d900d900d900d900d900d900d900",
+      "message": "AUTH-900 mark POST /v1/auth deprecated with October 1 sunset",
+      "author_name": "Asha Rao",
+      "author_email": "asha.rao@story.test",
+      "date": "2026-09-10T14:40:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/auth-service/commits/d900d900d900",
+      "files": [
+        {
+          "path": "src/api.py",
+          "old_path": "src/api.py",
+          "status": "modified",
+          "lines_added": 4,
+          "lines_removed": 2
+        },
+        {
+          "path": "README.md",
+          "old_path": "README.md",
+          "status": "modified",
+          "lines_added": 5,
+          "lines_removed": 4
+        }
+      ]
+    }
+  ],
+  "pull_requests": [
+    {
+      "id": 40,
+      "title": "AUTH-900 Announce Auth API v1 sunset",
+      "description": "Marks POST /v1/auth deprecated and records its 2026-10-01 removal date. The route remains live for now. MCP-150 and ARGO-250 track consumer migrations.",
+      "state": "MERGED",
+      "author_name": "Asha Rao",
+      "author_uuid": "{20000000-0000-4000-8000-000000000003}",
+      "source_branch": "change/AUTH-900-v1-sunset",
+      "destination_branch": "main",
+      "created_on": "2026-09-10T10:00:00Z",
+      "updated_on": "2026-09-10T14:40:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/auth-service/pull-requests/40"
+    }
+  ]
+}

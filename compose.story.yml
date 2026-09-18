@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg17-bookworm
+    environment:
+      POSTGRES_DB: neuron
+      POSTGRES_USER: neuron
+      POSTGRES_PASSWORD: neuron
+    ports:
+      - "${NEURON_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - neuron-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neuron -d neuron"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  falkordb:
+    image: falkordb/falkordb-server:latest
+    ports:
+      - "${NEURON_FALKOR_PORT:-6380}:6379"
+    volumes:
+      - neuron-falkor:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  neuron-postgres:
+  neuron-falkor:

@@ -1,5 +1,5 @@
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
-import { LocateFixed, Maximize2, Minus, Plus, RefreshCw, Search, X } from "lucide-react";
+import { Boxes, LocateFixed, Maximize2, Minimize2, Minus, Plus, RefreshCw, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   GraphEdge,
@@ -26,12 +26,33 @@ const TYPE_COLORS: Record<string, string> = {
   Document: "#f2f4f7",
   Entity: "#91a0b5",
   SourceRecord: "#7db6ff",
+  Finding: "#7f1d1d",
+  Wisdom: "#8b5cf6",
 };
 
 const TYPE_ORDER = [
   "Project", "Workspace", "Repository", "WorkItem", "SourceFile", "Commit",
-  "PullRequest", "Document", "Person", "Term", "Decision", "System",
+  "Finding", "Wisdom", "PullRequest", "Document", "Person", "Term", "Decision", "System",
 ];
+
+type LayoutMode = "network" | "clusters";
+
+const CLUSTER_META: Record<string, { label: string; color: string; order: number }> = {
+  jira: { label: "Jira", color: "#6ea8ff", order: 1 },
+  notion: { label: "Notion", color: "#e5e7eb", order: 2 },
+  bitbucket: { label: "Bitbucket", color: "#4f8cff", order: 3 },
+  github: { label: "GitHub", color: "#a8b3c4", order: 4 },
+  findings: { label: "Findings", color: "#ef4444", order: 5 },
+  wisdom: { label: "Wisdom", color: "#a78bfa", order: 6 },
+  shared: { label: "Shared knowledge", color: "#59dcb2", order: 7 },
+};
+
+function clusterForNode(node: GraphNode): string {
+  if (node.type === "Finding") return "findings";
+  if (node.type === "Wisdom") return "wisdom";
+  const provider = node.group?.toLowerCase();
+  return provider && provider in CLUSTER_META ? provider : "shared";
+}
 
 interface GraphCanvasProps {
   graph: GraphPayload | null;
@@ -51,7 +72,8 @@ interface CanvasSearchResult {
 }
 
 function runLayout(cy: Core, animate = true) {
-  cy.layout({
+  cy.nodes(".cluster-label").addClass("is-hidden");
+  cy.elements().not(".cluster-label").layout({
     name: "concentric",
     animate,
     animationDuration: 520,
@@ -70,6 +92,63 @@ function runLayout(cy: Core, animate = true) {
   }).run();
 }
 
+function runClusterLayout(cy: Core, animate = true) {
+  const buckets = new Map<string, ReturnType<Core["collection"]>>();
+  cy.nodes().not(".cluster-label").forEach((node) => {
+    const key = String(node.data("cluster") || "shared");
+    const bucket = buckets.get(key) ?? cy.collection();
+    bucket.merge(node);
+    buckets.set(key, bucket);
+  });
+  const groups = [...buckets.entries()].sort(
+    ([left], [right]) => (CLUSTER_META[left]?.order ?? 99) - (CLUSTER_META[right]?.order ?? 99),
+  );
+  if (!groups.length) return;
+
+  const columns = groups.length <= 2 ? groups.length : 3;
+  const rows = Math.ceil(groups.length / columns);
+  const spacingX = 680;
+  const spacingY = 560;
+  const positions: Record<string, { x: number; y: number }> = {};
+
+  groups.forEach(([key, nodes], groupIndex) => {
+    const column = groupIndex % columns;
+    const row = Math.floor(groupIndex / columns);
+    const centerX = (column - (columns - 1) / 2) * spacingX;
+    const centerY = (row - (rows - 1) / 2) * spacingY;
+    const count = nodes.length;
+    const clusterRadius = Math.max(95, Math.sqrt(count) * 58);
+    nodes.forEach((node, index) => {
+      if (count === 1) {
+        positions[node.id()] = { x: centerX, y: centerY };
+        return;
+      }
+      // Golden-angle spiral keeps both small and large source groups legible
+      // without requiring an extra Cytoscape layout plugin.
+      const radius = 34 + Math.sqrt(index) * 48;
+      const angle = index * 2.399963229728653;
+      positions[node.id()] = {
+        x: centerX + Math.cos(angle) * radius,
+        y: centerY + Math.sin(angle) * radius,
+      };
+    });
+    const label = cy.getElementById(`__cluster_${key}`);
+    if (label.length) {
+      label.removeClass("is-hidden");
+      positions[label.id()] = { x: centerX, y: centerY - clusterRadius - 62 };
+    }
+  });
+
+  cy.layout({
+    name: "preset",
+    positions,
+    animate,
+    animationDuration: 620,
+    fit: true,
+    padding: 82,
+  }).run();
+}
+
 function relationLabel(value: string): string {
   return value.replaceAll("_", " ");
 }
@@ -83,20 +162,50 @@ export default function GraphCanvas({
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
+  const layoutModeRef = useRef<LayoutMode>("network");
   const [layoutBusy, setLayoutBusy] = useState(false);
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("network");
+  const [fullscreen, setFullscreen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
   const elements = useMemo<ElementDefinition[]>(() => {
     if (!graph) return [];
+    const nodeElements = graph.nodes.map((node) => ({
+      group: "nodes" as const,
+      data: {
+        ...node,
+        cluster: clusterForNode(node),
+        color: TYPE_COLORS[node.type] ?? TYPE_COLORS.Entity,
+      },
+      classes: [
+        node.type === "Finding" && node.status === "stale" ? "is-finding-node-stale" : "",
+        node.type === "Wisdom" ? `is-wisdom-${node.status ?? "proposed"}` : "",
+      ].filter(Boolean).join(" "),
+    }));
+    const clusterKeys = [...new Set(graph.nodes.map(clusterForNode))];
+    const clusterLabels: ElementDefinition[] = clusterKeys.map((key) => ({
+      group: "nodes",
+      data: {
+        id: `__cluster_${key}`,
+        label: CLUSTER_META[key]?.label ?? key,
+        cluster: key,
+        clusterColor: CLUSTER_META[key]?.color ?? CLUSTER_META.shared.color,
+        isClusterLabel: true,
+      },
+      classes: "cluster-label is-hidden",
+    }));
     return [
-      ...graph.nodes.map((node) => ({
-        group: "nodes" as const,
-        data: { ...node, color: TYPE_COLORS[node.type] ?? TYPE_COLORS.Entity },
-      })),
+      ...nodeElements,
+      ...clusterLabels,
       ...graph.edges.map((edge) => ({
         group: "edges" as const,
         data: { ...edge, displayLabel: relationLabel(edge.label) },
-        classes: [edge.superseded ? "is-superseded" : "", edge.derived ? "is-derived" : ""].filter(Boolean).join(" "),
+        classes: [
+          edge.superseded ? "is-superseded" : "",
+          edge.derived ? "is-derived" : "",
+          edge.findingStatus === "open" ? "is-finding" : "",
+          edge.findingStatus === "stale" ? "is-finding-stale" : "",
+        ].filter(Boolean).join(" "),
       })),
     ];
   }, [graph]);
@@ -186,6 +295,29 @@ export default function GraphCanvas({
           },
         },
         {
+          selector: "node.cluster-label",
+          style: {
+            width: 126,
+            height: 32,
+            shape: "round-rectangle",
+            "background-color": "#111925",
+            "border-color": "data(clusterColor)",
+            "border-width": 2,
+            label: "data(label)",
+            color: "#e7eef8",
+            "font-size": 12,
+            "font-weight": 750,
+            "text-valign": "center",
+            "text-margin-y": 0,
+            "text-max-width": "116px",
+            "z-index": 2,
+          },
+        },
+        {
+          selector: "node.cluster-label.is-hidden",
+          style: { display: "none" },
+        },
+        {
           selector: 'node[type = "Project"], node[type = "Repository"], node[type = "Workspace"]',
           style: {
             width: 48,
@@ -195,6 +327,50 @@ export default function GraphCanvas({
             "font-size": 11,
             "font-weight": 700,
             "text-max-width": "170px",
+          },
+        },
+        {
+          selector: 'node[type = "Finding"]',
+          style: {
+            shape: "diamond",
+            width: 42,
+            height: 42,
+            "background-color": "#7f1d1d",
+            "border-color": "#ef4444",
+            "border-width": 4,
+            "font-weight": 750,
+          },
+        },
+        {
+          selector: 'node[type = "Wisdom"]',
+          style: {
+            shape: "hexagon",
+            width: 48,
+            height: 48,
+            "background-color": "#6d3fc0",
+            "border-color": "#c4a7ff",
+            "border-width": 5,
+            "font-weight": 780,
+            "text-max-width": "160px",
+          },
+        },
+        {
+          selector: "node.is-wisdom-active",
+          style: {
+            "background-color": "#176b52",
+            "border-color": "#75ddba",
+          },
+        },
+        {
+          selector: "node.is-wisdom-rejected, node.is-wisdom-superseded",
+          style: { opacity: 0.42, "border-style": "dashed" },
+        },
+        {
+          selector: "node.is-finding-node-stale",
+          style: {
+            "background-color": "#543535",
+            "border-color": "#795757",
+            opacity: 0.5,
           },
         },
         {
@@ -237,6 +413,28 @@ export default function GraphCanvas({
             "line-style": "dashed",
             "line-color": "#4a5361",
             "target-arrow-color": "#4a5361",
+            opacity: 0.42,
+          },
+        },
+        {
+          selector: "edge.is-finding",
+          style: {
+            width: 5,
+            "line-color": "#7f1d1d",
+            "target-arrow-color": "#991b1b",
+            color: "#fca5a5",
+            opacity: 1,
+            "z-index": 35,
+          },
+        },
+        {
+          selector: "edge.is-finding-stale",
+          style: {
+            width: 2,
+            "line-style": "dashed",
+            "line-color": "#6b3030",
+            "target-arrow-color": "#6b3030",
+            color: "#9f7777",
             opacity: 0.42,
           },
         },
@@ -289,7 +487,9 @@ export default function GraphCanvas({
     cyRef.current = cy;
     cy.on("tap", "node", (event) => {
       const node = event.target;
-      onSelect({ kind: "node", value: graph.nodes.find((item) => item.id === node.id())! });
+      if (node.data("isClusterLabel")) return;
+      const selected = graph.nodes.find((item) => item.id === node.id());
+      if (selected) onSelect({ kind: "node", value: selected });
     });
     cy.on("tap", "edge", (event) => {
       const edge = event.target;
@@ -300,7 +500,8 @@ export default function GraphCanvas({
     });
     cy.on("layoutstart", () => setLayoutBusy(true));
     cy.on("layoutstop", () => setLayoutBusy(false));
-    runLayout(cy, false);
+    if (layoutModeRef.current === "clusters") runClusterLayout(cy, false);
+    else runLayout(cy, false);
 
     return () => {
       cy.destroy();
@@ -332,9 +533,47 @@ export default function GraphCanvas({
   // when the highlight IDs themselves have not changed.
   }, [graph, highlight]);
 
-  const fitGraph = () => cyRef.current?.animate({ fit: { eles: cyRef.current.elements(), padding: 58 }, duration: 350 });
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const panel = containerRef.current?.closest(".map-panel");
+      const active = Boolean(panel && document.fullscreenElement === panel);
+      setFullscreen(active);
+      // Fullscreen dimensions settle after the event. Resize Cytoscape on the
+      // next frame, then fit the existing graph without rebuilding it.
+      window.requestAnimationFrame(() => {
+        const cy = cyRef.current;
+        if (!cy) return;
+        cy.resize();
+        cy.animate({ fit: { eles: cy.elements().not(".cluster-label"), padding: 72 }, duration: 320 });
+      });
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    const panel = containerRef.current?.closest<HTMLElement>(".map-panel");
+    if (!panel) return;
+    try {
+      if (document.fullscreenElement === panel) await document.exitFullscreen();
+      else await panel.requestFullscreen();
+    } catch {
+      // Browsers can deny fullscreen outside a direct user gesture; the
+      // button remains usable for the next click without breaking the graph.
+    }
+  };
   const resetLayout = () => {
-    if (cyRef.current) runLayout(cyRef.current);
+    if (!cyRef.current) return;
+    if (layoutModeRef.current === "clusters") runClusterLayout(cyRef.current);
+    else runLayout(cyRef.current);
+  };
+  const toggleLayoutMode = () => {
+    const next: LayoutMode = layoutModeRef.current === "network" ? "clusters" : "network";
+    layoutModeRef.current = next;
+    setLayoutMode(next);
+    if (!cyRef.current) return;
+    if (next === "clusters") runClusterLayout(cyRef.current);
+    else runLayout(cyRef.current);
   };
   const zoomBy = (factor: number) => {
     const cy = cyRef.current;
@@ -401,14 +640,30 @@ export default function GraphCanvas({
         )}
       </div>
       <div className="graph-toolbar" aria-label="Graph controls">
+        <button
+          className={layoutMode === "clusters" ? "active" : ""}
+          onClick={toggleLayoutMode}
+          title={layoutMode === "clusters" ? "Switch to network view" : "Cluster by source and knowledge layer"}
+          aria-label={layoutMode === "clusters" ? "Switch to network view" : "Switch to cluster view"}
+          aria-pressed={layoutMode === "clusters"}
+          disabled={layoutBusy}
+        >
+          <Boxes size={15} />
+        </button>
         <button onClick={zoomIn} title="Zoom in" aria-label="Zoom in">
           <Plus size={15} />
         </button>
         <button onClick={zoomOut} title="Zoom out" aria-label="Zoom out">
           <Minus size={15} />
         </button>
-        <button onClick={fitGraph} title="Fit graph" aria-label="Fit graph">
-          <Maximize2 size={15} />
+        <button
+          className={fullscreen ? "active" : ""}
+          onClick={() => void toggleFullscreen()}
+          title={fullscreen ? "Exit full screen" : "Open graph full screen"}
+          aria-label={fullscreen ? "Exit graph full screen" : "Open graph full screen"}
+          aria-pressed={fullscreen}
+        >
+          {fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
         </button>
         <button onClick={resetLayout} title="Re-run layout" aria-label="Re-run layout" disabled={layoutBusy}>
           <LocateFixed size={15} />
@@ -443,6 +698,7 @@ export default function GraphCanvas({
               <span><i className="edge-swatch" aria-hidden="true" /> Live</span>
               <span className="gold-key"><i className="edge-swatch is-derived" aria-hidden="true" /> Derived</span>
               <span><i className="edge-swatch is-superseded" aria-hidden="true" /> Superseded</span>
+              <span><i className="edge-swatch is-finding" aria-hidden="true" /> Finding</span>
             </div>
           </div>
         </aside>

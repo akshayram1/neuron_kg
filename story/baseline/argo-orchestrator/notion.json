@@ -1,0 +1,23 @@
+{
+  "fixture_version": 1,
+  "workspace_id": "story-notion-workspace",
+  "workspace_name": "Story Architecture",
+  "pages": [
+    {
+      "page_id": "notion-argo-architecture-001",
+      "title": "Argo Orchestrator Architecture",
+      "url": "https://notion.story.test/argo-orchestrator-architecture",
+      "content": "# Argo Orchestrator\n\nArgo Orchestrator schedules and runs internal workflows. Every workflow receives a service token before any task begins.\n\n## Dependency\n\nArgo Orchestrator consumes Auth API v1 from Auth Service. Its token client calls POST /v1/auth from story-labs/argo-orchestrator/src/token_client.py. The dependency was introduced by ARGO-201.\n\nArgo has not adopted Auth API v2. A removal of v1 would block new workflow execution.",
+      "last_edited_time": "2026-09-02T10:00:00Z",
+      "parent_page_id": null
+    },
+    {
+      "page_id": "notion-argo-auth-runbook-001",
+      "title": "Argo Authentication Failure Runbook",
+      "url": "https://notion.story.test/argo-authentication-runbook",
+      "content": "# Authentication failure handling\n\nWhen POST /v1/auth is unavailable, Argo marks the workflow blocked and does not run tasks. Operators should verify Auth Service health and the service credential.\n\nARGO-202 documents this behavior. The runbook assumes Auth API v1 remains available.",
+      "last_edited_time": "2026-09-02T10:15:00Z",
+      "parent_page_id": "notion-argo-architecture-001"
+    }
+  ]
+}

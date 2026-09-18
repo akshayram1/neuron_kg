@@ -337,6 +337,7 @@ def hybrid_search(
     token_usage: TokenUsage | None = None,
     collection: str = vector_store.COLLECTION,
     fulltext_strategy: str = FULLTEXT_FUSION,
+    query_embedding: list[float] | None = None,
 ) -> list[SearchHit]:
     """Search across every content-bearing label, fuse fulltext + vector
     rankings via RRF, return the top `limit` overall.
@@ -361,7 +362,7 @@ def hybrid_search(
     semantically) can catch what fulltext's literal tokenization can't.
     """
     search_labels = labels or FULLTEXT_LABELS
-    embedding = embed_query(client, query, token_usage=token_usage)
+    embedding = query_embedding or embed_query(client, query, token_usage=token_usage)
 
     rrf_scores: dict[str, float] = {}
     info: dict[str, SearchHit] = {}

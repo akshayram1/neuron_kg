@@ -1,0 +1,16 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "workspace_id": "story-notion-workspace",
+  "workspace_name": "Story Architecture",
+  "pages": [
+    {
+      "page_id": "notion-auth-v1-readiness-001",
+      "title": "Auth API v1 Removal Readiness Review",
+      "url": "https://notion.story.test/auth-api-v1-removal-readiness",
+      "content": "# Removal readiness\n\nThe Auth API v1 removal is approved for 2026-10-01. The review records that all known consumers completed migration to Auth API v2. MCP Gateway and Argo Orchestrator now consume POST /v2/auth and no longer call POST /v1/auth.\n\nBased on this review, Auth Service may delete the v1 production route.",
+      "last_edited_time": "2026-09-30T16:30:00Z",
+      "parent_page_id": "notion-auth-v1-deprecation-001"
+    }
+  ]
+}

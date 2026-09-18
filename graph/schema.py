@@ -33,6 +33,10 @@ ENTITY_LABELS = [
     "Decision",
     "Term",
     "System",
+    "Api",
+    "Endpoint",
+    "Finding",
+    "Wisdom",
     "FactHistory",
 ]
 
@@ -42,7 +46,10 @@ ENTITY_LABELS = [
 # but SourceFile wasn't in this list at all, so hybrid_search never had a
 # chance to see it, same class of gap Commit had before it). Fulltext alone
 # turned out insufficient too -- see VECTOR_LABELS below.
-FULLTEXT_LABELS = ["WorkItem", "Document", "Decision", "Term", "Commit", "PullRequest", "SourceFile"]
+FULLTEXT_LABELS = [
+    "WorkItem", "Document", "Decision", "Term", "Api", "Endpoint",
+    "Commit", "PullRequest", "SourceFile", "Finding", "Wisdom",
+]
 
 # Labels that get embeddings — only content-bearing ones (plan.md §4:
 # embedding every structural node would be a real cost at millions of rows).
@@ -58,7 +65,10 @@ FULLTEXT_LABELS = ["WorkItem", "Document", "Decision", "Term", "Commit", "PullRe
 # all 264 existing SourceFile nodes: ~435K tokens, ~$0.009 total (see
 # cost.md) -- not the "264+ extra OpenAI calls" cost concern it looks like
 # on paper, because text-embedding-3-small is priced at $0.02/1M tokens.
-VECTOR_LABELS = ["WorkItem", "Document", "Decision", "Term", "PullRequest", "Commit", "SourceFile"]
+VECTOR_LABELS = [
+    "WorkItem", "Document", "Decision", "Term", "Api", "Endpoint",
+    "PullRequest", "Commit", "SourceFile", "Finding", "Wisdom",
+]
 EMBEDDING_DIMENSION = 1536  # text-embedding-3-small
 
 

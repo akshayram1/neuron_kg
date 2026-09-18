@@ -118,6 +118,21 @@ def _targets(graph: Graph, record: SourceRecord) -> list[dict]:
     return list(found.values())
 
 
+def resolved_anchor_values(
+    graph: Graph, record: SourceRecord, primary_uid: str,
+) -> frozenset[str]:
+    """Exact identifiers from this record that already resolve cross-source.
+
+    The selective semantic queue uses this after ``resolve_exact_anchors`` to
+    avoid paying an LLM to rediscover a relationship Pass 1 already wrote.
+    """
+    return frozenset(
+        str(target["anchor"]).casefold()
+        for target in _targets(graph, record)
+        if target["uid"] != primary_uid and record.provider not in target["providers"]
+    )
+
+
 def _relation(from_label: str, to_label: str) -> str:
     if from_label in ("Commit", "PullRequest") and to_label == "WorkItem":
         return "IMPLEMENTS"

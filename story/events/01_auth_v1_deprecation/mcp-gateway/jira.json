@@ -1,0 +1,44 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-jira-connection",
+  "site": {
+    "cloud_id": "story-cloud-001",
+    "name": "Story Engineering Jira",
+    "url": "https://story.atlassian.test"
+  },
+  "project": {
+    "project_id": "10001",
+    "key": "MCP",
+    "name": "MCP Gateway",
+    "description": "Gateway that exposes model-context tools to internal applications."
+  },
+  "issues": [
+    {
+      "issue_id": "20150",
+      "key": "MCP-150",
+      "summary": "Migrate MCP Gateway from Auth API v1 to v2",
+      "content": "Issue: MCP-150\nSummary: Migrate MCP Gateway from Auth API v1 to v2\nType: Story\nStatus: To Do\nAssignee: Mira Sen\nReporter: Dev Mehta\nLabels: migration, authentication, breaking-change\n\nDescription:\nAUTH-900 removes POST /v1/auth on 2026-10-01. Update MCP Gateway to consume Auth API v2 at POST /v2/auth. Migration is complete only after src/auth_client.py no longer references /v1/auth.",
+      "description": "AUTH-900 removes POST /v1/auth on 2026-10-01. Update MCP Gateway to consume Auth API v2 at POST /v2/auth. Migration is complete only after src/auth_client.py no longer references /v1/auth.",
+      "status": "To Do",
+      "issue_type": "Story",
+      "assignee": {
+        "account_id": "jira-mira-sen",
+        "display_name": "Mira Sen",
+        "email": "mira.sen@story.test"
+      },
+      "reporter": {
+        "account_id": "jira-dev-mehta",
+        "display_name": "Dev Mehta",
+        "email": "dev.mehta@story.test"
+      },
+      "labels": ["migration", "authentication", "breaking-change"],
+      "blocks": [],
+      "created_at": "2026-09-10T15:00:00Z",
+      "updated_at": "2026-09-10T15:00:00Z",
+      "parent_id": null,
+      "parent_key": null,
+      "changes": []
+    }
+  ]
+}

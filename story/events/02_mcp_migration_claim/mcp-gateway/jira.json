@@ -1,0 +1,63 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-jira-connection",
+  "site": {
+    "cloud_id": "story-cloud-001",
+    "name": "Story Engineering Jira",
+    "url": "https://story.atlassian.test"
+  },
+  "project": {
+    "project_id": "10001",
+    "key": "MCP",
+    "name": "MCP Gateway",
+    "description": "Gateway that exposes model-context tools to internal applications."
+  },
+  "issues": [
+    {
+      "issue_id": "20150",
+      "key": "MCP-150",
+      "summary": "Migrate MCP Gateway from Auth API v1 to v2",
+      "content": "Issue: MCP-150\nSummary: Migrate MCP Gateway from Auth API v1 to v2\nType: Story\nStatus: Done\nAssignee: Mira Sen\nReporter: Dev Mehta\nLabels: migration, authentication, breaking-change\n\nDescription:\nMCP Gateway migration to Auth API v2 is complete. MCP now consumes POST /v2/auth and no longer uses POST /v1/auth. Documentation was updated before the production repository snapshot was verified.\n\nComment by Dev Mehta:\nMarking complete based on the migration review. Repository evidence should be checked separately.",
+      "description": "MCP Gateway migration to Auth API v2 is complete. MCP now consumes POST /v2/auth and no longer uses POST /v1/auth. Documentation was updated before the production repository snapshot was verified.",
+      "status": "Done",
+      "issue_type": "Story",
+      "assignee": {
+        "account_id": "jira-mira-sen",
+        "display_name": "Mira Sen",
+        "email": "mira.sen@story.test"
+      },
+      "reporter": {
+        "account_id": "jira-dev-mehta",
+        "display_name": "Dev Mehta",
+        "email": "dev.mehta@story.test"
+      },
+      "labels": ["migration", "authentication", "breaking-change"],
+      "blocks": [],
+      "created_at": "2026-09-10T15:00:00Z",
+      "updated_at": "2026-09-12T11:00:00Z",
+      "parent_id": null,
+      "parent_key": null,
+      "changes": [
+        {
+          "at": "2026-09-11T09:00:00Z",
+          "field": "status",
+          "from_id": "to-do",
+          "from_string": "To Do",
+          "to_id": "in-progress",
+          "to_string": "In Progress",
+          "author": "Mira Sen"
+        },
+        {
+          "at": "2026-09-12T11:00:00Z",
+          "field": "status",
+          "from_id": "in-progress",
+          "from_string": "In Progress",
+          "to_id": "done",
+          "to_string": "Done",
+          "author": "Dev Mehta"
+        }
+      ]
+    }
+  ]
+}

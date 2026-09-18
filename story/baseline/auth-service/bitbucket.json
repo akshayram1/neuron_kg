@@ -1,0 +1,101 @@
+{
+  "fixture_version": 1,
+  "connection_id": "story-bitbucket-connection",
+  "workspace": {
+    "uuid": "{00000000-0000-4000-8000-000000000001}",
+    "slug": "story-labs",
+    "name": "Story Labs"
+  },
+  "repository": {
+    "uuid": "{10000000-0000-4000-8000-000000000003}",
+    "workspace": "story-labs",
+    "slug": "auth-service",
+    "name": "Auth Service",
+    "full_name": "story-labs/auth-service",
+    "main_branch": "main",
+    "html_url": "https://bitbucket.story.test/story-labs/auth-service",
+    "private": true,
+    "description": "Internal authentication service providing versioned token APIs."
+  },
+  "files": [
+    {
+      "path": "src/api.py",
+      "commit_hash": "a302a302a302a302a302a302a302a302a302a302",
+      "size": 611,
+      "content": "\"\"\"Auth Service HTTP contract.\"\"\"\n\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Token:\n    access_token: str\n    version: str\n\n\ndef authenticate_v1(client_id: str, credential: str) -> Token:\n    \"\"\"Production endpoint: POST /v1/auth.\"\"\"\n    return Token(access_token=f\"v1:{client_id}:{credential}\", version=\"v1\")\n\n\ndef authenticate_v2(client_id: str, credential: str) -> Token:\n    \"\"\"Migration endpoint: POST /v2/auth.\"\"\"\n    return Token(access_token=f\"v2:{client_id}:{credential}\", version=\"v2\")\n\n\nROUTES = {\n    \"POST /v1/auth\": authenticate_v1,\n    \"POST /v2/auth\": authenticate_v2,\n}\n",
+      "language": "python"
+    },
+    {
+      "path": "README.md",
+      "commit_hash": "a302a302a302a302a302a302a302a302a302a302",
+      "size": 390,
+      "content": "# Auth Service\n\nAuth Service provides two authentication contracts:\n\n- `POST /v1/auth` — current production contract introduced by AUTH-301.\n- `POST /v2/auth` — migration contract introduced by AUTH-302.\n\nMCP Gateway and Argo Orchestrator currently consume Auth API v1. Adding v2 does not deprecate or remove v1. Both routes remain active until a separate removal decision is approved.\n",
+      "language": "markdown"
+    }
+  ],
+  "commits": [
+    {
+      "commit_hash": "a302a302a302a302a302a302a302a302a302a302",
+      "message": "AUTH-302 add Auth API v2 alongside v1",
+      "author_name": "Asha Rao",
+      "author_email": "asha.rao@story.test",
+      "date": "2026-09-01T11:45:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/auth-service/commits/a302a302a302",
+      "files": [
+        {
+          "path": "src/api.py",
+          "old_path": "src/api.py",
+          "status": "modified",
+          "lines_added": 6,
+          "lines_removed": 0
+        },
+        {
+          "path": "README.md",
+          "old_path": "README.md",
+          "status": "modified",
+          "lines_added": 4,
+          "lines_removed": 1
+        }
+      ]
+    },
+    {
+      "commit_hash": "a301a301a301a301a301a301a301a301a301a301",
+      "message": "AUTH-301 publish POST /v1/auth production contract",
+      "author_name": "Asha Rao",
+      "author_email": "asha.rao@story.test",
+      "date": "2026-08-05T15:00:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/auth-service/commits/a301a301a301",
+      "files": [
+        {
+          "path": "src/api.py",
+          "old_path": "",
+          "status": "added",
+          "lines_added": 12,
+          "lines_removed": 0
+        },
+        {
+          "path": "README.md",
+          "old_path": "",
+          "status": "added",
+          "lines_added": 6,
+          "lines_removed": 0
+        }
+      ]
+    }
+  ],
+  "pull_requests": [
+    {
+      "id": 31,
+      "title": "AUTH-302 Add v2 authentication contract",
+      "description": "Adds POST /v2/auth while preserving POST /v1/auth. This PR does not deprecate v1 and must not be interpreted as a consumer migration.",
+      "state": "MERGED",
+      "author_name": "Asha Rao",
+      "author_uuid": "{20000000-0000-4000-8000-000000000003}",
+      "source_branch": "feature/AUTH-302-auth-v2",
+      "destination_branch": "main",
+      "created_on": "2026-08-25T08:00:00Z",
+      "updated_on": "2026-09-01T11:45:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/auth-service/pull-requests/31"
+    }
+  ]
+}

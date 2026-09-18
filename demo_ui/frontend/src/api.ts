@@ -23,6 +23,9 @@ import type {
   OntologyPending,
   OntologyUnadoptResult,
   SourceRecord,
+  StoryRun,
+  StoryState,
+  StoryWisdomProposal,
 } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -237,5 +240,41 @@ export function setAutoExtend(graphName: string, enabled: boolean): Promise<{ au
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ graph_name: graphName, enabled }),
+  });
+}
+
+export function startStoryDemo(): Promise<{ run_id: string; graph_name: string; phase: string; status: string }> {
+  return request("/api/story-demo/start", { method: "POST" });
+}
+
+export function applyStoryPhase(
+  graphName: string, phase: string,
+): Promise<{ run_id: string; graph_name: string; phase: string; status: string }> {
+  const query = new URLSearchParams({ graph_name: graphName });
+  return request(`/api/story-demo/apply/${encodeURIComponent(phase)}?${query}`, { method: "POST" });
+}
+
+export function getStoryRun(runId: string): Promise<StoryRun> {
+  return request(`/api/story-demo/runs/${encodeURIComponent(runId)}`);
+}
+
+export function getStoryState(graphName: string): Promise<StoryState> {
+  return request(`/api/story-demo/state?${new URLSearchParams({ graph_name: graphName })}`);
+}
+
+export function resetStoryDemo(graphName: string): Promise<{ reset: boolean; nodes_removed: number }> {
+  return request(`/api/story-demo/reset?${new URLSearchParams({ graph_name: graphName })}`, {
+    method: "DELETE",
+  });
+}
+
+export function reviewStoryWisdom(
+  graphName: string, proposalId: string, decision: "approve" | "reject",
+): Promise<{ wisdom: StoryWisdomProposal }> {
+  const query = new URLSearchParams({ graph_name: graphName });
+  return request(`/api/story-demo/wisdom/${encodeURIComponent(proposalId)}/review?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
   });
 }

@@ -31,6 +31,10 @@ export default function SyncProgress({ progress, provider, syncing }: SyncProgre
   const facts = progress?.facts_written ?? 0;
   const chunks = progress?.chunks_ingested ?? 0;
   const chunkTotal = progress?.chunks_total ?? 0;
+  const pass1Links = progress?.pass1_links_written ?? 0;
+  const skippedChunks = progress?.chunks_llm_skipped ?? progress?.chunks_deterministic ?? 0;
+  const hybridChunks = progress?.chunks_hybrid ?? 0;
+  const llmCalls = progress?.llm_calls ?? 0;
 
   if (pages > 0) details.push(`${pages} pages`);
   if (files > 0) details.push(`${files} files`);
@@ -39,6 +43,10 @@ export default function SyncProgress({ progress, provider, syncing }: SyncProgre
   if (unchanged > 0) details.push(`${unchanged} unchanged`);
   if (facts > 0) details.push(`${facts} facts`);
   if (chunkTotal > 0) details.push(`${chunks} / ${chunkTotal} AI chunks`);
+  if (pass1Links > 0) details.push(`${pass1Links} Pass 1 links`);
+  if (skippedChunks > 0) details.push(`${skippedChunks} LLM skipped`);
+  if (hybridChunks > 0) details.push(`${hybridChunks} hybrid chunks`);
+  if (llmCalls > 0) details.push(`${llmCalls} LLM calls`);
 
   const percentage = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
 

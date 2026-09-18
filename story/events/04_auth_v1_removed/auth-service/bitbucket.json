@@ -1,0 +1,78 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-bitbucket-connection",
+  "workspace": {
+    "uuid": "{00000000-0000-4000-8000-000000000001}",
+    "slug": "story-labs",
+    "name": "Story Labs"
+  },
+  "repository": {
+    "uuid": "{10000000-0000-4000-8000-000000000003}",
+    "workspace": "story-labs",
+    "slug": "auth-service",
+    "name": "Auth Service",
+    "full_name": "story-labs/auth-service",
+    "main_branch": "main",
+    "html_url": "https://bitbucket.story.test/story-labs/auth-service",
+    "private": true,
+    "description": "Internal authentication service providing versioned token APIs."
+  },
+  "files": [
+    {
+      "path": "src/api.py",
+      "commit_hash": "d901d901d901d901d901d901d901d901d901d901",
+      "size": 391,
+      "content": "\"\"\"Auth Service HTTP contract after the v1 sunset.\"\"\"\n\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Token:\n    access_token: str\n    version: str\n\n\ndef authenticate_v2(client_id: str, credential: str) -> Token:\n    \"\"\"Production endpoint: POST /v2/auth.\"\"\"\n    return Token(access_token=f\"v2:{client_id}:{credential}\", version=\"v2\")\n\n\nROUTES = {\n    \"POST /v2/auth\": authenticate_v2,\n}\n",
+      "language": "python"
+    },
+    {
+      "path": "README.md",
+      "commit_hash": "d901d901d901d901d901d901d901d901d901d901",
+      "size": 237,
+      "content": "# Auth Service\n\nAuth Service provides Auth API v2 at `POST /v2/auth`. AUTH-900 removed the former v1 production route on 2026-10-01. Consumers must use the v2 scoped-token contract.\n",
+      "language": "markdown"
+    }
+  ],
+  "commits": [
+    {
+      "commit_hash": "d901d901d901d901d901d901d901d901d901d901",
+      "message": "AUTH-900 remove Auth API v1 production route",
+      "author_name": "Asha Rao",
+      "author_email": "asha.rao@story.test",
+      "date": "2026-10-01T09:00:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/auth-service/commits/d901d901d901",
+      "files": [
+        {
+          "path": "src/api.py",
+          "old_path": "src/api.py",
+          "status": "modified",
+          "lines_added": 2,
+          "lines_removed": 8
+        },
+        {
+          "path": "README.md",
+          "old_path": "README.md",
+          "status": "modified",
+          "lines_added": 2,
+          "lines_removed": 5
+        }
+      ]
+    }
+  ],
+  "pull_requests": [
+    {
+      "id": 41,
+      "title": "AUTH-900 Remove the v1 authentication route",
+      "description": "Deletes POST /v1/auth from the production router. POST /v2/auth remains the supported authentication contract.",
+      "state": "MERGED",
+      "author_name": "Asha Rao",
+      "author_uuid": "{20000000-0000-4000-8000-000000000003}",
+      "source_branch": "change/AUTH-900-remove-v1",
+      "destination_branch": "main",
+      "created_on": "2026-09-28T08:15:00Z",
+      "updated_on": "2026-10-01T09:00:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/auth-service/pull-requests/41"
+    }
+  ]
+}

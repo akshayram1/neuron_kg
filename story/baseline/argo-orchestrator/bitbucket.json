@@ -1,0 +1,94 @@
+{
+  "fixture_version": 1,
+  "connection_id": "story-bitbucket-connection",
+  "workspace": {
+    "uuid": "{00000000-0000-4000-8000-000000000001}",
+    "slug": "story-labs",
+    "name": "Story Labs"
+  },
+  "repository": {
+    "uuid": "{10000000-0000-4000-8000-000000000002}",
+    "workspace": "story-labs",
+    "slug": "argo-orchestrator",
+    "name": "Argo Orchestrator",
+    "full_name": "story-labs/argo-orchestrator",
+    "main_branch": "main",
+    "html_url": "https://bitbucket.story.test/story-labs/argo-orchestrator",
+    "private": true,
+    "description": "Workflow orchestration service for internal jobs."
+  },
+  "files": [
+    {
+      "path": "src/token_client.py",
+      "commit_hash": "c202c202c202c202c202c202c202c202c202c202",
+      "size": 475,
+      "content": "\"\"\"Service-token client used before an Argo workflow starts.\"\"\"\n\nAUTH_SERVICE = \"https://auth.internal\"\nTOKEN_ENDPOINT = \"/v1/auth\"\n\n\ndef request_workflow_token(workflow_id: str, credential: str) -> dict:\n    \"\"\"Call POST /v1/auth; a failed call blocks workflow execution.\"\"\"\n    return {\n        \"method\": \"POST\",\n        \"url\": AUTH_SERVICE + TOKEN_ENDPOINT,\n        \"json\": {\"client_id\": workflow_id, \"credential\": credential},\n        \"on_error\": \"block_workflow\",\n    }\n",
+      "language": "python"
+    },
+    {
+      "path": "README.md",
+      "commit_hash": "c202c202c202c202c202c202c202c202c202c202",
+      "size": 249,
+      "content": "# Argo Orchestrator\n\nArgo Orchestrator consumes Auth API v1. `src/token_client.py` calls `POST /v1/auth` before starting a workflow.\n\nARGO-201 introduced the dependency and ARGO-202 documented failure behavior. Argo has not migrated to Auth API v2.\n",
+      "language": "markdown"
+    }
+  ],
+  "commits": [
+    {
+      "commit_hash": "c202c202c202c202c202c202c202c202c202c202",
+      "message": "ARGO-202 document blocked workflow behavior",
+      "author_name": "Ravi Kulkarni",
+      "author_email": "ravi.kulkarni@story.test",
+      "date": "2026-08-15T09:55:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/argo-orchestrator/commits/c202c202c202",
+      "files": [
+        {
+          "path": "src/token_client.py",
+          "old_path": "src/token_client.py",
+          "status": "modified",
+          "lines_added": 2,
+          "lines_removed": 0
+        },
+        {
+          "path": "README.md",
+          "old_path": "README.md",
+          "status": "modified",
+          "lines_added": 3,
+          "lines_removed": 0
+        }
+      ]
+    },
+    {
+      "commit_hash": "c201c201c201c201c201c201c201c201c201c201",
+      "message": "ARGO-201 request workflow tokens from POST /v1/auth",
+      "author_name": "Ravi Kulkarni",
+      "author_email": "ravi.kulkarni@story.test",
+      "date": "2026-08-11T13:00:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/argo-orchestrator/commits/c201c201c201",
+      "files": [
+        {
+          "path": "src/token_client.py",
+          "old_path": "",
+          "status": "added",
+          "lines_added": 14,
+          "lines_removed": 0
+        }
+      ]
+    }
+  ],
+  "pull_requests": [
+    {
+      "id": 21,
+      "title": "ARGO-201 Authenticate workflow execution through v1",
+      "description": "Adds a synchronous dependency on Auth API v1. Workflows remain blocked when POST /v1/auth cannot issue a service token.",
+      "state": "MERGED",
+      "author_name": "Ravi Kulkarni",
+      "author_uuid": "{20000000-0000-4000-8000-000000000002}",
+      "source_branch": "feature/ARGO-201-auth-v1",
+      "destination_branch": "main",
+      "created_on": "2026-08-07T10:00:00Z",
+      "updated_on": "2026-08-11T13:00:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/argo-orchestrator/pull-requests/21"
+    }
+  ]
+}

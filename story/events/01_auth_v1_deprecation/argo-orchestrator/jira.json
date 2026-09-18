@@ -1,0 +1,44 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-jira-connection",
+  "site": {
+    "cloud_id": "story-cloud-001",
+    "name": "Story Engineering Jira",
+    "url": "https://story.atlassian.test"
+  },
+  "project": {
+    "project_id": "10002",
+    "key": "ARGO",
+    "name": "Argo Orchestrator",
+    "description": "Workflow orchestration service for internal jobs."
+  },
+  "issues": [
+    {
+      "issue_id": "21250",
+      "key": "ARGO-250",
+      "summary": "Migrate Argo token client to Auth API v2",
+      "content": "Issue: ARGO-250\nSummary: Migrate Argo token client to Auth API v2\nType: Story\nStatus: To Do\nAssignee: Ravi Kulkarni\nReporter: Tara Bose\nLabels: migration, authentication, breaking-change\n\nDescription:\nAUTH-900 removes POST /v1/auth on 2026-10-01. Update Argo Orchestrator to request workflow tokens from POST /v2/auth. Until src/token_client.py changes, Argo remains an Auth API v1 consumer.",
+      "description": "AUTH-900 removes POST /v1/auth on 2026-10-01. Update Argo Orchestrator to request workflow tokens from POST /v2/auth. Until src/token_client.py changes, Argo remains an Auth API v1 consumer.",
+      "status": "To Do",
+      "issue_type": "Story",
+      "assignee": {
+        "account_id": "jira-ravi-kulkarni",
+        "display_name": "Ravi Kulkarni",
+        "email": "ravi.kulkarni@story.test"
+      },
+      "reporter": {
+        "account_id": "jira-tara-bose",
+        "display_name": "Tara Bose",
+        "email": "tara.bose@story.test"
+      },
+      "labels": ["migration", "authentication", "breaking-change"],
+      "blocks": [],
+      "created_at": "2026-09-10T15:05:00Z",
+      "updated_at": "2026-09-10T15:05:00Z",
+      "parent_id": null,
+      "parent_key": null,
+      "changes": []
+    }
+  ]
+}

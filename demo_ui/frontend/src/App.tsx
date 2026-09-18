@@ -1,4 +1,4 @@
-import { BookOpenText, Database, Download, FileText, GitBranch, Github, GitFork, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
+import { AlertTriangle, BookOpenText, BrainCircuit, Database, Download, FileText, FlaskConical, GitBranch, Github, GitFork, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat } from "./api";
 import ChatPanel from "./components/ChatPanel";
@@ -10,6 +10,7 @@ import BitbucketPanel from "./components/BitbucketPanel";
 import GitHubPanel from "./components/GitHubPanel";
 import JiraPanel from "./components/JiraPanel";
 import NotionPanel from "./components/NotionPanel";
+import StoryDemoPanel from "./components/StoryDemoPanel";
 import type { AppConfig, ConversationMessage, GitHubSource, GraphInfo, GraphPayload, GraphSelection, Highlight, IngestionTokenUsage, NotionConnection, OAuthConnectorSource, TokenUsage } from "./types";
 
 const EMPTY_HIGHLIGHT: Highlight = { nodes: [], edges: [] };
@@ -19,9 +20,45 @@ const WELCOME_MESSAGE: ConversationMessage = {
   role: "assistant",
   content: "I’m connected to your company knowledge graph. Ask me about Jira work, GitHub and Bitbucket code and commits, Notion docs, owners, or decisions.",
 };
-const CHAT_STORAGE_KEY = "neuron.chat.messages";
+// Versioned intentionally: older saved answers predate graph-knowledge
+// citations and should not appear in the lineage-aware demo.
+const CHAT_STORAGE_KEY = "neuron.chat.messages.v2";
 const GRAPH_STORAGE_KEY = "neuron.graph.selected";
 const DEFAULT_GRAPHS: GraphInfo[] = [{ name: "default", displayName: "Default", createdAt: "" }];
+type GraphLayer = "all" | "findings" | "wisdom";
+
+function graphForLayer(graph: GraphPayload | null, layer: GraphLayer): GraphPayload | null {
+  if (!graph || layer === "all") return graph;
+  const findings = new Set(graph.nodes.filter((node) => node.type === "Finding").map((node) => node.id));
+  const wisdom = new Set(graph.nodes.filter((node) => node.type === "Wisdom").map((node) => node.id));
+  const included = new Set(layer === "findings" ? findings : wisdom);
+  const includedEdges = new Set<string>();
+
+  const includeDirectEdges = (seeds: Set<string>, labels: Set<string>) => {
+    for (const edge of graph.edges) {
+      if (!labels.has(edge.label)) continue;
+      if (!seeds.has(edge.source) && !seeds.has(edge.target)) continue;
+      included.add(edge.source);
+      included.add(edge.target);
+      includedEdges.add(edge.id);
+    }
+  };
+
+  if (layer === "findings") {
+    includeDirectEdges(findings, new Set(["FLAGS", "CONTEXT_FROM"]));
+  } else {
+    // Keep this a lineage view, not a generic two-hop graph expansion. Shared
+    // Project/API hubs otherwise pull nearly the entire knowledge graph in.
+    includeDirectEdges(wisdom, new Set(["DERIVED_FROM", "APPLIES_TO"]));
+    const supportingFindings = new Set([...included].filter((id) => findings.has(id)));
+    includeDirectEdges(supportingFindings, new Set(["FLAGS", "CONTEXT_FROM"]));
+  }
+  return {
+    groups: graph.groups,
+    nodes: graph.nodes.filter((node) => included.has(node.id)),
+    edges: graph.edges.filter((edge) => includedEdges.has(edge.id)),
+  };
+}
 
 function loadStoredGraphName(): string {
   try { return localStorage.getItem(GRAPH_STORAGE_KEY) || "default"; } catch { return "default"; }
@@ -81,6 +118,7 @@ export default function App() {
   const [githubOpen, setGitHubOpen] = useState(false);
   const [bitbucketOpen, setBitbucketOpen] = useState(false);
   const [notionOpen, setNotionOpen] = useState(false);
+  const [storyOpen, setStoryOpen] = useState(false);
   const [jiraSources, setJiraSources] = useState<OAuthConnectorSource[]>([]);
   const [githubSources, setGitHubSources] = useState<GitHubSource[]>([]);
   const [bitbucketSources, setBitbucketSources] = useState<OAuthConnectorSource[]>([]);
@@ -88,6 +126,7 @@ export default function App() {
   const [ingestionUsage, setIngestionUsage] = useState<Record<string, IngestionTokenUsage>>({});
   const [retrievalUsage, setRetrievalUsage] = useState<TokenUsage>(EMPTY_TOKEN_USAGE);
   const [clearing, setClearing] = useState(false);
+  const [graphLayer, setGraphLayer] = useState<GraphLayer>("all");
 
   const reportIngestionUsage = useCallback((usage: IngestionTokenUsage) => {
     setIngestionUsage((current) => ({ ...current, [usage.provider]: usage }));
@@ -133,6 +172,7 @@ export default function App() {
     setChatError(null);
     setRetrievalUsage(EMPTY_TOKEN_USAGE);
     setIngestionUsage({});
+    setGraphLayer("all");
   }, []);
 
   const handleCreateGraph = useCallback(async (name: string) => {
@@ -210,9 +250,12 @@ export default function App() {
   );
 
   const graphSummary = useMemo(() => {
-    if (!graph) return "Loading the knowledge graph";
-    return `${graph.nodes.length} things · ${graph.edges.length} connections`;
-  }, [graph]);
+    const visible = graphForLayer(graph, graphLayer);
+    if (!visible) return "Loading the knowledge graph";
+    const suffix = graphLayer === "all" ? "" : ` · ${graphLayer} layer`;
+    return `${visible.nodes.length} things · ${visible.edges.length} connections${suffix}`;
+  }, [graph, graphLayer]);
+  const visibleGraph = useMemo(() => graphForLayer(graph, graphLayer), [graph, graphLayer]);
 
   const clearTheGraph = useCallback(async () => {
     if (!window.confirm(
@@ -279,6 +322,9 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <button className={`notion-trigger ${graphName.startsWith("story-") ? "connected" : ""}`} onClick={() => setStoryOpen(true)}>
+            <FlaskConical size={14} /> Story demo
+          </button>
           <button className={`notion-trigger ${jiraSources.length > 0 ? "connected" : ""}`} onClick={() => setJiraOpen(true)}>
             <ListTodo size={14} /> Jira
             {jiraSources.length > 0 && <span>{jiraSources.length}</span>}
@@ -310,6 +356,13 @@ export default function App() {
           onShowPath={(value) => {
             setHighlight(value);
             setSelection(null);
+          }}
+          onOpenKnowledge={(uid, type) => {
+            const node = graph?.nodes.find((item) => item.id === uid);
+            if (!node) return;
+            setGraphLayer(type === "Wisdom" ? "wisdom" : type === "Finding" ? "findings" : "all");
+            setHighlight({ nodes: [uid], edges: [] });
+            setSelection({ kind: "node", value: node });
           }}
         />
 
@@ -352,13 +405,30 @@ export default function App() {
                     </button>
                   );
                 })}
+                <span className="source-picker-divider" aria-hidden="true" />
+                <button
+                  className={`layer-filter findings ${graphLayer === "findings" ? "active" : ""}`}
+                  onClick={() => { setGraphLayer((current) => current === "findings" ? "all" : "findings"); setSelection(null); setHighlight(EMPTY_HIGHLIGHT); }}
+                  aria-pressed={graphLayer === "findings"}
+                  title="Show findings with their affected nodes and evidence lineage"
+                >
+                  <AlertTriangle size={14} /> Findings
+                </button>
+                <button
+                  className={`layer-filter wisdom ${graphLayer === "wisdom" ? "active" : ""}`}
+                  onClick={() => { setGraphLayer((current) => current === "wisdom" ? "all" : "wisdom"); setSelection(null); setHighlight(EMPTY_HIGHLIGHT); }}
+                  aria-pressed={graphLayer === "wisdom"}
+                  title="Show wisdom proposals with supporting findings and applicable systems"
+                >
+                  <BrainCircuit size={14} /> Wisdom
+                </button>
               </div>
             </div>
           </div>
 
           <div className="map-body">
             <GraphCanvas
-              graph={graph}
+              graph={visibleGraph}
               highlight={highlight}
               loading={graphLoading}
               onRefresh={() => void loadGraph()}
@@ -372,7 +442,7 @@ export default function App() {
                 graphName={graphName}
                 onClose={() => setSelection(null)}
                 onNavigate={(uid) => {
-                  const next = graph?.nodes.find((item) => item.id === uid);
+                  const next = visibleGraph?.nodes.find((item) => item.id === uid);
                   if (next) setSelection({ kind: "node", value: next });
                 }}
               />
@@ -431,6 +501,20 @@ export default function App() {
         onConnectionsChanged={setNotionConnections}
         onSyncComplete={() => void loadGraph()}
         onTokenUsage={reportIngestionUsage}
+      />
+      <StoryDemoPanel
+        open={storyOpen}
+        graphName={graphName}
+        onClose={() => setStoryOpen(false)}
+        onGraphCreated={async (name) => {
+          await refreshGraphs();
+          selectGraph(name);
+        }}
+        onGraphChanged={() => void loadGraph()}
+        onReset={async () => {
+          await refreshGraphs();
+          selectGraph("default");
+        }}
       />
     </main>
   );

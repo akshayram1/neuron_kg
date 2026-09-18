@@ -1,0 +1,79 @@
+{
+  "fixture_version": 1,
+  "connection_id": "story-jira-connection",
+  "site": {
+    "cloud_id": "story-cloud-001",
+    "name": "Story Engineering Jira",
+    "url": "https://story.atlassian.test"
+  },
+  "project": {
+    "project_id": "10001",
+    "key": "MCP",
+    "name": "MCP Gateway",
+    "description": "Gateway that exposes model-context tools to internal applications."
+  },
+  "issues": [
+    {
+      "issue_id": "20001",
+      "key": "MCP-101",
+      "summary": "Integrate MCP Gateway with Auth API v1",
+      "content": "Issue: MCP-101\nSummary: Integrate MCP Gateway with Auth API v1\nType: Story\nStatus: Done\nAssignee: Mira Sen\nReporter: Dev Mehta\nLabels: authentication, integration, production\n\nDescription:\nMCP Gateway consumes Auth API v1 from Auth Service. The gateway sends credentials to POST /v1/auth before opening a tool session. Auth API v1 is a required production dependency.",
+      "description": "MCP Gateway consumes Auth API v1 from Auth Service. The gateway sends credentials to POST /v1/auth before opening a tool session. Auth API v1 is a required production dependency.",
+      "status": "Done",
+      "issue_type": "Story",
+      "assignee": {
+        "account_id": "jira-mira-sen",
+        "display_name": "Mira Sen",
+        "email": "mira.sen@story.test"
+      },
+      "reporter": {
+        "account_id": "jira-dev-mehta",
+        "display_name": "Dev Mehta",
+        "email": "dev.mehta@story.test"
+      },
+      "labels": ["authentication", "integration", "production"],
+      "blocks": [],
+      "created_at": "2026-08-03T08:30:00Z",
+      "updated_at": "2026-08-09T16:45:00Z",
+      "parent_id": null,
+      "parent_key": null,
+      "changes": [
+        {
+          "at": "2026-08-09T16:45:00Z",
+          "field": "status",
+          "from_id": "in-progress",
+          "from_string": "In Progress",
+          "to_id": "done",
+          "to_string": "Done",
+          "author": "Mira Sen"
+        }
+      ]
+    },
+    {
+      "issue_id": "20002",
+      "key": "MCP-102",
+      "summary": "Add retry policy around authentication calls",
+      "content": "Issue: MCP-102\nSummary: Add retry policy around authentication calls\nType: Task\nStatus: Done\nAssignee: Mira Sen\nReporter: Dev Mehta\nLabels: reliability, authentication\n\nDescription:\nRetry transient failures from POST /v1/auth twice with exponential backoff. Do not retry rejected credentials. This behavior applies only to the MCP Gateway Auth API v1 client.",
+      "description": "Retry transient failures from POST /v1/auth twice with exponential backoff. Do not retry rejected credentials. This behavior applies only to the MCP Gateway Auth API v1 client.",
+      "status": "Done",
+      "issue_type": "Task",
+      "assignee": {
+        "account_id": "jira-mira-sen",
+        "display_name": "Mira Sen",
+        "email": "mira.sen@story.test"
+      },
+      "reporter": {
+        "account_id": "jira-dev-mehta",
+        "display_name": "Dev Mehta",
+        "email": "dev.mehta@story.test"
+      },
+      "labels": ["reliability", "authentication"],
+      "blocks": [],
+      "created_at": "2026-08-10T07:00:00Z",
+      "updated_at": "2026-08-14T17:10:00Z",
+      "parent_id": null,
+      "parent_key": null,
+      "changes": []
+    }
+  ]
+}

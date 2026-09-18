@@ -1,0 +1,71 @@
+{
+  "fixture_version": 1,
+  "name": "auth-api-cross-project-impact",
+  "description": "Three-project Jira, Notion, and Bitbucket story for entity resolution, fact comparison, breaking-change impact, mismatch detection, and truth-maintained resolution.",
+  "connections": {
+    "jira": "story-jira-connection",
+    "notion": "story-notion-workspace",
+    "bitbucket": "story-bitbucket-connection"
+  },
+  "projects": [
+    {
+      "slug": "auth-service",
+      "jira_key": "AUTH",
+      "bitbucket_repository": "story-labs/auth-service"
+    },
+    {
+      "slug": "mcp-gateway",
+      "jira_key": "MCP",
+      "bitbucket_repository": "story-labs/mcp-gateway"
+    },
+    {
+      "slug": "argo-orchestrator",
+      "jira_key": "ARGO",
+      "bitbucket_repository": "story-labs/argo-orchestrator"
+    }
+  ],
+  "phases": [
+    {
+      "id": "baseline",
+      "path": "baseline",
+      "mode": "full_snapshot",
+      "expected": [
+        "Auth Service provides Auth API v1",
+        "MCP Gateway consumes Auth API v1 and calls POST /v1/auth",
+        "Argo Orchestrator consumes Auth API v1 and calls POST /v1/auth",
+        "No breaking-change signal exists"
+      ]
+    },
+    {
+      "id": "auth-v1-deprecation",
+      "path": "events/01_auth_v1_deprecation",
+      "mode": "upsert",
+      "expected": [
+        "AUTH-900 is classified as a proposed breaking API change",
+        "MCP Gateway and Argo Orchestrator appear in the blast radius",
+        "The existing v1 dependency remains live until migration or effective removal"
+      ]
+    },
+    {
+      "id": "mcp-migration-claim",
+      "path": "events/02_mcp_migration_claim",
+      "mode": "upsert",
+      "expected": [
+        "Jira and Notion claim MCP completed migration to v2",
+        "Current Bitbucket evidence still references /v1/auth",
+        "Neuron raises a documentation/code mismatch and does not silently close the v1 dependency"
+      ]
+    },
+    {
+      "id": "mcp-code-catches-up",
+      "path": "events/03_mcp_code_catches_up",
+      "mode": "upsert",
+      "expected": [
+        "MCP source now calls /v2/auth",
+        "The MCP mismatch resolves",
+        "MCP leaves the Auth API v1 blast radius",
+        "Argo remains affected"
+      ]
+    }
+  ]
+}

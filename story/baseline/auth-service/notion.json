@@ -1,0 +1,23 @@
+{
+  "fixture_version": 1,
+  "workspace_id": "story-notion-workspace",
+  "workspace_name": "Story Architecture",
+  "pages": [
+    {
+      "page_id": "notion-auth-architecture-001",
+      "title": "Auth Service Architecture",
+      "url": "https://notion.story.test/auth-service-architecture",
+      "content": "# Auth Service\n\nAuth Service owns the organization's authentication contracts. It provides Auth API v1 at POST /v1/auth and Auth API v2 at POST /v2/auth.\n\n## Current production contract\n\nAuth API v1 is the current production contract. MCP Gateway and Argo Orchestrator consume Auth API v1. Version v2 is available for migration testing, but introducing v2 does not by itself deprecate v1.\n\n## Ownership\n\nThe Identity Platform team owns Auth Service and both API versions. AUTH-301 introduced the v1 contract. AUTH-302 introduced the parallel v2 contract.",
+      "last_edited_time": "2026-09-01T12:10:00Z",
+      "parent_page_id": null
+    },
+    {
+      "page_id": "notion-auth-v1-contract-001",
+      "title": "Auth API v1 Contract",
+      "url": "https://notion.story.test/auth-api-v1-contract",
+      "content": "# Auth API v1\n\nProvider: Auth Service\nEndpoint: POST /v1/auth\nConsumers: MCP Gateway, Argo Orchestrator\n\nThe endpoint accepts a client identifier and credential and returns an access token. Removing or changing POST /v1/auth is a breaking change for every current consumer. Consumers must not be considered migrated until their repository no longer calls /v1/auth.",
+      "last_edited_time": "2026-09-01T12:20:00Z",
+      "parent_page_id": "notion-auth-architecture-001"
+    }
+  ]
+}
