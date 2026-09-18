@@ -388,8 +388,8 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
             get_graph(name=target.falkor_name),
             OpenAI(api_key=os.environ.get("OPENAI_API_KEY")),
             payload.message.strip(),
-            # Not $LLM_MODEL — that's extraction's model, chat wants its own
-            # faster default. See graph/chat.py's run_chat_turn docstring.
+            # Not $LLM_MODEL — chat has a dedicated Sol default/override.
+            # See graph/chat.py's run_chat_turn implementation.
             model=os.getenv("CHAT_MODEL"),
             providers=payload.providers,
             scope=access_scope_for_request(request),

@@ -74,6 +74,8 @@ export default function ChatPanel({
         {messages.map((message) => {
           const highlighted = message.result?.highlight;
           const knowledgeCitations = message.result?.knowledgeCitations ?? [];
+          const findingCitations = knowledgeCitations.filter((citation) => citation.type === "Finding");
+          const wisdomCitations = knowledgeCitations.filter((citation) => citation.type === "Wisdom");
           const isActive = Boolean(
             highlighted
             && highlighted.nodes.every((id) => activeHighlight.nodes.includes(id))
@@ -100,19 +102,17 @@ export default function ChatPanel({
                       <ChevronDown className="chevron" size={15} />
                     </summary>
                     <div className="grounding-list citation-list">
-                      {knowledgeCitations.length > 0 && (
-                        <section className="citation-section knowledge-section">
-                          <h4>Graph knowledge used</h4>
-                          {knowledgeCitations.map((citation) => (
+                      {wisdomCitations.length > 0 && (
+                        <section className="citation-section knowledge-section wisdom-source-section">
+                          <h4><BrainCircuit size={12} /> Wisdom</h4>
+                          {wisdomCitations.map((citation) => (
                             <button
                               type="button"
                               className={`knowledge-citation ${citation.type.toLowerCase()}`}
                               key={citation.uid}
                               onClick={() => onOpenKnowledge(citation.uid, citation.type)}
                             >
-                              {citation.type === "Wisdom"
-                                ? <BrainCircuit size={15} />
-                                : <AlertTriangle size={15} />}
+                              <BrainCircuit size={15} />
                               <span>
                                 <strong>{citation.name}</strong>
                                 <small>
@@ -126,8 +126,31 @@ export default function ChatPanel({
                           ))}
                         </section>
                       )}
+                      {findingCitations.length > 0 && (
+                        <section className="citation-section knowledge-section finding-source-section">
+                          <h4><AlertTriangle size={12} /> Findings</h4>
+                          {findingCitations.map((citation) => (
+                            <button
+                              type="button"
+                              className="knowledge-citation finding"
+                              key={citation.uid}
+                              onClick={() => onOpenKnowledge(citation.uid, citation.type)}
+                            >
+                              <AlertTriangle size={15} />
+                              <span>
+                                <strong>{citation.name}</strong>
+                                <small>
+                                  {citation.status && citation.status.toUpperCase()}
+                                  {citation.severity && ` · ${citation.severity.toUpperCase()}`}
+                                  {citation.staleAt && ` · stale ${citation.staleAt.slice(0, 10)}`}
+                                </small>
+                              </span>
+                            </button>
+                          ))}
+                        </section>
+                      )}
                       <section className="citation-section source-section">
-                        <h4>Original source evidence</h4>
+                        <h4><DatabaseZap size={12} /> Facts &amp; source evidence</h4>
                       {message.result.citations.length > 0 ? message.result.citations.map((citation) => (
                         citation.url ? (
                           <a href={citation.url} target="_blank" rel="noreferrer" key={citation.recordKey}>

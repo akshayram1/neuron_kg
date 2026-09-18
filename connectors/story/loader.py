@@ -241,6 +241,7 @@ class StoryIngestor:
                 "MATCH (sr:SourceRecord) "
                 "SET sr.public=true, sr.policy_version='story-public-v1'"
             )
+            self._recompute_current_consumption()
             self.recompute_findings()
             self._project_findings()
             wisdom_runs = (
@@ -741,6 +742,107 @@ class StoryIngestor:
                 )
 
         self._recompute_mismatches()
+
+    def _recompute_current_consumption(self) -> None:
+        """Make CONSUMES_API a current-code snapshot, not a claim union.
+
+        Jira/Notion statements and historical code remain in SourceRecords and
+        temporal fact history. Only live SourceFile CALLS_ENDPOINT facts define
+        the current project-to-API consumption edge.
+        """
+        project_uids = [self.project_uid(slug) for slug in self.projects if slug != "auth-service"]
+        w.supersede_fact_edges(
+            self.graph, "CONSUMES_API", "Project", "Api", project_uids,
+        )
+        self.store.invalidate_facts(
+            self.graph_id, "CONSUMES_API", subject_uids=project_uids,
+        )
+        rows = self.graph.query(
+            """
+            MATCH (project:Project)-[:HAS_REPOSITORY]->(:Repository)-[:CONTAINS]->
+                  (:SourceFile)-[call:CALLS_ENDPOINT]->(endpoint:Endpoint)
+            WHERE call.invalid_at IS NULL AND endpoint.path IS NOT NULL
+            RETURN project.uid, endpoint.path, call.fact_uid,
+                   call.source_record_keys, endpoint.name
+            """
+        ).result_set
+        api_rows = self.graph.query(
+            "MATCH (api:Api) WHERE api.version IS NOT NULL RETURN api.version, api.uid, api.name"
+        ).result_set
+        api_by_version: dict[str, tuple[str, str]] = {}
+        for version, uid, name in api_rows:
+            key = str(version).lower()
+            # Semantic extraction may create project-specific API nodes that
+            # share a version. Prefer the canonical versioned contract node.
+            if key not in api_by_version or name == f"Auth API {version}":
+                api_by_version[key] = (uid, name)
+        grouped: dict[tuple[str, str], dict] = {}
+        for project_uid, path, call_fact_uid, source_keys, endpoint_name in rows:
+            match = re.search(r"/v(\d+)/", path or "")
+            if not match:
+                continue
+            api = api_by_version.get(f"v{match.group(1)}")
+            if not api:
+                continue
+            api_uid, api_name = api
+            item = grouped.setdefault((project_uid, api_uid), {
+                "from_uid": project_uid, "to_uid": api_uid,
+                "source_record_keys": set(), "premise_fact_uids": set(),
+                "endpoints": set(), "api_name": api_name,
+            })
+            item["source_record_keys"].update(source_keys or [])
+            if call_fact_uid:
+                item["premise_fact_uids"].add(call_fact_uid)
+            item["endpoints"].add(endpoint_name or path)
+
+        graph_rows = []
+        fact_rows = []
+        for item in grouped.values():
+            evidence = "Current production code calls " + ", ".join(sorted(item["endpoints"]))
+            graph_row = {
+                "from_uid": item["from_uid"], "to_uid": item["to_uid"],
+                "source_record_keys": sorted(item["source_record_keys"]),
+                "evidence": evidence, "extraction_method": "derived",
+                "confidence": 1.0, "derived": True,
+                "derived_rule": "current_code_calls_api_endpoint",
+                "premise_fact_uids": sorted(item["premise_fact_uids"]),
+            }
+            graph_rows.append(graph_row)
+            fact_rows.append({
+                "fact_uid": w.make_uid(
+                    "Fact", item["from_uid"], "CONSUMES_API", item["to_uid"],
+                ),
+                "subject_uid": item["from_uid"], "subject_label": "Project",
+                "predicate": "CONSUMES_API", "object_uid": item["to_uid"],
+                "object_label": "Api",
+                "source_record_keys": graph_row["source_record_keys"],
+                "evidence": evidence, "extraction_method": "derived",
+                "confidence": 1.0, "derived": True,
+                "derived_rule": graph_row["derived_rule"],
+                "premise_fact_uids": graph_row["premise_fact_uids"],
+            })
+        if graph_rows:
+            w.upsert_fact_edges(
+                self.graph, "CONSUMES_API", "Project", "Api", graph_rows,
+            )
+            # A revived historical edge keeps its original evidence in the
+            # generic writer. For this authoritative snapshot, replace claim
+            # provenance with the current code premises instead of unioning it.
+            self.graph.query(
+                """
+                UNWIND $rows AS row
+                MATCH (:Project {uid: row.from_uid})-[r:CONSUMES_API]->
+                      (:Api {uid: row.to_uid})
+                WHERE r.invalid_at IS NULL
+                SET r.evidence=row.evidence,
+                    r.source_record_keys=row.source_record_keys,
+                    r.extraction_method='derived', r.confidence=1.0,
+                    r.derived=true, r.derived_rule=row.derived_rule,
+                    r.premise_fact_uids=row.premise_fact_uids
+                """,
+                params={"rows": graph_rows},
+            )
+            self.store.upsert_facts(self.graph_id, fact_rows)
 
     def _recompute_mismatches(self) -> None:
         current_code = self.graph.query(

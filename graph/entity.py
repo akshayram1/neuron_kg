@@ -74,7 +74,8 @@ def _entity(
                n.email, n.sha, n.path, n.language, n.issue_type, n.authored_at,
                n.last_edited_time, n.state, n.pr_ref, n.source_branch,
                n.destination_branch, n.default_branch,
-               collect(DISTINCT sr.provider), collect(DISTINCT sr.name)
+               collect(DISTINCT sr.provider), collect(DISTINCT sr.name),
+               n.wisdom_type
         """,
         params={"uid": uid, **params, **({"providers": providers} if providers else {})},
     ).result_set
@@ -97,6 +98,7 @@ def _entity(
             "sourceBranch": row[19],
             "destinationBranch": row[20],
             "defaultBranch": row[21],
+            "wisdomType": row[24],
         }.items() if value
     }
     return {

@@ -18,6 +18,7 @@ export interface GraphNode {
   documents: string[];
   status?: string | null;
   severity?: string | null;
+  wisdomType?: "Policy" | "Principle" | "Pattern" | "AntiPattern" | "Playbook" | "Heuristic" | null;
   createdAt?: string | null;
   staleAt?: string | null;
 }

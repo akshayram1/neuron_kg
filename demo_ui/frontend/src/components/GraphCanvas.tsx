@@ -223,12 +223,13 @@ export default function GraphCanvas({
     };
 
     const nodeResults: CanvasSearchResult[] = graph.nodes.flatMap((node) => {
-      const text = [node.label, node.type, node.summary, ...node.documents].join(" ").toLowerCase();
+      const text = [node.label, node.type, node.wisdomType, node.summary, ...node.documents]
+        .filter(Boolean).join(" ").toLowerCase();
       return matches(text) ? [{
         id: node.id,
         kind: "node",
         title: node.label,
-        meta: node.type,
+        meta: node.wisdomType ? `${node.type} · ${node.wisdomType}` : node.type,
         selection: { kind: "node", value: node },
         score: score(node.label, text),
       }] : [];

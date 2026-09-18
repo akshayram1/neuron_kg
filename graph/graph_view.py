@@ -41,7 +41,8 @@ def fetch_graph(
                n.search_text AS search_text, n.definition AS definition, n.statement AS statement,
                n.purpose AS purpose, providers, documents,
                n.status AS status, n.severity AS severity,
-               n.created_at AS created_at, n.stale_at AS stale_at
+               n.created_at AS created_at, n.stale_at AS stale_at,
+               n.wisdom_type AS wisdom_type
         """,
         params={**node_acl_params, **({"providers": providers} if providers else {})},
     ).result_set
@@ -51,6 +52,7 @@ def fetch_graph(
         (
             node_id, node_type, label, search_text, definition, statement, purpose,
             node_providers, documents, status, severity, created_at, stale_at,
+            wisdom_type,
         ) = row
         summary = definition or statement or purpose or (search_text[:200] if search_text else "") or ""
         nodes.append({
@@ -59,6 +61,7 @@ def fetch_graph(
             "summary": summary, "documents": sorted(documents),
             "status": status, "severity": severity,
             "createdAt": created_at, "staleAt": stale_at,
+            "wisdomType": wisdom_type,
         })
 
     known_ids = {n["id"] for n in nodes}

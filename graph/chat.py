@@ -17,15 +17,17 @@ from falkordb import Graph
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from graph.search import SearchHit, embed_query, hybrid_search
+from graph import vector_store
 from graph.access import AccessScope
 from graph.entity import fetch_entity_detail
+from graph.search import SearchHit, embed_query, hybrid_search
 from graph.structured_query import (
-    find_named_persons, find_window_activity, resolve_structured,
+    find_named_persons,
+    find_window_activity,
+    resolve_structured,
 )
 from graph.time_axis import infer_query_window
 from graph.token_usage import TokenUsage
-from graph import vector_store
 
 logger = logging.getLogger("neuron.chat")
 
@@ -157,7 +159,7 @@ _WISDOM_INTENT = (
 )
 _FINDING_INTENT = (
     "finding", "impact", "risk", "contradiction", "mismatch", "conflict",
-    "breaking change", "stale", "blast radius",
+    "breaking change", "stale", "blast radius", "affect", "affected",
 )
 
 
@@ -422,10 +424,13 @@ def _name_was_used(name: str, used_sources: list[str]) -> bool:
 
 def _resolve_knowledge_citations(
     graph: Graph, hits: list[SearchHit], used_sources: list[str],
+    *, include_labels: set[str] | None = None,
 ) -> list[KnowledgeCitation]:
+    include_labels = include_labels or set()
     selected = [
         hit for hit in hits
-        if hit.label in {"Wisdom", "Finding"} and _name_was_used(hit.name, used_sources)
+        if hit.label in {"Wisdom", "Finding"}
+        and (hit.label in include_labels or _name_was_used(hit.name, used_sources))
     ]
     if not selected:
         return []
@@ -567,15 +572,10 @@ def run_chat_turn(
     scope: AccessScope, at: str | None = None, as_of: str | None = None,
     at_end: str | None = None, collection: str = vector_store.COLLECTION,
 ) -> ChatResult:
-    # Deliberately NOT the same model/env var as semantic_pass's extraction
-    # call. Extraction needs gpt-5.6-sol's reliability at filling typed
-    # Pydantic fields; this call only summarizes evidence that's already
-    # been extracted into prose, where that reliability buys nothing.
-    # Measured against a real question: sol took 40.5s (and 2.2s on a
-    # different run -- its latency is inconsistent), luna took 3.9s with
-    # equal or better answer quality (it included a limit value sol's
-    # answer omitted). Defaulting to luna here, not to $LLM_MODEL.
-    model = model or os.getenv("CHAT_MODEL", "gpt-5.6-luna")
+    # Chat uses sol by default for stronger evidence reconciliation. Keep a
+    # dedicated CHAT_MODEL override so deployments may tune chat separately
+    # from semantic extraction and wisdom aggregation.
+    model = model or os.getenv("CHAT_MODEL", "gpt-5.6-sol")
     token_usage = TokenUsage()
     started = time.monotonic()
     logger.info(
@@ -685,7 +685,15 @@ def run_chat_turn(
     else:
         used_record_keys = _used_record_keys(parsed.used_sources, record_keys_by_source)
     citations_by_key = _resolve_records(graph, used_record_keys, scope)
-    knowledge_citations = _resolve_knowledge_citations(graph, hits, parsed.used_sources)
+    wants_wisdom, wants_findings = _requested_knowledge_layers(question)
+    include_labels = set()
+    if wants_wisdom:
+        include_labels.add("Wisdom")
+    if wants_findings:
+        include_labels.add("Finding")
+    knowledge_citations = _resolve_knowledge_citations(
+        graph, hits, parsed.used_sources, include_labels=include_labels,
+    )
     logger.info(
         "  answer         cited_blocks=%d citations=%d answer_chars=%d "
         "tokens_in=%d tokens_out=%d %.2fs",
