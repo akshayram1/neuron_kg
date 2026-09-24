@@ -14,6 +14,15 @@ All fixture timestamps are **UTC**. Finding “Detected” times on a live run a
 
 ---
 
+## Four stages at a glance
+
+1. **Baseline:** Auth Service exposes v1 and v2, while MCP Gateway and Argo Orchestrator both still call `POST /v1/auth`.
+2. **Deprecation:** AUTH-900 schedules the v1 removal, so live code dependencies place both MCP and Argo in the blast radius.
+3. **Migration claim:** Jira and Notion say MCP moved to v2, but current Bitbucket code still calls v1, creating a claim-versus-code Finding.
+4. **Code catches up:** MCP code moves to `POST /v2/auth`, making its mismatch and impact Findings stale while Argo remains affected.
+
+---
+
 ## Events (world time)
 
 | When (UTC) | Phase | Source | Event |
