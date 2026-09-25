@@ -12,6 +12,7 @@ import logging
 
 from falkordb import Graph
 
+from connectors.core.ledger import ConnectorLedger
 from graph import writer as w
 
 logger = logging.getLogger("neuron.derived")
@@ -24,12 +25,25 @@ PR_IMPLEMENTS = "pr_implements"
 VERIFIED_EMAIL = "verified_email"
 
 
-def materialize_around(graph: Graph, seed_uid: str, record_key: str) -> int:
-    """Recompute derived edges that touch `seed_uid` (or its parent/children)."""
+def materialize_around(
+    graph: Graph, seed_uid: str, record_key: str, *, ledger: ConnectorLedger | None = None,
+) -> int:
+    """Recompute derived edges that touch `seed_uid` (or its parent/children).
+
+    `ledger` is new, optional, and keyword-only -- threaded through to
+    `_shared_concept_documents` only (25-plan.md §6.2 moved that one path
+    from writing a direct edge to proposing a `link_candidates` row; see
+    that function's docstring for the real behavior change). Existing
+    callers (`graph/jira_pipeline.py`, `graph/resolver.py`) do not pass a
+    ledger yet and are out of this task's scope to update -- so they keep
+    calling this exactly as before, and `_shared_concept_documents` simply
+    no-ops (logged, not a crash) until one of those call sites is updated
+    to pass a real `ConnectorLedger`. See QUERIES.md.
+    """
     written = 0
     written += _lift_through_parent(graph, seed_uid, record_key, "IMPLEMENTS", PARENT_IMPLEMENTS)
     written += _lift_through_parent(graph, seed_uid, record_key, "DOCUMENTS", PARENT_DOCUMENTS)
-    written += _shared_concept_documents(graph, seed_uid, record_key)
+    written += _shared_concept_documents(graph, seed_uid, record_key, ledger=ledger)
     written += _document_via_pr(graph, seed_uid, record_key)
     return written
 
@@ -66,8 +80,52 @@ def _lift_through_parent(
     })
 
 
-def _shared_concept_documents(graph: Graph, seed_uid: str, record_key: str) -> int:
-    """Document and WorkItem that share a Term or System → Document DOCUMENTS WorkItem."""
+def _shared_concept_documents(
+    graph: Graph, seed_uid: str, record_key: str, *, ledger: ConnectorLedger | None = None,
+) -> int:
+    """Document and WorkItem that share a Term or System -> a
+    `link_candidates` proposal, NOT a direct `DOCUMENTS` edge.
+
+    REAL BEHAVIOR CHANGE (25-plan.md §6.2: "Also move derived.py ->
+    _shared_concept_documents onto this path: produce candidates, not
+    direct edges."). Before this change, a Document/WorkItem pair sharing a
+    Term/System got an immediate, unreviewed `derived=true` `DOCUMENTS`
+    edge via `_write_derived`. Now each such pair instead becomes a
+    `pending` row in `link_candidates`
+    (`ledger.create_link_candidate(..., derived_rule="shared_concept",
+    confidence=0.5)` -- DICE-neutral, same convention every other §6.2
+    candidate source uses) and needs an explicit approval
+    (`graph.link_candidates.apply_approved_link_candidate`) before a real
+    edge is written. `derived_rule="shared_concept"` reuses this module's
+    existing `SHARED_CONCEPT` constant rather than the generic `"two_hop"`
+    §6.2 otherwise uses for its own DICE bridge -- this join is narrower
+    and more specific (a literal shared Term/System edge on both sides, not
+    the general two-hop-with-degree-cap search
+    `graph/link_candidates.py::find_two_hop_candidates` runs), so it keeps
+    its own, more descriptive rule name.
+
+    `ledger` is optional, keyword-only: when `None` (every existing caller
+    today -- see `materialize_around`'s docstring), this is a no-op
+    (logged), not a crash, since this function has no way to construct its
+    own `ConnectorLedger` (every other call site in this codebase
+    constructs one from a graph-specific `ledger_path` the caller owns, not
+    a global default) and updating `graph/jira_pipeline.py`/
+    `graph/resolver.py` to pass one is out of this task's scope (flagged in
+    QUERIES.md).
+
+    Returns the number of candidates created/found this call (idempotent:
+    `create_link_candidate` resolves to the same row for the same
+    (from_uid, to_uid, relation) triple across repeated runs) -- the same
+    "count of things done" role this function's return value played before,
+    now counting candidates instead of edges.
+    """
+    if ledger is None:
+        logger.info(
+            "shared_concept: materialize_around called without a ledger, "
+            "skipping link_candidates proposal for seed=%s (see graph/derived.py docstring)",
+            seed_uid,
+        )
+        return 0
     rows = graph.query(
         """
         MATCH (concept) WHERE concept:Term OR concept:System
@@ -80,31 +138,19 @@ def _shared_concept_documents(graph: Graph, seed_uid: str, record_key: str) -> i
         WHERE existing.invalid_at IS NULL AND coalesce(existing.derived, false) = false
         WITH doc, wi, concept, r1, r2, existing
         WHERE existing IS NULL
-        RETURN doc.uid, 'Document', wi.uid, 'WorkItem',
-               concept.name, r1.fact_uid, r1.source_record_keys, r1.valid_at,
-               r2.fact_uid
+        RETURN DISTINCT doc.uid, wi.uid
         """,
         params={"uid": seed_uid},
     ).result_set
-    written = 0
-    grouped: dict[tuple[str, str], dict] = {}
-    for row in rows:
-        key = (row[0], row[2])
-        grouped.setdefault(key, {
-            "from_uid": row[0], "from_label": row[1], "to_uid": row[2], "to_label": row[3],
-            "concept": row[4], "premises": [], "keys": list(row[6] or []), "valid_at": row[7],
-        })
-        grouped[key]["premises"].extend([uid for uid in (row[5], row[8]) if uid])
-    for item in grouped.values():
-        written += _write_derived(graph, "DOCUMENTS", SHARED_CONCEPT, record_key, [[
-            item["from_uid"], item["from_label"], item["to_uid"], item["to_label"],
-            item["concept"], item["premises"][0] if item["premises"] else None,
-            item["keys"], item["valid_at"],
-        ]], {
-            "evidence": lambda row: f"Inferred: both mention {row[4]}.",
-            "premises": lambda item_row, bundled=item: bundled["premises"],
-        })
-    return written
+    created = 0
+    for doc_uid, wi_uid in rows:
+        ledger.create_link_candidate(
+            doc_uid, wi_uid, "DOCUMENTS", derived_rule=SHARED_CONCEPT, confidence=0.5,
+        )
+        created += 1
+    if created:
+        logger.info("shared_concept candidates ×%d via %s", created, record_key)
+    return created
 
 
 def _document_via_pr(graph: Graph, seed_uid: str, record_key: str) -> int:
