@@ -112,6 +112,14 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **Question:** `LayaReranker.score()` in `graph/rerank.py` raises `NotImplementedError` on purpose rather than guessing at an unverified implementation. What's confirmed from reading `/Users/akshaychame/personal_exp/laya` (read-only): the exact trained question/state schema (`ingest/schema.py`'s `QUESTIONS["retrieval_relevance"]`) and the call shape Laya's own prototype uses (`graph_view/reranker.py`: `laya.Agent(MODEL_DIR, device="cpu").predict_batch(...)`). What's still needed to finish it for real: (1) a decision on whether the `laya` package becomes a Neuron dependency or stays an external/sidecar service, (2) making the trained checkpoint (`personal_exp/laya/model/laya-ingest/`) available to Neuron's runtime, (3) verifying `Agent.__init__`/`predict_batch`'s real signature directly against the `laya` package source (only seen second-hand via one caller so far). How do you want Laya packaged for Neuron — vendored dependency, sidecar service Neuron calls over a local API, or something else?
 **Assumption made for now:** none — left as an honest `NotImplementedError` with the evidence documented in the class docstring, rather than shipping a guessed-at "working" implementation.
 
+---
+
+## 5.1 — `stated_dates`: sprint length and `dateparser` not added
+**Raised:** 25 Sep 2026
+**Blocks:** nothing merged is broken (316 passed, 0 failed) — two small judgment calls worth a look before this is wired into real writes.
+**Question:** `graph/dates.py::stated_dates` handles "from next sprint" with a hardcoded `_SPRINT_LENGTH_DAYS = 14` — no real sprint-length config exists anywhere in this codebase to read from instead. Is 14 days a reasonable placeholder, or is there a real per-project sprint length this should read? Separately: `dateparser` (the dependency the plan names for relative-date parsing) isn't installed, so this was built as a narrower regex-only implementation instead (documented gaps: no general NLP phrasing like "a fortnight from signing", no fiscal quarters, English-only). Add `dateparser` as a real dependency, or is the regex-only scope acceptable?
+**Assumption made for now:** 14-day sprint constant (easy to change in one place), regex-only date parsing (the seam to swap in `dateparser` is documented in the module).
+
 ## 2.1 — `select_final`'s token-budget cap has no data to work with yet
 **Raised:** 25 Sep 2026
 **Blocks:** nothing yet (Phase 2.4 tuning, not started) — a heads-up for whoever wires Phase 2.2.
