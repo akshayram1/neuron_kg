@@ -117,17 +117,81 @@ class Review:
     created_at: str
 
 
+@dataclass(frozen=True)
+class EntityAlias:
+    """One row of `entity_aliases` (plan.md Phase 4 §4.8): a normalized
+    alias that resolves to an existing entity's canonical uid. Filled by
+    approved `POSSIBLY_SAME_AS` reviews, approved Phase 6.4 pairwise merges,
+    and manual entries. Step 3 of the resolution ladder (§4.2) reads this
+    table by `(label, namespace_uid, alias_norm)` before falling through to
+    vector search.
+
+    `namespace_uid` is `''`, never `NULL`, for labels whose identity is not
+    namespace-scoped (e.g. Decision, per §4.0) -- SQLite treats every `NULL`
+    as distinct from every other `NULL` inside a UNIQUE constraint, which
+    would silently break idempotent re-adds and the uniqueness this table
+    depends on for `(label, namespace_uid, alias_norm)` to be a reliable key.
+    """
+
+    id: int
+    label: str
+    namespace_uid: str
+    alias_norm: str
+    uid: str
+    source: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class StoplistTerm:
+    """One row of `mention_stoplist` (plan.md Phase 4 §4.5): a generic term
+    that should never, by itself, mint a Term/System node. `label` is `''`
+    for an entry that applies globally across both labels the mention filter
+    covers (§4.5 is scoped to `Term`/`System` only, and the seed terms —
+    "data", "pipeline", "api", … — are generic across both, so the seed set
+    is global rather than per-label); a non-empty `label` scopes one entry to
+    just that label."""
+
+    term_norm: str
+    label: str
+    reason: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ResolutionStat:
+    """One aggregated row of `resolution_stats` (plan.md Phase 4 §4.6): how
+    many `label` entities resolved via `resolved_by` during `run_id`.
+    `resolved_by` is free text matching the resolution ladder's own
+    vocabulary (§4.2) -- currently `scoped_exact`, `alias`, `vector`,
+    `review_required`, `laya_suggest`, `laya`, `new` -- but this table does
+    not enforce that list as an enum, since the ladder may grow new
+    resolution paths later without a schema change."""
+
+    run_id: str
+    label: str
+    resolved_by: str
+    count: int
+    created_at: str
+
+
 class DropReason(StrEnum):
     """Why one extracted item did not become a fact. `DIRECTION_CORRECTED` is
     deliberately in this vocabulary while NOT being a loss — the fact was
     written, with its endpoints swapped to match the ontology. It is recorded
-    here so that correction can never happen silently."""
+    here so that correction can never happen silently. `GENERIC_MENTION`
+    (plan.md Phase 4 §4.5) is a mention-filter drop, not an extraction drop
+    -- e.g. "data" or "pipeline" standing alone never becomes a Term/System
+    node -- but it is recorded and counted through the same
+    `record_drops`/`drop_counts`/`drops` mechanism as every other reason
+    here, since that mechanism already treats `reason` as free text."""
 
     RELATION_NOT_ALLOWED = "relation_not_allowed"
     EVIDENCE_NOT_IN_CHUNK = "evidence_not_in_chunk"
     ENDPOINT_UNRESOLVED = "endpoint_unresolved"
     ENTITY_NO_CONNECTING_FACT = "entity_no_connecting_fact"
     DIRECTION_CORRECTED = "direction_corrected"
+    GENERIC_MENTION = "generic_mention"
 
 
 @dataclass(frozen=True)
@@ -185,6 +249,25 @@ def normalize_chunk_write(value: ChunkWrite | tuple) -> ChunkWrite:
         chunk_id, chunk_index, text = value
         return ChunkWrite(chunk_id, chunk_index, text, llm_text=text)
     raise ValueError("chunks must be ChunkWrite instances or (id, index, text) tuples")
+
+
+# Seed terms for `mention_stoplist` (plan.md Phase 4 §4.5): generic nouns
+# that name the ingestion/data-pipeline machinery itself, not a real Term or
+# System entity a document is actually about. Seeded once via `INSERT OR
+# IGNORE` when the table is first created -- editable afterwards without a
+# redeploy, the same "seed from code, then leave the data alone" convention
+# `graph/axioms.py`'s `seed_axioms()` uses for `relation_axioms` (axioms are
+# genuinely ledger-backed today: `relation_axioms` + `seed_axioms_if_empty`
+# below, read back by `graph.axioms.load_axioms`). Axioms seed lazily, only
+# when `load_axioms(ledger)` is first called, because they need
+# `graph/ontology.py`'s `RELATION_TYPE_MAP`, which this module cannot import
+# without an upward dependency. The stoplist has no such constraint -- it is
+# a flat literal list -- so it seeds eagerly here in `__init__`, right when
+# the table is created.
+_STOPLIST_SEED_TERMS = (
+    "data", "pipeline", "source", "table", "service", "api", "system",
+    "config", "batch source", "source_table",
+)
 
 
 class ConnectorLedger:
@@ -428,6 +511,64 @@ class ConnectorLedger:
                     rejected_at TEXT NOT NULL
                 )
                 """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entity_aliases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT NOT NULL,
+                    namespace_uid TEXT NOT NULL DEFAULT '',
+                    alias_norm TEXT NOT NULL,
+                    uid TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(label, namespace_uid, alias_norm)
+                )
+                """
+            )
+            # The UNIQUE constraint above already creates a covering index in
+            # this exact column order, serving step 3 of the ladder's lookup
+            # shape (`WHERE label = ? AND namespace_uid = ? AND alias_norm =
+            # ?`) directly. A second index serves the other read direction:
+            # every alias for a given canonical uid (diagnostics/debugging).
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_aliases_uid ON entity_aliases(uid)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mention_stoplist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    term_norm TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    reason TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(term_norm, label)
+                )
+                """
+            )
+            # Same reasoning as entity_aliases: the UNIQUE constraint already
+            # covers the hot lookup shape (`term_norm = ? AND label IN (?,
+            # '')`) since both columns are its leading prefix.
+            connection.executemany(
+                "INSERT OR IGNORE INTO mention_stoplist(term_norm, label, reason, created_at) "
+                "VALUES (?, '', 'seed', ?)",
+                [(term, datetime.now(UTC).isoformat()) for term in _STOPLIST_SEED_TERMS],
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS resolution_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    resolved_by TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, label, resolved_by)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_resolution_stats_run ON resolution_stats(run_id)"
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -1280,3 +1421,147 @@ class ConnectorLedger:
                     (review.identity, review.type, review.id, now),
                 )
         return review
+
+    # ------------------------------------------------------------ entity aliases
+
+    @staticmethod
+    def _entity_alias_row(row: sqlite3.Row) -> EntityAlias:
+        return EntityAlias(
+            id=int(row["id"]), label=str(row["label"]), namespace_uid=str(row["namespace_uid"]),
+            alias_norm=str(row["alias_norm"]), uid=str(row["uid"]), source=str(row["source"]),
+            created_at=str(row["created_at"]),
+        )
+
+    def add_entity_alias(
+        self, label: str, namespace_uid: str | None, alias_norm: str, uid: str, source: str,
+    ) -> None:
+        """Add or update one alias (plan.md Phase 4 §4.8): `source` is free
+        text describing where it came from, e.g. `"review:<review_id>"`,
+        `"manual"`, or `"phase6_merge:<id>"`.
+
+        Idempotent on `(label, namespace_uid, alias_norm)` -- this is a
+        lookup table, not an append-only log, so re-adding the same alias
+        updates which uid it resolves to (and who last said so) rather than
+        duplicating the row. `namespace_uid=None` is normalized to `''`,
+        matching the schema's default for labels without namespace-scoped
+        identity (e.g. Decision, per §4.0).
+        """
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO entity_aliases(label, namespace_uid, alias_norm, uid, source, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(label, namespace_uid, alias_norm) DO UPDATE SET "
+                "  uid = excluded.uid, source = excluded.source, created_at = excluded.created_at",
+                (label, namespace_uid or "", alias_norm, uid, source, datetime.now(UTC).isoformat()),
+            )
+
+    def lookup_alias(self, label: str, namespace_uid: str | None, alias_norm: str) -> str | None:
+        """Step 3 of the resolution ladder (plan.md §4.2): the canonical uid
+        this alias resolves to, or `None` on a miss."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT uid FROM entity_aliases WHERE label = ? AND namespace_uid = ? AND alias_norm = ?",
+                (label, namespace_uid or "", alias_norm),
+            ).fetchone()
+        return str(row["uid"]) if row else None
+
+    def aliases_for_uid(self, uid: str) -> list[EntityAlias]:
+        """Every alias that resolves to this uid, for diagnostics/debugging."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM entity_aliases WHERE uid = ? ORDER BY created_at", (uid,),
+            ).fetchall()
+        return [self._entity_alias_row(row) for row in rows]
+
+    # ------------------------------------------------------------ mention stoplist
+
+    @staticmethod
+    def _normalize_stoplist_term(term: str) -> str:
+        """"Normalized" here means lowercased and stripped of leading/
+        trailing whitespace -- the same transform every stoplist accessor
+        applies to its input, so a caller never has to pre-normalize."""
+        return term.strip().lower()
+
+    def is_stoplisted(self, term: str, label: str | None = None) -> bool:
+        """True if `term` is on the mention stoplist (plan.md §4.5), either
+        as a global entry (seeded terms all are) or scoped to `label`."""
+        term_norm = self._normalize_stoplist_term(term)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM mention_stoplist WHERE term_norm = ? AND label IN (?, '') LIMIT 1",
+                (term_norm, label or ""),
+            ).fetchone()
+        return row is not None
+
+    def add_stoplist_term(self, term: str, label: str | None = None, reason: str | None = None) -> None:
+        """Add or update a stoplist entry -- "editable without deploy" per
+        §4.5, for whatever admin surface later calls this. Idempotent on
+        `(term_norm, label)`; `label=None`/`''` means global."""
+        term_norm = self._normalize_stoplist_term(term)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO mention_stoplist(term_norm, label, reason, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(term_norm, label) DO UPDATE SET reason = excluded.reason",
+                (term_norm, label or "", reason, datetime.now(UTC).isoformat()),
+            )
+
+    def remove_stoplist_term(self, term: str, label: str | None = None) -> None:
+        term_norm = self._normalize_stoplist_term(term)
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM mention_stoplist WHERE term_norm = ? AND label = ?",
+                (term_norm, label or ""),
+            )
+
+    def stoplist_terms(self, label: str | None = None) -> list[StoplistTerm]:
+        """All stoplist entries, optionally scoped to one `label` (still
+        includes global `''` entries, matching what `is_stoplisted` checks)."""
+        with self._connect() as connection:
+            if label is None:
+                rows = connection.execute(
+                    "SELECT term_norm, label, reason, created_at FROM mention_stoplist "
+                    "ORDER BY label, term_norm"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT term_norm, label, reason, created_at FROM mention_stoplist "
+                    "WHERE label IN (?, '') ORDER BY label, term_norm",
+                    (label,),
+                ).fetchall()
+        return [
+            StoplistTerm(term_norm=str(r["term_norm"]), label=str(r["label"]), reason=r["reason"],
+                         created_at=str(r["created_at"]))
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------ resolution stats
+
+    def record_resolution(self, run_id: str, label: str, resolved_by: str, count: int = 1) -> None:
+        """Accumulate `count` for `(run_id, label, resolved_by)` (plan.md
+        §4.6). Upsert-style: `_write_extraction` resolves many entities per
+        run, so the same combination increments across calls instead of
+        being overwritten by the last one."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO resolution_stats(run_id, label, resolved_by, count, created_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, label, resolved_by) DO UPDATE SET "
+                "  count = resolution_stats.count + excluded.count",
+                (run_id, label, resolved_by, count, datetime.now(UTC).isoformat()),
+            )
+
+    def resolution_stats_for_run(self, run_id: str) -> list[ResolutionStat]:
+        """Raw label x resolved_by counts for one sync run. Reading the
+        pattern (mostly scoped_exact/alias = healthy, etc., per §4.6) is the
+        future diagnostics view's job, not this accessor's."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT run_id, label, resolved_by, count, created_at FROM resolution_stats "
+                "WHERE run_id = ? ORDER BY label, resolved_by",
+                (run_id,),
+            ).fetchall()
+        return [
+            ResolutionStat(run_id=str(r["run_id"]), label=str(r["label"]), resolved_by=str(r["resolved_by"]),
+                           count=int(r["count"]), created_at=str(r["created_at"]))
+            for r in rows
+        ]
