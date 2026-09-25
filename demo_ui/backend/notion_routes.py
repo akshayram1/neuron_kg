@@ -207,6 +207,24 @@ async def _run_sync(
             collection=target.qdrant_collection,
         )
         orphans_removed = common_pipeline.delete_orphaned_shared_entities(graph)
+
+        # Sync coverage (plan.md Phase 0.4). `provider_reported_total` is left
+        # None: Notion documents its `/search` endpoint as not exhaustive and
+        # it returns no total-result count, so there is no honest provider
+        # total to report. `skipped_by_rule_count` is 0 -- every page
+        # `fetch_pages` returns is written; nothing is dropped by a local
+        # rule the way Bitbucket/GitHub drop non-.py/.md files.
+        record_keys = [
+            np.page_record(page, payload.workspace_id, connection.workspace_name).record_key
+            for page in pages
+        ]
+        sync_ledger_count = ledger.count_present(record_keys)
+        ledger.record_sync_coverage(
+            run_id, "notion", connection_id=payload.workspace_id,
+            provider_reported_total=None,
+            fetched_count=total, ledger_count=sync_ledger_count,
+            skipped_by_rule_count=0,
+        )
         # What this sync refused is invisible in the graph -- the missing facts
         # were never written, so it looks complete. Report it, and adopt only
         # if this graph has asked to widen unattended.
@@ -224,6 +242,8 @@ async def _run_sync(
             "ontology_auto_extend": pending["auto_extend"],
             "ontology_adopted_batch": auto.batch_id,
             "ontology_chunks_requeued": auto.chunks_requeued,
+            "provider_reported_total": None, "fetched_count": total,
+            "ledger_count": sync_ledger_count, "skipped_by_rule_count": 0,
             **semantic.token_usage.as_dict("ingestion"),
         }
         store.finish_connection_sync(payload.workspace_id)

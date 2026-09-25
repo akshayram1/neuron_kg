@@ -250,6 +250,25 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
 
         orphans_removed = jp.delete_orphaned_shared_entities(graph)
 
+        # Sync coverage (plan.md Phase 0.4): re-read the ledger for the exact
+        # issues this run just tried to write, rather than trusting
+        # kept+written, so a silent partial commit would show up here.
+        # `provider_reported_total` is left None -- Jira's `/search/jql`
+        # endpoint (see connectors/jira/api.py::_search_raw) is token-paginated
+        # and does not return a total count, unlike the deprecated offset
+        # `/search` endpoint, so there is nothing honest to report here.
+        record_keys = [
+            jp.issue_record(issue, project, site, payload.connection_id).record_key
+            for issue in issues
+        ]
+        sync_ledger_count = ledger.count_present(record_keys)
+        ledger.record_sync_coverage(
+            run_id, "jira", connection_id=payload.connection_id,
+            provider_reported_total=None,
+            fetched_count=total, ledger_count=sync_ledger_count,
+            skipped_by_rule_count=0,
+        )
+
         result = {
             "phase": "done", "project_key": payload.project_key,
             "current": f"Finished {total} issues from {project.key}",
@@ -257,6 +276,8 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
             "issues_fetched": total, "entities_written": 0,
             "facts_written": 0, "chunks_ingested": 0,
             "orphans_removed": orphans_removed,
+            "provider_reported_total": None,
+            "fetched_count": total, "ledger_count": sync_ledger_count, "skipped_by_rule_count": 0,
             **TokenUsage().as_dict("ingestion"),
         }
         source_id = f"{payload.cloud_id}:{payload.project_id}"
