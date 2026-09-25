@@ -56,6 +56,14 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **What changed:** `CrossEncoderReranker`, its pinned model/revision constants, and every test exercising it were removed from `graph/rerank.py`/`tests/test_rerank.py`. `sentence-transformers` (and its transitive `torch`/`transformers` deps, ~1.5GB) was removed via `uv remove sentence-transformers`. `graph/rerank.py`'s common interface (`Reranker` protocol, `RerankCandidate`, `RerankScore`, `select_final`) and the `LayaReranker` stub are unaffected and stay merged. 274 passed/12 skipped after removal (down from 277/15 — exactly the 3 non-gated + 3 integration-gated cross-encoder tests).
 **Still open:** Phase 2's variant C ("B + a generic pretrained cross-encoder") now has no implementation to bake off at all. If/when a generic cross-encoder is wanted again, it needs a fresh decision on approach (e.g. a lighter ONNX Runtime path instead of `sentence-transformers`/torch) — not a resumption of the removed one.
 
+---
+
+## 3 — Phase 3.1/3.2 (Laya shadow mode + enforcement) skipped this wave, blocked on Laya packaging
+**Raised:** 25 Sep 2026
+**Blocks:** §3.1 ("run Laya `chunk_type` + `has_durable_fact` ... store the result") and §3.2 (enforcing a skip rule built from 3.1's output) — both explicitly require calling a real, working Laya model, which this repo has never had wired in (same open question as the `LayaReranker` stub in `graph/rerank.py` §2.1 — see that entry above).
+**Question:** same as before — is `laya` becoming a vendored Neuron dependency, a sidecar service, or something else? Until that's answered, 3.1/3.2 can't be built for real without guessing at another fake-working stub.
+**Assumption made for now:** this wave only builds §3.0 (review queue foundation, no Laya dependency) and §3.4 (making the *existing* 3 admission gates explicit/logged, with gates 4-6 left as documented placeholders for Phase 4/5 — also no Laya dependency). §3.3 (source eligibility) is explicitly conditional in the plan on measured gaps from the mixed eval set, which doesn't exist yet (still blocked on the Phase 0 data issue above) — skipped for the same reason, not attempted.
+
 ## 2.1 — Laya reranker is a stub; real integration needs package + checkpoint decisions
 **Raised:** 25 Sep 2026
 **Blocks:** the "D" variant (Laya `retrieval_relevance`) of Phase 2's four-way bake-off can't run yet.
