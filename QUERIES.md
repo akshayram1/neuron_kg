@@ -120,6 +120,14 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **Question:** `graph/dates.py::stated_dates` handles "from next sprint" with a hardcoded `_SPRINT_LENGTH_DAYS = 14` — no real sprint-length config exists anywhere in this codebase to read from instead. Is 14 days a reasonable placeholder, or is there a real per-project sprint length this should read? Separately: `dateparser` (the dependency the plan names for relative-date parsing) isn't installed, so this was built as a narrower regex-only implementation instead (documented gaps: no general NLP phrasing like "a fortnight from signing", no fiscal quarters, English-only). Add `dateparser` as a real dependency, or is the regex-only scope acceptable?
 **Assumption made for now:** 14-day sprint constant (easy to change in one place), regex-only date parsing (the seam to swap in `dateparser` is documented in the module).
 
+---
+
+## 5.0 — RESOLVED-STYLE NOTE: ~23 existing readers don't use the new live-fact predicate yet
+**Raised:** 25 Sep 2026
+**Blocks:** nothing today (harmless — nothing writes `assertion_status="corrected"`/`projection_status="pending_review"` yet except the new §5.0 primitives and their tests). Becomes real once §5.2 (`resolve_text_fact`) lands and starts writing those states for real.
+**Question:** `graph/fact_predicates.py`'s `live_fact_cypher()` is the one correct "is this fact edge live" check (`invalid_at IS NULL AND assertion_status != 'corrected' AND projection_status = 'live'`), but ~23 existing `invalid_at IS NULL` call sites across `graph/chat.py`, `graph/derived.py`, `graph/inference.py`, `graph/graph_view.py`, `graph/expand.py`, `graph/history.py`, `graph/structured_query.py` still use the old, narrower check. `correct_fact` defends against this today (it also collapses the live edge's `invalid_at` to `valid_at`, so even an unconverted reader treats a corrected fact as not-live) — but `pending_review` facts (§5.2, not built yet) have no such defense, since a zero-width interval doesn't make sense for "not yet approved." Once §5.2 exists, should propagating the centralized predicate to these readers be part of that same task, or a dedicated follow-up?
+**Assumption made for now:** none — `graph/chat.py` is off-limits to agents right now anyway (your in-progress Laya work), so this is naturally deferred, not actively worked around.
+
 ## 2.1 — `select_final`'s token-budget cap has no data to work with yet
 **Raised:** 25 Sep 2026
 **Blocks:** nothing yet (Phase 2.4 tuning, not started) — a heads-up for whoever wires Phase 2.2.
