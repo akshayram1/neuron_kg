@@ -168,6 +168,20 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **Question:** the plan says merge survivor = "most reinforced, then oldest" but `reinforce_count` (§5.7) is defined per fact-edge, not per node. The duplicate collector sums `reinforce_count` across every live fact edge touching a node (excluding `MENTIONED_IN`) as the node-level proxy. Reasonable, or was a different aggregation intended (e.g. count of distinct `MENTIONED_IN` source records instead)?
 **Assumption made for now:** sum of live-edge `reinforce_count`, documented in `graph/duplicate_collector.py::_node_reinforcement`.
 
+---
+
+## 6.5 — Approving a `possibly_same_as` review always fails loud (nothing proposes one today, so harmless)
+**Raised:** 25 Sep 2026
+**Blocks:** nothing — no real `possibly_same_as` review exists yet (Phase 4's rung 6 is still a stub), so this never fires in practice.
+**Question:** `POST /api/reviews/{id}/approve` now dispatches by type; `possibly_same_as` maps to `apply_approved_possibly_same_as`, which always raises (honest, since nothing can execute it for real yet). Should `possibly_same_as` instead be left OUT of the dispatch table entirely until rung 6 is real — so approving one today would just flip ledger state like any unmapped type, rather than deliberately 500ing? Both are defensible; "fail loud" was chosen since a silent no-op that returns 200 looks like success when it isn't.
+**Assumption made for now:** wired in, fails loud. One-line change to make it a no-op instead if preferred.
+
+## 6.5 — HTTP 500 for "approved but apply failed"
+**Raised:** 25 Sep 2026
+**Blocks:** nothing — a real, working edge case, just worth a second opinion on the status code.
+**Question:** when a review's ledger state flip succeeds but its apply-on-approval step then raises, `review_routes.py` returns HTTP 500 with a detail message stating the review is approved-but-not-applied (not rolled back, not hidden). 500 vs. a more specific code (409/422/502) is a judgment call. Fine as-is, or worth a different status?
+**Assumption made for now:** 500, documented inline in the module docstring.
+
 ## 2.1 — `select_final`'s token-budget cap has no data to work with yet
 **Raised:** 25 Sep 2026
 **Blocks:** nothing yet (Phase 2.4 tuning, not started) — a heads-up for whoever wires Phase 2.2.
