@@ -64,6 +64,20 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **Question:** same as before — is `laya` becoming a vendored Neuron dependency, a sidecar service, or something else? Until that's answered, 3.1/3.2 can't be built for real without guessing at another fake-working stub.
 **Assumption made for now:** this wave only builds §3.0 (review queue foundation, no Laya dependency) and §3.4 (making the *existing* 3 admission gates explicit/logged, with gates 4-6 left as documented placeholders for Phase 4/5 — also no Laya dependency). §3.3 (source eligibility) is explicitly conditional in the plan on measured gaps from the mixed eval set, which doesn't exist yet (still blocked on the Phase 0 data issue above) — skipped for the same reason, not attempted.
 
+---
+
+## 3.0 — Review queue: rejection-identity shape is caller-supplied and unverified against a real caller
+**Raised:** 25 Sep 2026
+**Blocks:** nothing merged is broken (290 passed/12 skipped) — a design choice worth a sanity check once real callers exist.
+**Question:** the merged `reviews`/`review_rejections` tables (`connectors/core/ledger.py`) treat `identity` as an opaque, caller-supplied string the ledger never parses out of `payload` — documented recommended shape is `f"{type}:{subject_uid}:{object_uid}"`, but nothing enforces it. Phase 4's `possibly_same_as` and Phase 5's `fact_update` (the two callers the plan names) don't exist yet, so this is unverified against a real caller. Fine as a contract, or should the ledger own identity derivation instead?
+**Assumption made for now:** shipped as opaque/caller-supplied — reversible, just changes what future call sites pass as `identity=`.
+
+## 3.0 — Review queue: no authenticated-reviewer identity yet
+**Raised:** 25 Sep 2026
+**Blocks:** nothing merged is broken — a gap worth knowing about before Phase 6's `BridgePanel` wires into this.
+**Question:** `POST /api/reviews/{id}/approve|reject` takes `decided_by` as a required, unauthenticated query param (this app has no logged-in-user concept yet — `demo_ui/backend/access.py` only tracks per-connector OAuth scope). Anyone calling the endpoint can claim to be anyone. Acceptable for now (internal/demo tool), or does this need real auth before Phase 6 builds a UI on top of it?
+**Assumption made for now:** left as an open string param; flagged for Phase 6, not fixed now since real auth is a larger, separate decision.
+
 ## 2.1 — Laya reranker is a stub; real integration needs package + checkpoint decisions
 **Raised:** 25 Sep 2026
 **Blocks:** the "D" variant (Laya `retrieval_relevance`) of Phase 2's four-way bake-off can't run yet.
