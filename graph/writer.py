@@ -791,3 +791,76 @@ def reinforce_count(source_record_keys: list[str] | None) -> int:
 # `now_iso()`. Documented here, per the writer-contract task, as the
 # schema/property convention that change should follow — not implemented,
 # since its only real caller is in the off-limits file.
+
+
+# ---------------------------------------------------------------------------
+# 25-plan.md Phase 5 §5.2 — two small additive primitives `resolve_text_fact`
+# (`graph/resolve_text_fact.py`, built alongside this) needs and that no
+# existing §5.0 primitive covers. Both match by `fact_uid` alone, the same
+# label-agnostic idiom `touch_metadata`/`invalidate_edges_by_uid_pairs` use,
+# so neither caller needs to know the edge's relationship type or endpoint
+# labels up front.
+# ---------------------------------------------------------------------------
+
+
+def mark_ended_unknown(
+    graph: Graph, fact_uid: str, *, attested_from: str, attested_by_record: str | None = None
+) -> None:
+    """§5.2 `mark(old, ended_unknown=True, attested_from=..., attested_by_record=...)`
+    — the live fact's end date can't be resolved (missing/out-of-order dates
+    on one or both sides), so it is neither closed (there is no instant to
+    set `invalid_at` to) nor silently left to read as open-ended forever.
+
+    Deliberately NOT `close_fact`: no `invalid_at` is set and no `FactHistory`
+    row is archived — nothing has actually ended as far as storage is
+    concerned. `graph/time_axis.py::holds_at`'s existing `ended_unknown`
+    handling already treats a fact like this as ended at its own
+    `attested_from` moment for world-time reads, with no new interval
+    machinery required here.
+
+    `attested_from` must be an ISO timestamp, never a source record key —
+    same rule `upsert_fact_edges`'s docstring documents for its own
+    `attested_from` field (`graph/time_axis.py` parses it as a date). A
+    record key documenting *what attested this* belongs in the separate
+    `attested_by_record` field.
+
+    Matches only a LIVE edge (via `_find_live_fact`, so a missing/closed/
+    ambiguous `fact_uid` raises rather than silently no-op'ing) — every
+    `resolve_text_fact` caller of this already found `old` via a
+    `r.invalid_at IS NULL` candidate query.
+    """
+    fact = _find_live_fact(graph, fact_uid)
+    graph.query(
+        f"""
+        MATCH (a {{uid: $from_uid}})-[r:{_label(fact['rel_type'])}]->(b {{uid: $to_uid}})
+        WHERE r.fact_uid = $fact_uid
+        SET r.ended_unknown = true, r.attested_from = $attested_from,
+            r.attested_by_record = $attested_by_record
+        """,
+        params={
+            "from_uid": fact["from_uid"], "to_uid": fact["to_uid"], "fact_uid": fact_uid,
+            "attested_from": attested_from, "attested_by_record": attested_by_record,
+        },
+    )
+
+
+def set_projection_status(graph: Graph, fact_uid: str, projection_status: str) -> None:
+    """§5.2 compensating-state primitive: set one fact edge's
+    `projection_status` by `fact_uid` alone (live or not — a `pending_review`
+    edge is, by definition, not matched by `_find_live_fact`'s `invalid_at IS
+    NULL` requirement, so this does not go through it).
+
+    `resolve_text_fact`'s `auto`-mode path uses this to promote an incoming
+    fact from `pending_review` to `live` only *after* the corresponding old
+    fact has already been closed/corrected/disputed — see
+    `graph/resolve_text_fact.py` for why that ordering, not a single atomic
+    write, is the safe one under a partial failure (this codebase's FalkorDB
+    client has no multi-statement transaction primitive to reach for
+    instead — see that module's docstring and this task's final report).
+
+    A no-op if `fact_uid` matches nothing.
+    """
+    graph.query(
+        "MATCH ()-[r]->() WHERE r.fact_uid = $fact_uid SET r.projection_status = $status",
+        params={"fact_uid": fact_uid, "status": projection_status},
+    )
