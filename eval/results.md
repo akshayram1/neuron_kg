@@ -155,3 +155,20 @@ baseline. No `evaluate_retrieval.py` run was made for this dataset.
 
 ---
 
+
+---
+
+## Before/after Laya accuracy check — 25 Sep 2026
+
+**Requested by Akshay while Laya integration (`NEURON_RERANK=laya`) was in progress, uncommitted, in `graph/chat.py`/`graph/rerank.py`.** Real runs, not simulated — 44 chain questions (`eval/chain_golden.jsonl`, schema-mapped to `query`/`expected_uids` for this harness in a throwaway file, not committed), `--graph story-20260917-050343-5d26 --k 8 --with-chat --stage-metrics`, the only graph in this environment whose schema matches the real ontology.
+
+- **Before** (clean `git worktree` at commit `653d723`, no Laya code path exists): `candidate_recall=0.4773`, `final_recall=0.0909`, `MRR=0.01388`, `gold_evidence_recall=0.0909`, total $0.612.
+- **After** (working tree, `NEURON_RERANK=laya`, `LAYA_MODEL_DIR=.../personal_exp/laya/model/laya-ingest`): **identical** numbers, total $0.623.
+
+**Numbers are identical because Laya never actually scored anything.** Reproduced directly with full logging: 31/44 cases reach the Laya code path (the other 13 return early via the structured-lookup resolver, expected); all 31 raise `TypeError: best_window() missing 1 required positional argument: 'encoder'` at `graph/chat.py:1043` (`_rerank_candidates` calls `best_window(question, serialized, 300)` — `graph/text_window.py::best_window`'s signature is `(question, text, tokens, encoder)`, no default for `encoder`). The exception is caught by the existing fallback handler (`chat.py:1358`, "laya fallback scoring failed; using RRF order", `trace.fallback=True` on all 31), so retrieval silently reverts to plain RRF every time — the fallback mechanism itself works correctly, it's just masking a real bug upstream of it.
+
+**Secondary finding (uncommitted to the comparison, but real):** Qdrant collection `neuron_entities__story-20260917-050343-5d26` returns 404 — doesn't exist. Vector search leg is dead for this graph; only fulltext contributes. Affects both runs equally, so it doesn't bias the comparison, but caps both numbers below what a working vector leg would give.
+
+**Tertiary, unrelated to the bug:** the `laya` package itself isn't installed in this venv (only in `personal_exp/laya`'s own venv) — even with the `encoder` bug fixed, real Laya inference still can't run here without a packaging decision (same open question in `QUERIES.md`).
+
+**Not fixed by me** — this is Akshay's in-progress, uncommitted code; flagging rather than editing it.
