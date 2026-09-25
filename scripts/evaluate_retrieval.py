@@ -156,25 +156,27 @@ def stage_case_metrics(
     token_usage: TokenUsage,
     usd: float | None,
     latency_ms: float,
+    packed_blocks: list | None = None,
 ) -> dict[str, Any]:
     """Per-question stage fields (plan.md §0.5).
 
     `candidate_uids` is everything `retrieve()` returned before any cut;
-    `final_uids` is what reached the answer prompt. Today they are the SAME
-    list: there is no separate wide pool (Phase 1.1) and no reranker
-    (Phase 2) yet, so `retrieve(limit=k)` already applies the only cut that
-    exists. This is not a bug in this harness -- plan.md §8 Phase 1.1 says
-    so explicitly ("the final cut is `candidates[:search_limit]` as today,
-    so behaviour does not change... This lets Phase 0 measure candidate
-    recall@40 immediately"). Kept as two fields so nothing else has to change
-    the day they diverge.
+    `final_uids` is what reached the answer prompt. As of Phase 1.1's wide
+    pool + Phase 1.3's expansion, these now genuinely differ: `retrieve()`
+    returns the full pool (default 40, plus any expansion/pair-lane
+    additions), and the caller (this harness, mirroring `run_chat_turn`)
+    cuts to the top `k`. Before Phase 1 landed they were identical, per
+    plan.md §8 Phase 1.1's explicit note that behaviour would not change
+    until then.
 
-    `packed_uids` is only meaningful with `--with-chat` (no chat turn, no
-    pack). Until Phase 1.2's token budget/windowing exists, nothing is ever
-    dropped from the evidence pack for size -- every retrieved hit's block
-    (its summary, plus any facts) reaches the prompt in full -- so today
-    `packed_uids` equals the chat turn's `highlighted_nodes`. It will start
-    differing once budget-driven drops exist.
+    `packed_uids`/`packed_blocks` are only meaningful with `--with-chat` (no
+    chat turn, no pack). `packed_blocks` is `ChatResult.packed_blocks`
+    (`graph/chat.py`'s `PackedBlockInfo` list, plan.md §1.2) when available:
+    real per-block packing honesty (`truncated`, `gold_support_preserved`),
+    not just a node-presence proxy. When it's not available (older callers,
+    or `--with-chat` not set), `gold_evidence_in_pack` falls back to "gold
+    uid is present in `packed_uids`" -- a coarser proxy that can't tell a
+    fully-packed block from one whose evidence was truncated to fit.
     """
     expected = set(case.get("expected_uids") or [])
     stage_scored = bool(expected)
@@ -183,7 +185,16 @@ def stage_case_metrics(
     chain_coverage = (
         len(set(chain_uids) & set(final_uids)) / len(chain_uids) if chain_uids else 0.0
     )
-    gold_evidence_in_pack = bool(expected & set(packed_uids)) if packed_uids is not None else None
+    if packed_blocks is not None:
+        # A gold node's evidence only counts as preserved if its block both
+        # made it into the pack AND wasn't truncated to fit the budget --
+        # `PackedBlockInfo.gold_support_preserved` is exactly that signal,
+        # just not yet compared against this case's own `expected_uids`
+        # (graph/chat.py has no access to gold data -- see its docstring).
+        preserved_uids = {b.uid for b in packed_blocks if b.gold_support_preserved}
+        gold_evidence_in_pack = bool(expected & preserved_uids) if stage_scored else None
+    else:
+        gold_evidence_in_pack = bool(expected & set(packed_uids)) if packed_uids is not None else None
     return {
         "candidate_uids": candidate_uids,
         "final_uids": final_uids,
@@ -393,17 +404,20 @@ def main() -> None:
         "--exclude-edges", action="append", type=_parse_edge_triple, default=None,
         metavar="from_uid:REL:to_uid",
         help="Edge(s) to hide from expansion, for the hidden-edge test "
-        "(plan.md §0.2/1.3). NO-OP TODAY: graph/expand.py (Phase 1.3) does "
-        "not exist yet, so there is no expansion step for this to affect. "
-        "Accepted and recorded now so the hidden-edge test doesn't need a "
-        "harness change later.",
+        "(plan.md §0.2/1.3). Threaded into retrieve()/run_chat_turn() as a "
+        "frozenset of (from_uid, rel, to_uid) tuples, which graph/expand.py "
+        "skips during one-hop expansion.",
     )
     args = parser.parse_args()
 
-    # TODO(phase 1.3): thread `exclude_edges` into `retrieve()` /
-    # `expand_neighbors()` once graph/expand.py lands. `retrieve()` accepts
-    # no such parameter today -- see the flag's help text above.
     exclude_edges = list(dict.fromkeys(args.exclude_edges or []))
+    # `_parse_edge_triple` validates shape but keeps the raw "from:REL:to"
+    # string (see its docstring) since nothing consumed the parsed form
+    # until graph/expand.py + graph/chat.py's Phase 1.3 wiring landed. Split
+    # it into the (from_uid, rel, to_uid) tuples expand_neighbors() expects.
+    exclude_edges_frozenset = frozenset(
+        tuple(raw.split(":", 2)) for raw in exclude_edges
+    )
 
     target = resolve_target(args.graph)
     graph = get_graph(name=target.falkor_name)
@@ -428,15 +442,22 @@ def main() -> None:
             providers=providers, scope=scope,
             collection=target.qdrant_collection,
             token_usage=case_token_usage,
+            exclude_edges=exclude_edges_frozenset,
         )
         retrieval_ms = (time.monotonic() - t0) * 1000
-        # No wide pool (Phase 1.1) and no reranker (Phase 2) exist yet, so
-        # candidate and final are the same list -- see stage_case_metrics().
+        # Phase 1.1's wide pool means `retrieve()` no longer implicitly cuts
+        # to `args.k` -- it now returns the full candidate pool (plus any
+        # expansion/pair-lane additions) so candidate recall@k can be
+        # measured. `run_chat_turn` applies its own `hits[:search_limit]` cut
+        # after pool+expansion+pair-lane are all built (graph/chat.py); mirror
+        # that same cut here for the non-chat path so `final_uids` means what
+        # its name says instead of silently becoming the uncut pool.
         candidate_uids = [hit.uid for hit in hits]
-        final_uids = candidate_uids
+        final_uids = candidate_uids[: args.k]
 
         citations = None
         packed_uids: list[str] | None = None
+        packed_blocks = None
         stage_token_usage, stage_model, stage_latency_ms = case_token_usage, embedding_model, retrieval_ms
         if args.with_chat:
             t1 = time.monotonic()
@@ -444,12 +465,15 @@ def main() -> None:
                 graph, client, case["query"], search_limit=args.k,
                 providers=providers, scope=scope,
                 collection=target.qdrant_collection,
+                exclude_edges=exclude_edges_frozenset,
             )
             chat_ms = (time.monotonic() - t1) * 1000
             citations = [item.record_key for item in answer.citations]
-            # Keep insertion order but de-dup: see stage_case_metrics()'s
-            # docstring for why "highlighted_nodes" == "packed_uids" today.
+            # Keep insertion order but de-dup: `highlighted_nodes` is built
+            # from `packed_blocks` (graph/chat.py's actual post-packing
+            # survivors), so this is already the packed set, not a proxy.
             packed_uids = list(dict.fromkeys(answer.highlighted_nodes))
+            packed_blocks = answer.packed_blocks
             # Whole-turn cost/latency (this already includes the internal
             # retrieve() call `run_chat_turn` makes) -- not added to
             # `case_token_usage`/`retrieval_ms` above, to avoid double
@@ -461,7 +485,8 @@ def main() -> None:
             usd = _estimate_usd(stage_token_usage, stage_model)
             result.update(stage_case_metrics(
                 case, candidate_uids=candidate_uids, final_uids=final_uids,
-                packed_uids=packed_uids, token_usage=stage_token_usage, usd=usd,
+                packed_uids=packed_uids, packed_blocks=packed_blocks,
+                token_usage=stage_token_usage, usd=usd,
                 latency_ms=stage_latency_ms,
             ))
         if "kind" in case:
