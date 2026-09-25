@@ -43,7 +43,7 @@ from openai import OpenAI
 
 from graph import multigraph, vector_store
 from graph.access import AccessScope
-from graph.chat import retrieve, run_chat_turn
+from graph.chat import RetrievalTrace, retrieve, run_chat_turn
 from graph.falkor_client import get_graph
 from graph.token_usage import TokenUsage
 from util import paths as _paths  # noqa: F401 — load repo .env
@@ -437,12 +437,14 @@ def main() -> None:
         # the structured resolver, the name matcher and the time window. Scoring
         # the ranker alone measured a narrower path than ships -- three nilus
         # cases read 0 while answering correctly in chat.
+        retrieval_trace = RetrievalTrace()
         _structured, hits = retrieve(
             graph, client, case["query"], limit=args.k,
             providers=providers, scope=scope,
             collection=target.qdrant_collection,
             token_usage=case_token_usage,
             exclude_edges=exclude_edges_frozenset,
+            trace=retrieval_trace,
         )
         retrieval_ms = (time.monotonic() - t0) * 1000
         # Phase 1.1's wide pool means `retrieve()` no longer implicitly cuts
@@ -452,8 +454,15 @@ def main() -> None:
         # after pool+expansion+pair-lane are all built (graph/chat.py); mirror
         # that same cut here for the non-chat path so `final_uids` means what
         # its name says instead of silently becoming the uncut pool.
-        candidate_uids = [hit.uid for hit in hits]
-        final_uids = candidate_uids[: args.k]
+        if retrieval_trace.reranker == "laya" and not retrieval_trace.fallback:
+            candidate_uids = list(dict.fromkeys(
+                retrieval_trace.initial_candidate_uids
+                + retrieval_trace.expanded_candidate_uids
+            ))
+            final_uids = retrieval_trace.final_uids
+        else:
+            candidate_uids = [hit.uid for hit in hits]
+            final_uids = candidate_uids[: args.k]
 
         citations = None
         packed_uids: list[str] | None = None
@@ -481,6 +490,15 @@ def main() -> None:
             stage_token_usage, stage_model, stage_latency_ms = answer.token_usage, chat_model, chat_ms
 
         result = score_case(case, final_uids, citations)
+        if retrieval_trace.reranker is not None:
+            result.update({
+                "reranker": retrieval_trace.reranker,
+                "rerank_fallback": retrieval_trace.fallback,
+                "rerank_expansion_rounds": retrieval_trace.expansion_rounds,
+                "rerank_bridge_uids": retrieval_trace.bridge_uids,
+                "rerank_initial_candidate_uids": retrieval_trace.initial_candidate_uids,
+                "rerank_expanded_candidate_uids": retrieval_trace.expanded_candidate_uids,
+            })
         if args.stage_metrics:
             usd = _estimate_usd(stage_token_usage, stage_model)
             result.update(stage_case_metrics(

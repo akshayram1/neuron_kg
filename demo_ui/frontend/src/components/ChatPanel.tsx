@@ -10,7 +10,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import type { ConversationMessage, Highlight } from "../types";
+import type { ConversationMessage, Highlight, RerankerStatus } from "../types";
 import MarkdownBody from "./MarkdownBody";
 
 const SAMPLE_QUESTIONS = [
@@ -26,6 +26,9 @@ interface ChatPanelProps {
   activeHighlight: Highlight;
   onSend: (message: string) => void;
   onClear: () => void;
+  reranker: RerankerStatus | null;
+  rerankerBusy: boolean;
+  onToggleReranker: (enabled: boolean) => void;
   onShowPath: (highlight: Highlight) => void;
   onOpenKnowledge: (uid: string, type: string) => void;
 }
@@ -37,6 +40,9 @@ export default function ChatPanel({
   activeHighlight,
   onSend,
   onClear,
+  reranker,
+  rerankerBusy,
+  onToggleReranker,
   onShowPath,
   onOpenKnowledge,
 }: ChatPanelProps) {
@@ -61,11 +67,30 @@ export default function ChatPanel({
         <div className="chat-intro">
           <div className="chat-intro-top">
             <span className="eyebrow"><Sparkles size={13} /> Grounded agent</span>
-            {messages.length > 1 && (
-              <button className="clear-chat" type="button" onClick={onClear} disabled={busy}>
-                <Trash2 size={12} /> Clear chat
-              </button>
-            )}
+            <div className="chat-intro-actions">
+              {reranker && (
+                <label
+                  className={`laya-switch ${reranker.enabled ? "active" : ""}`}
+                  title={reranker.available
+                    ? "Use Laya to score the wide retrieval pool"
+                    : (reranker.reason ?? "Laya is unavailable")}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reranker.enabled}
+                    disabled={busy || rerankerBusy || !reranker.available}
+                    onChange={(event) => onToggleReranker(event.target.checked)}
+                  />
+                  <span className="laya-switch-track"><span /></span>
+                  Laya {rerankerBusy ? "…" : reranker.enabled ? "ON" : "OFF"}
+                </label>
+              )}
+              {messages.length > 1 && (
+                <button className="clear-chat" type="button" onClick={onClear} disabled={busy}>
+                  <Trash2 size={12} /> Clear chat
+                </button>
+              )}
+            </div>
           </div>
           <h1>Ask what the company knows.</h1>
           <p>Answers come from the live knowledge graph, with the supporting Jira records and graph path attached.</p>
@@ -90,6 +115,18 @@ export default function ChatPanel({
                   ? <MarkdownBody text={message.content} />
                   : message.content}
               </div>
+              {message.result?.retrieval && (
+                <div className={`retrieval-mode ${message.result.retrieval.usedMode ?? "unknown"}`}>
+                  {message.result.retrieval.usedMode === "laya"
+                    ? "Laya ranked"
+                    : message.result.retrieval.usedMode === "structured"
+                      ? "Exact lookup"
+                      : message.result.retrieval.fallback
+                        ? "RRF fallback"
+                        : "RRF"}
+                  <span>{message.result.retrieval.finalCandidates} selected</span>
+                </div>
+              )}
               {message.result && (
                 <div className="answer-evidence">
                   <details>

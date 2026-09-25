@@ -1,6 +1,32 @@
 export interface AppConfig {
   providers: string[];
   defaultProviders: string[];
+  reranker: RerankerStatus;
+}
+
+export interface RerankerStatus {
+  mode: string;
+  enabled: boolean;
+  available: boolean;
+  ready: boolean;
+  source: "runtime" | "environment" | string;
+  modelDir: string | null;
+  device: string;
+  packageAvailable: boolean;
+  checkpointReady: boolean;
+  reason: string | null;
+}
+
+export interface RetrievalInfo {
+  configuredMode: string;
+  usedMode: string | null;
+  fallback: boolean;
+  fallbackReason: string | null;
+  initialCandidates: number;
+  expandedCandidates: number;
+  bridges: number;
+  finalCandidates: number;
+  expansionRounds: number;
 }
 
 export interface GraphInfo {
@@ -76,6 +102,7 @@ export interface ChatResponse {
   highlight: Highlight;
   readOnly: boolean;
   tokenUsage: TokenUsage;
+  retrieval: RetrievalInfo;
 }
 
 export interface TokenUsage {

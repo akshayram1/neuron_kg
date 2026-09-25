@@ -1,22 +1,18 @@
-"""Tests for graph/rerank.py (25-plan.md §2.1 common reranker interface).
-
-No generic cross-encoder implementation lives in graph/rerank.py (removed 25
-Sep 2026 -- no `sentence-transformers`/`torch` dependency, per the repo
-owner). All tests here are pure/offline: they use a `FakeReranker` to
-exercise the `Reranker` protocol shape, `select_final`'s selection
-mechanism, and `LayaReranker`'s stub contract, none of which need a real
-model or network access.
-"""
+"""Offline tests for Laya relevance scoring and retrieval-role policy."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
 from graph.rerank import (
     LayaReranker,
     RerankCandidate,
+    RetrievalRole,
     RerankScore,
     Reranker,
+    assign_roles,
     candidates_from_hits,
     select_final,
 )
@@ -59,12 +55,7 @@ def test_laya_reranker_satisfies_the_reranker_protocol():
 # --- common input equality across implementations ---------------------------
 
 def test_common_candidate_list_produces_well_formed_output_from_fake_reranker():
-    """Stand-in for "a real scorer produces well-formed, same-shaped output
-    from the same RerankCandidate list" -- there is no cross-encoder
-    implementation in this module to exercise for real (see module
-    docstring); LayaReranker's equivalent is that it raises cleanly
-    (test_laya_reranker_raises_not_implemented), not that it scores
-    anything, per this task's explicit instructions."""
+    """A scorer returns one well-formed result per frozen candidate."""
     candidates = _candidates(4)
     scores = FakeReranker().score("some question", candidates)
     assert len(scores) == len(candidates)
@@ -77,25 +68,89 @@ def test_common_candidate_list_produces_well_formed_output_from_fake_reranker():
     assert [s.uid for s in scores] == [c.uid for c in candidates]
 
 
-def test_laya_reranker_raises_not_implemented_cleanly():
-    """Per this task's scope: LayaReranker is a best-effort stub. The test
-    is that calling it raises NotImplementedError cleanly (not some other
-    exception, not a silent wrong score), not that it scores anything."""
-    reranker = LayaReranker()
+def test_laya_reranker_batches_with_exact_trained_state_shape(tmp_path):
+    question = LayaReranker.RETRIEVAL_RELEVANCE_QUESTION
+    (tmp_path / "questions.json").write_text(json.dumps({"retrieval_relevance": question}))
+    (tmp_path / "rl_agent_config.json").write_text("{}")
+
+    class FakeAgent:
+        def __init__(self):
+            self.calls = []
+
+        def predict_batch(self, states, questions, **kwargs):
+            self.calls.append((states, questions, kwargs))
+            return [
+                {"answers": {"retrieval_relevance": {"noul": value}}}
+                for value in (0.9, 0.2, 0.7)
+            ]
+
+    agent = FakeAgent()
+    reranker = LayaReranker(
+        str(tmp_path), device="cpu", batch_size=2,
+        agent_factory=lambda _model_dir, _device: agent,
+    )
     candidates = _candidates(3)
-    with pytest.raises(NotImplementedError):
-        reranker.score("some question", candidates)
+    scores = reranker.score("some question", candidates)
+
+    assert [score.score for score in scores] == [0.9, 0.2, 0.7]
+    states, questions, kwargs = agent.calls[0]
+    assert states == [
+        {"question": "some question", "node": candidate.window}
+        for candidate in candidates
+    ]
+    assert questions == {"retrieval_relevance": question}
+    assert kwargs == {"batch_size": 2, "sort_by_length": True}
+    assert all(score.model == "laya/retrieval_relevance" for score in scores)
 
 
 def test_laya_reranker_question_and_state_shape_match_discovered_schema():
     """RETRIEVAL_RELEVANCE_QUESTION is reproduced verbatim from
     personal_exp/laya/ingest/schema.py's QUESTIONS["retrieval_relevance"] --
-    pin this shape so it can't silently drift even while the class itself
-    stays a stub."""
+    pin this shape so the live adapter cannot silently drift."""
     assert LayaReranker.RETRIEVAL_RELEVANCE_QUESTION == {
         "type": "noul",
         "instructions": "Is this graph node needed to answer the user's question?",
     }
+
+
+def test_assign_roles_keeps_temporal_and_exact_lanes_and_uses_rejections_as_bridges():
+    candidates = [
+        RerankCandidate("direct", "x"),
+        RerankCandidate("time", "x", methods=["time_window"]),
+        RerankCandidate("person", "x", methods=["named_entity"]),
+        RerankCandidate("weak", "x"),
+        RerankCandidate("noise", "x"),
+    ]
+    scores = _scores([
+        ("direct", 0.9), ("time", 0.1), ("person", 0.1),
+        ("weak", 0.3), ("noise", 0.05),
+    ])
+    decisions = assign_roles(
+        scores, candidates, direct_threshold=0.5,
+        bridge_threshold=0.2, bridge_limit=2,
+    )
+    roles = {decision.uid: decision.role for decision in decisions}
+    assert roles == {
+        "direct": RetrievalRole.DIRECT_EVIDENCE,
+        "time": RetrievalRole.TEMPORAL_CONTEXT,
+        "person": RetrievalRole.DIRECT_EVIDENCE,
+        "weak": RetrievalRole.BRIDGE_CANDIDATE,
+        # The strongest below-floor rejection fills the remaining bridge slot.
+        "noise": RetrievalRole.BRIDGE_CANDIDATE,
+    }
+
+
+def test_assign_roles_honours_bridge_limit():
+    candidates = [RerankCandidate(f"u{i}", "x") for i in range(5)]
+    scores = _scores([(f"u{i}", 0.4 - i * 0.05) for i in range(5)])
+    decisions = assign_roles(
+        scores, candidates, direct_threshold=0.5,
+        bridge_threshold=0.1, bridge_limit=2,
+    )
+    assert [
+        decision.uid for decision in decisions
+        if decision.role == RetrievalRole.BRIDGE_CANDIDATE
+    ] == ["u0", "u1"]
 
 
 # --- deterministic batching / order -----------------------------------------
@@ -209,5 +264,3 @@ def test_select_final_is_deterministic():
     first = select_final(scores, threshold=0.0, min_keep=2, max_keep=3)
     second = select_final(scores, threshold=0.0, min_keep=2, max_keep=3)
     assert first == second
-
-

@@ -33,6 +33,10 @@ from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+# This must precede graph.chat: retrieval settings are sourced from repo .env.
+from util import paths as _paths  # noqa: F401
+from util.paths import DATA_DIR
+
 from connectors.core.ledger import ConnectorLedger
 from demo_ui.backend.bitbucket_routes import router as bitbucket_router
 from demo_ui.backend.github_routes import router as github_router
@@ -45,7 +49,7 @@ from demo_ui.backend.access import access_scope_for_request
 from demo_ui.backend.job_worker import run_worker
 from graph import multigraph
 from graph import vector_store
-from graph.chat import run_chat_turn
+from graph.chat import reranker_status, run_chat_turn, set_reranker_enabled
 from graph import adoption
 from graph.entity import fetch_entity_detail
 from graph.falkor_client import get_graph
@@ -53,9 +57,7 @@ from graph.graph_view import fetch_graph, fetch_sources
 from graph.history import fetch_fact_history
 from graph.schema import bootstrap_schema
 from graph.skos_export import build_skos_turtle
-from util import paths as _paths  # noqa: F401 — load the repo-root .env
 from util.logging import configure_logging
-from util.paths import DATA_DIR
 
 configure_logging()
 
@@ -64,6 +66,7 @@ _worker_stop: asyncio.Event | None = None
 _worker_task: asyncio.Task | None = None
 LEDGER_PATH = DATA_DIR / "connector_ledger.sqlite3"
 GRAPH_REGISTRY = multigraph.GraphRegistry(DATA_DIR / "graphs.sqlite3")
+RUNTIME_SETTINGS_PATH = DATA_DIR / "runtime_settings.sqlite3"
 
 
 def _resolve(graph_name: str) -> multigraph.GraphTarget:
@@ -86,6 +89,35 @@ class GraphCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     display_name: str | None = Field(default=None, max_length=100)
 
+
+class RerankerConfigRequest(BaseModel):
+    enabled: bool
+
+
+def _runtime_setting(name: str) -> str | None:
+    with sqlite3.connect(RUNTIME_SETTINGS_PATH) as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_settings "
+            "(name TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        row = db.execute(
+            "SELECT value FROM runtime_settings WHERE name = ?", (name,),
+        ).fetchone()
+    return str(row[0]) if row else None
+
+
+def _save_runtime_setting(name: str, value: str) -> None:
+    with sqlite3.connect(RUNTIME_SETTINGS_PATH) as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_settings "
+            "(name TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO runtime_settings(name, value) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            (name, value),
+        )
+
 app = FastAPI(
     title="Neuron context graph API",
     version="0.1.0",
@@ -101,7 +133,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 app.include_router(jira_router)
@@ -125,6 +157,14 @@ async def prevent_stale_frontend_shell(request: Request, call_next):
 async def _ensure_schema() -> None:
     global _worker_stop, _worker_task
     bootstrap_schema(get_graph())
+    stored_laya = _runtime_setting("laya_enabled")
+    if stored_laya is not None:
+        set_reranker_enabled(stored_laya == "true")
+    status = reranker_status()
+    logger.info(
+        "Retrieval reranker mode=%s ready=%s device=%s reason=%s",
+        status["mode"], status["ready"], status["device"], status["reason"],
+    )
     _worker_stop = asyncio.Event()
     _worker_task = asyncio.create_task(run_worker(_worker_stop))
 
@@ -141,13 +181,33 @@ async def _stop_worker() -> None:
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "neuron"}
+    reranker = reranker_status()
+    status = "ok" if not reranker["enabled"] or reranker["ready"] else "degraded"
+    return {"status": status, "service": "neuron", "reranker": reranker}
 
 
 @app.get("/api/config")
 async def config() -> dict:
     providers = ["jira", "github", "bitbucket", "notion"]
-    return {"providers": providers, "defaultProviders": providers}
+    return {
+        "providers": providers,
+        "defaultProviders": providers,
+        "reranker": reranker_status(),
+    }
+
+
+@app.put("/api/config/reranker")
+async def configure_reranker(payload: RerankerConfigRequest) -> dict:
+    current = reranker_status()
+    if payload.enabled and not current["available"]:
+        raise HTTPException(
+            status_code=409,
+            detail=current["reason"] or "Laya is not available in this runtime",
+        )
+    _save_runtime_setting("laya_enabled", "true" if payload.enabled else "false")
+    status = set_reranker_enabled(payload.enabled)
+    logger.info("Retrieval reranker switched mode=%s ready=%s", status["mode"], status["ready"])
+    return {"reranker": status}
 
 
 @app.get("/api/graphs")
@@ -427,6 +487,33 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
             "input": result.token_usage.input_tokens,
             "output": result.token_usage.output_tokens,
             "total": result.token_usage.total_tokens,
+        },
+        "retrieval": {
+            "configuredMode": reranker_status()["mode"],
+            "usedMode": result.retrieval_trace.reranker if result.retrieval_trace else None,
+            "fallback": result.retrieval_trace.fallback if result.retrieval_trace else False,
+            "fallbackReason": (
+                result.retrieval_trace.fallback_reason if result.retrieval_trace else None
+            ),
+            "initialCandidates": (
+                len(result.retrieval_trace.initial_candidate_uids)
+                if result.retrieval_trace else 0
+            ),
+            "expandedCandidates": (
+                len(result.retrieval_trace.expanded_candidate_uids)
+                if result.retrieval_trace else 0
+            ),
+            "bridges": (
+                len(result.retrieval_trace.bridge_uids)
+                if result.retrieval_trace else 0
+            ),
+            "finalCandidates": (
+                len(result.retrieval_trace.final_uids)
+                if result.retrieval_trace else 0
+            ),
+            "expansionRounds": (
+                result.retrieval_trace.expansion_rounds if result.retrieval_trace else 0
+            ),
         },
     }
 

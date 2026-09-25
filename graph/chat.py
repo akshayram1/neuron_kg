@@ -7,22 +7,38 @@ doesn't give you (plan.md §6, quoting the old `graph/ask.py`'s own framing).
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from falkordb import Graph
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+# Load the repository .env before any retrieval settings are read. Chat is
+# imported by several entry points, so relying on each caller's import order
+# made the web app silently keep the default ``off`` mode while the benchmark
+# (which exported its environment explicitly) used Laya.
+from util import paths as _paths  # noqa: F401
+
 from graph import vector_store
 from graph.access import AccessScope
 from graph.bridge.anchors import commit_shas, jira_keys, pull_request_refs, repository_names
 from graph.entity import fetch_entity_detail
 from graph.expand import MAX_SEEDS, TIER_ORDER, expand_neighbors, tier_for_extraction_method
+from graph.rerank import (
+    LayaReranker,
+    RerankCandidate,
+    RerankDecision,
+    Reranker,
+    RetrievalRole,
+    assign_roles,
+)
 from graph.search import SearchHit, embed_query, hybrid_search
 from graph.structured_query import (
     find_named_persons,
@@ -70,6 +86,22 @@ NEURON_ANSWER_RESERVE_TOKENS = int(os.getenv("NEURON_ANSWER_RESERVE_TOKENS", "20
 # Below this many tokens, shrinking a block's text window further stops
 # being useful evidence -- squeeze facts instead (see `_pack_context`).
 _MIN_WINDOW_TOKENS = 40
+
+# Laya retrieval policy. Thresholds are intentionally configurable and must
+# be tuned on the grouped dev split; these defaults match the conservative
+# starting point used by the sibling Laya graph experiment. Bridge candidates
+# never reach the answer model unless a later hop is independently accepted.
+NEURON_RERANK_MIN_P = float(os.getenv("NEURON_RERANK_MIN_P", "0.50"))
+NEURON_RERANK_BRIDGE_MIN_P = float(os.getenv("NEURON_RERANK_BRIDGE_MIN_P", "0.20"))
+NEURON_RERANK_BRIDGE_LIMIT = int(os.getenv("NEURON_RERANK_BRIDGE_LIMIT", "4"))
+NEURON_RERANK_MIN_DIRECT = int(os.getenv("NEURON_RERANK_MIN_DIRECT", "2"))
+NEURON_RERANK_MAX_KEEP = int(os.getenv("NEURON_RERANK_MAX_KEEP", "12"))
+NEURON_RERANK_MAX_ROUNDS = int(os.getenv("NEURON_RERANK_MAX_ROUNDS", "2"))
+NEURON_RERANK_FACTS = int(os.getenv("NEURON_RERANK_FACTS", "6"))
+
+_laya_reranker: LayaReranker | None = None
+_laya_reranker_config: tuple[str | None, str] | None = None
+_reranker_enabled_override: bool | None = None
 
 SYSTEM_PROMPT = """\
 You answer questions about a company's Jira/GitHub/Bitbucket/Notion
@@ -208,6 +240,21 @@ class ChatResult:
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     packed_blocks: list[PackedBlockInfo] = field(default_factory=list)
     dropped_evidence_uids: list[str] = field(default_factory=list)
+    retrieval_trace: RetrievalTrace | None = None
+
+
+@dataclass
+class RetrievalTrace:
+    """Stage boundary data for evaluation and retrieval diagnostics."""
+
+    initial_candidate_uids: list[str] = field(default_factory=list)
+    expanded_candidate_uids: list[str] = field(default_factory=list)
+    bridge_uids: list[str] = field(default_factory=list)
+    final_uids: list[str] = field(default_factory=list)
+    expansion_rounds: int = 0
+    reranker: str | None = None
+    fallback: bool = False
+    fallback_reason: str | None = None
 
 
 def _log_hits(stage: str, hits: list[SearchHit]) -> None:
@@ -961,6 +1008,270 @@ def _pack_context(
     return _PackedContext(blocks, all_facts, all_edge_ids, record_keys_by_source, packed_blocks, dropped_uids)
 
 
+def _reranker_mode() -> str:
+    if _reranker_enabled_override is not None:
+        return "laya" if _reranker_enabled_override else "off"
+    return os.getenv("NEURON_RERANK", "off").strip().lower()
+
+
+def set_reranker_enabled(enabled: bool | None) -> dict[str, Any]:
+    """Set the process-wide runtime switch; ``None`` restores the env value."""
+    global _reranker_enabled_override, _laya_reranker, _laya_reranker_config
+    _reranker_enabled_override = enabled
+    if enabled is False:
+        # Drop Neuron's reference so an idle disabled worker need not retain
+        # the model. An in-flight request keeps its own scorer reference.
+        _laya_reranker = None
+        _laya_reranker_config = None
+    return reranker_status()
+
+
+def reranker_status() -> dict[str, Any]:
+    """Report configuration readiness without loading the 421M model."""
+    mode = _reranker_mode()
+    model_dir_value = os.getenv("LAYA_MODEL_DIR")
+    model_dir = Path(model_dir_value).expanduser() if model_dir_value else None
+    required_files = ("model.safetensors", "questions.json", "rl_agent_config.json")
+    package_available = importlib.util.find_spec("laya") is not None
+    checkpoint_ready = bool(
+        model_dir and model_dir.is_dir()
+        and all((model_dir / name).is_file() for name in required_files)
+    )
+    enabled = mode == "laya"
+    if mode in {"", "off", "none"}:
+        reason = "disabled"
+    elif mode != "laya":
+        reason = f"unsupported mode: {mode}"
+    elif not package_available:
+        reason = "laya package is unavailable"
+    elif not checkpoint_ready:
+        reason = "checkpoint is missing required files"
+    else:
+        reason = None
+    return {
+        "mode": mode or "off",
+        "enabled": enabled,
+        "available": package_available and checkpoint_ready,
+        "ready": enabled and reason is None,
+        "source": "runtime" if _reranker_enabled_override is not None else "environment",
+        "modelDir": str(model_dir) if model_dir else None,
+        "device": os.getenv("LAYA_DEVICE", "cpu"),
+        "packageAvailable": package_available,
+        "checkpointReady": checkpoint_ready,
+        "reason": reason,
+    }
+
+
+def _configured_reranker() -> Reranker | None:
+    """Return the scorer selected by the current runtime environment."""
+    global _laya_reranker, _laya_reranker_config
+    mode = _reranker_mode()
+    if mode in {"", "off", "none"}:
+        return None
+    if mode != "laya":
+        raise ValueError(f"unsupported NEURON_RERANK={mode!r}; expected off or laya")
+    config = (os.getenv("LAYA_MODEL_DIR"), os.getenv("LAYA_DEVICE", "cpu"))
+    if _laya_reranker is None or _laya_reranker_config != config:
+        _laya_reranker = LayaReranker(model_dir=config[0], device=config[1])
+        _laya_reranker_config = config
+    return _laya_reranker
+
+
+def _rerank_candidates(
+    graph: Graph,
+    question: str,
+    hits: list[SearchHit],
+    *,
+    scope: AccessScope,
+    providers: list[str] | None,
+    at: str | None,
+    at_end: str | None,
+    as_of: str | None,
+) -> list[RerankCandidate]:
+    """Serialize node text plus visible linked/temporal facts for Laya.
+
+    Scoring only ``SearchHit.summary`` would hide the exact information the
+    second pass is meant to exploit: a weak textual hit can still carry the
+    edge or historical interval leading to the answer. The same ACL-aware
+    entity reader used by context packing supplies a small fact preview here.
+    The final text is frozen to the Laya candidate token budget.
+    """
+    candidates: list[RerankCandidate] = []
+    for hit in hits:
+        facts, _edge_ids, _record_keys = _entity_evidence(
+            graph, hit.uid, scope, providers, at=at, at_end=at_end, as_of=as_of,
+        )
+        fact_lines = [_format_fact(fact) for fact in facts[:NEURON_RERANK_FACTS]]
+        parts = [f"[{hit.label}] {hit.name}", hit.summary]
+        if fact_lines:
+            parts.append("LINKED AND TEMPORAL FACTS:\n" + "\n".join(fact_lines))
+        serialized = "\n".join(part for part in parts if part)
+        candidates.append(RerankCandidate(
+            uid=hit.uid,
+            # `best_window` has no default `encoder` -- match the same
+            # `vector_store._encoding` convention every other call site in
+            # this file uses (see `_count_tokens`, `_pack_context`).
+            window=best_window(question, serialized, 300, vector_store._encoding),
+            label=hit.label,
+            name=hit.name,
+            methods=list(hit.methods),
+        ))
+    return candidates
+
+
+def _score_roles(
+    reranker: Reranker,
+    graph: Graph,
+    question: str,
+    hits: list[SearchHit],
+    *,
+    scope: AccessScope,
+    providers: list[str] | None,
+    at: str | None,
+    at_end: str | None,
+    as_of: str | None,
+) -> list[RerankDecision]:
+    candidates = _rerank_candidates(
+        graph, question, hits, scope=scope, providers=providers,
+        at=at, at_end=at_end, as_of=as_of,
+    )
+    scores = reranker.score(question, candidates)
+    decisions = assign_roles(
+        scores, candidates,
+        direct_threshold=NEURON_RERANK_MIN_P,
+        bridge_threshold=NEURON_RERANK_BRIDGE_MIN_P,
+        bridge_limit=NEURON_RERANK_BRIDGE_LIMIT,
+    )
+    role_counts = {
+        role.value: sum(decision.role == role for decision in decisions)
+        for role in RetrievalRole
+    }
+    logger.info("  laya roles     %s", role_counts)
+    return decisions
+
+
+def _merge_unique_hits(*groups: list[SearchHit]) -> list[SearchHit]:
+    merged: list[SearchHit] = []
+    seen: set[str] = set()
+    for group in groups:
+        for hit in group:
+            if hit.uid in seen:
+                continue
+            seen.add(hit.uid)
+            merged.append(hit)
+    return merged
+
+
+def _laya_selected_hits(
+    hits: list[SearchHit], decisions: list[RerankDecision], *, max_keep: int,
+) -> list[SearchHit]:
+    """Return answer evidence only; bridge candidates never leak to chat."""
+    by_uid = {hit.uid: hit for hit in hits}
+    accepted = [
+        decision for decision in decisions
+        if decision.role in {RetrievalRole.DIRECT_EVIDENCE, RetrievalRole.TEMPORAL_CONTEXT}
+    ]
+
+    def priority(decision: RerankDecision) -> tuple[int, float, str]:
+        hit = by_uid[decision.uid]
+        reserved = bool(set(hit.methods) & {"named_entity", "pair", "time_window"})
+        return (0 if reserved else 1, -decision.score, decision.uid)
+
+    selected: list[SearchHit] = []
+    for decision in sorted(accepted, key=priority)[:max_keep]:
+        hit = by_uid.get(decision.uid)
+        if hit is None:
+            continue
+        selected.append(SearchHit(
+            uid=hit.uid, label=hit.label, name=hit.name, summary=hit.summary,
+            score=decision.score,
+            methods=list(dict.fromkeys(hit.methods + [f"laya:{decision.role.value}"])),
+        ))
+    return selected
+
+
+def _laya_two_pass_search(
+    reranker: Reranker,
+    graph: Graph,
+    question: str,
+    hits: list[SearchHit],
+    *,
+    scope: AccessScope,
+    providers: list[str] | None,
+    at: str | None,
+    at_end: str | None,
+    as_of: str | None,
+    exclude_edges: frozenset[tuple[str, str, str]],
+    trace: RetrievalTrace | None = None,
+) -> list[SearchHit]:
+    """Score broadly, then expand rejected bridges only when evidence is thin."""
+    all_hits = _merge_unique_hits(hits)
+    if trace is not None:
+        trace.initial_candidate_uids = [hit.uid for hit in all_hits]
+        trace.reranker = "laya"
+    decisions = _score_roles(
+        reranker, graph, question, all_hits, scope=scope, providers=providers,
+        at=at, at_end=at_end, as_of=as_of,
+    )
+    decision_by_uid = {decision.uid: decision for decision in decisions}
+    frontier = decisions
+
+    def accepted_count() -> int:
+        return sum(
+            decision.role in {RetrievalRole.DIRECT_EVIDENCE, RetrievalRole.TEMPORAL_CONTEXT}
+            for decision in decision_by_uid.values()
+        )
+
+    rounds = 0
+    while accepted_count() < NEURON_RERANK_MIN_DIRECT and rounds < NEURON_RERANK_MAX_ROUNDS:
+        seed_uids = [
+            decision.uid for decision in frontier
+            if decision.role in {
+                RetrievalRole.DIRECT_EVIDENCE,
+                RetrievalRole.TEMPORAL_CONTEXT,
+                RetrievalRole.BRIDGE_CANDIDATE,
+            }
+        ][:MAX_SEEDS]
+        if not seed_uids:
+            break
+        neighbor_hits = expand_neighbors(
+            graph, seed_uids, scope, providers, min_tier="derived",
+            exclude_edges=exclude_edges,
+        )
+        known = {hit.uid for hit in all_hits}
+        new_neighbors = [hit for hit in neighbor_hits if hit.uid not in known]
+        if not new_neighbors:
+            break
+        rounds += 1
+        _log_hits(f"laya-hop-{rounds}", new_neighbors)
+        new_decisions = _score_roles(
+            reranker, graph, question, new_neighbors, scope=scope, providers=providers,
+            at=at, at_end=at_end, as_of=as_of,
+        )
+        all_hits.extend(new_neighbors)
+        if trace is not None:
+            trace.expanded_candidate_uids.extend(hit.uid for hit in new_neighbors)
+        for decision in new_decisions:
+            decision_by_uid[decision.uid] = decision
+        frontier = new_decisions
+
+    selected = _laya_selected_hits(
+        all_hits, list(decision_by_uid.values()), max_keep=NEURON_RERANK_MAX_KEEP,
+    )
+    if trace is not None:
+        trace.bridge_uids = [
+            decision.uid for decision in decision_by_uid.values()
+            if decision.role == RetrievalRole.BRIDGE_CANDIDATE
+        ]
+        trace.final_uids = [hit.uid for hit in selected]
+        trace.expansion_rounds = rounds
+    logger.info(
+        "  laya search    pool=%d rounds=%d accepted=%d final=%d",
+        len(hits), rounds, accepted_count(), len(selected),
+    )
+    return selected
+
+
 def retrieve(
     graph: Graph, client: OpenAI, question: str, *,
     limit: int, providers: list[str] | None, scope: AccessScope,
@@ -968,6 +1279,9 @@ def retrieve(
     collection: str = vector_store.COLLECTION,
     at: str | None = None, at_end: str | None = None,
     exclude_edges: frozenset[tuple[str, str, str]] = frozenset(),
+    as_of: str | None = None,
+    reranker: Reranker | None = None,
+    trace: RetrievalTrace | None = None,
 ) -> tuple[Any, list[SearchHit]]:
     """Everything the product does to turn a question into candidate hits.
 
@@ -993,10 +1307,60 @@ def retrieve(
     structured = resolve_structured(graph, question, scope, providers)
     if structured is not None:
         logger.info("  structured     kind=%s hits=%d", structured.kind, len(structured.hits))
+        if trace is not None:
+            trace.reranker = "structured"
+            trace.initial_candidate_uids = [hit.uid for hit in structured.hits]
+            trace.final_uids = [hit.uid for hit in structured.hits]
         return structured, structured.hits
 
+    active_reranker = reranker or _configured_reranker()
+
     wants_wisdom, wants_findings = _requested_knowledge_layers(question)
-    if wants_wisdom or wants_findings:
+    if active_reranker is not None:
+        # With a relevance gate, every generally useful lane can contribute
+        # without crowding a fixed top-k. One embedding is reused by all
+        # semantic lanes; deterministic pair/person/time lanes join below.
+        query_embedding = embed_query(client, question, token_usage=token_usage)
+        general_hits = hybrid_search(
+            graph, client, question, limit=POOL_SIZE, providers=providers, scope=scope,
+            token_usage=token_usage, collection=collection,
+            query_embedding=query_embedding,
+        )
+        wisdom_hits = _actionable_wisdom_hits(
+            graph,
+            hybrid_search(
+                graph, client, question, labels=["Wisdom"], limit=5,
+                providers=providers, scope=scope, token_usage=token_usage,
+                collection=collection, query_embedding=query_embedding,
+            ),
+        )
+        lineage_hits = _linked_finding_hits(graph, wisdom_hits, scope, providers)
+        finding_hits = hybrid_search(
+            graph, client, question, labels=["Finding"], limit=5,
+            providers=providers, scope=scope, token_usage=token_usage,
+            collection=collection, query_embedding=query_embedding,
+        )
+        hits = _merge_unique_hits(wisdom_hits, lineage_hits, finding_hits, general_hits)
+        if wants_wisdom or wants_findings:
+            requested_wisdom = wisdom_hits[:2] if wants_wisdom else []
+            requested_lineage = _linked_finding_hits(
+                graph, requested_wisdom, scope, providers,
+            )
+            requested_findings = finding_hits[:2] if wants_findings else []
+            requested_layers = _merge_unique_hits(
+                requested_wisdom, requested_lineage, requested_findings,
+            )
+            requested_uids = {hit.uid for hit in requested_layers}
+            general_budget = max(2, limit - len(requested_layers))
+            fallback_hits = requested_layers + [
+                hit for hit in general_hits if hit.uid not in requested_uids
+            ][:general_budget]
+        else:
+            fallback_hits = general_hits
+        _log_hits("wisdom-lane", wisdom_hits)
+        _log_hits("finding-lineage", lineage_hits)
+        _log_hits("finding-lane", finding_hits)
+    elif wants_wisdom or wants_findings:
         # One query embedding feeds every retrieval lane. Wisdom and Findings
         # get reserved slots so a dense graph of ordinary entities cannot
         # crowd them out of the final top-K. NOT widened to POOL_SIZE (§1.1
@@ -1044,6 +1408,40 @@ def retrieve(
             token_usage=token_usage, collection=collection,
         )
     _log_hits("hybrid", hits)
+    if trace is not None:
+        trace.initial_candidate_uids = [hit.uid for hit in hits]
+
+    if active_reranker is not None:
+        # Run every deterministic lane that is applicable to this query before
+        # Laya. No model-based tool router can accidentally suppress an exact
+        # person/pair/time signal; Laya only decides which semantic evidence
+        # reaches the answer and which candidates may seed a bounded next hop.
+        pair_hits = _two_entity_lane(graph, question, scope, providers)
+        named_hits = find_named_persons(graph, question, scope, providers)
+        window_hits = (
+            find_window_activity(graph, scope, providers, at=at, at_end=at_end, limit=limit)
+            if at and at_end else []
+        )
+        _log_hits("pair-lane", pair_hits)
+        _log_hits("named-person", named_hits)
+        _log_hits("time-window", window_hits)
+        hits = _merge_unique_hits(pair_hits, named_hits, window_hits, hits)
+        try:
+            return None, _laya_two_pass_search(
+                active_reranker, graph, question, hits,
+                scope=scope, providers=providers, at=at, at_end=at_end,
+                as_of=as_of, exclude_edges=exclude_edges, trace=trace,
+            )
+        except Exception as exc:
+            # A model/package/checkpoint failure must not take chat down. The
+            # original RRF + bounded-expansion path below remains the fallback.
+            logger.exception("  laya fallback  scoring failed; using RRF order")
+            if trace is not None:
+                trace.fallback = True
+                trace.fallback_reason = f"{type(exc).__name__}: {exc}"
+                trace.reranker = "rrf"
+            hits = fallback_hits
+
     pool_before_expansion = len(hits)
 
     # plan.md §1.7: two-entity lane. Alongside the wide-pool/expansion logic
@@ -1076,6 +1474,8 @@ def retrieve(
     if new_neighbors:
         _log_hits("expansion", new_neighbors)
         hits = hits + new_neighbors
+        if trace is not None:
+            trace.expanded_candidate_uids.extend(hit.uid for hit in new_neighbors)
     if len(hits) != pool_before_expansion:
         # Router honesty (DICE): a wrong answer is almost never "the LLM
         # hallucinated" -- log when the pool actually changed shape, not just
@@ -1109,6 +1509,9 @@ def retrieve(
         if in_window:
             _log_hits("time-window", in_window)
             hits = in_window + hits
+    if trace is not None:
+        trace.reranker = trace.reranker or "rrf"
+        trace.final_uids = [hit.uid for hit in hits]
     return None, hits
 
 
@@ -1136,10 +1539,11 @@ def run_chat_turn(
         at, at_end = inferred_at, at_end or inferred_at_end
     at = at or inferred_at
     as_of = as_of or inferred_as_of
+    retrieval_trace = RetrievalTrace()
     structured, hits = retrieve(
         graph, client, question, limit=search_limit, providers=providers, scope=scope,
         token_usage=token_usage, collection=collection, at=at, at_end=at_end,
-        exclude_edges=exclude_edges,
+        as_of=as_of, exclude_edges=exclude_edges, trace=retrieval_trace,
     )
 
     # plan.md §1.1's pool-then-cut boundary: `retrieve`'s non-structured path
@@ -1152,18 +1556,23 @@ def run_chat_turn(
     # non-sampled answer ("STRUCTURED RESULT — complete list, not a sample")
     # and must never be cut.
     pool_size = len(hits)
-    if structured is None:
+    laya_selected = any(
+        method.startswith("laya:") for hit in hits for method in hit.methods
+    )
+    if structured is None and not laya_selected:
         hits = hits[:search_limit]
         if pool_size > len(hits):
             logger.info(
                 "  cut            pool=%d -> search_limit=%d", pool_size, len(hits),
             )
+    retrieval_trace.final_uids = [hit.uid for hit in hits]
 
     if not hits and structured is None:
         return ChatResult(
             answer="I don't have any information about that in the graph yet.",
             citations=[],
             token_usage=token_usage,
+            retrieval_trace=retrieval_trace,
         )
 
     clock = []
@@ -1268,4 +1677,5 @@ def run_chat_turn(
         token_usage=token_usage,
         packed_blocks=packed.packed_blocks,
         dropped_evidence_uids=packed.dropped_uids,
+        retrieval_trace=retrieval_trace,
     )

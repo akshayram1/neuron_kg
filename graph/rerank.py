@@ -1,34 +1,30 @@
-"""Reranker bake-off (25-plan.md §2 "Phase 2 — Reranker bake-off: generic
-cross-encoder vs Laya") — the common scorer interface (§2.1) plus a
-shape-compatible Laya adapter stub.
+"""Laya relevance scoring and query-relative retrieval roles.
 
-Only §2.1's interface is built here: the `Reranker` protocol, a best-effort
-`LayaReranker` stub (see its docstring), and `select_final`'s selection
-*mechanism*. There is deliberately no cross-encoder implementation in this
-module — the repo owner does not want the `sentence-transformers`/`torch`
-dependency footprint that a generic pretrained cross-encoder would bring in
-(removed 25 Sep 2026; see QUERIES.md for the earlier pinned-model note this
-superseded). A scorer satisfying `Reranker` can be added back here, or
-provided by a caller, whenever a concrete choice is made. Wiring a scorer
-into `graph/chat.py` (§2.2), CPU/GPU serving benchmarks (§2.3), threshold
-tuning (§2.4) and the query-type router (§2.5) are separate, later tasks and
-are deliberately NOT done here.
+RRF supplies a broad, stable candidate order. Laya then answers its trained
+``retrieval_relevance`` question for every token-bounded candidate window.
+The policy in this module deliberately does more than a binary hard cut:
+direct evidence can reach the answer, deterministic temporal candidates are
+kept as temporal context, and a capped set of rejected candidates remains
+available as graph-expansion bridges. A rejection is therefore local to one
+query and one retrieval pass; it is never written back as a property of the
+fact or node.
 
-Both scorer implementations accept the same `(question, candidate_window)`
-shape (`RerankCandidate`) and return the same score/metadata shape
-(`RerankScore`) — 25-plan.md §2.1: "Both implementations accept the same
-(question, candidate_window) records and return a score plus model/version
-metadata." Candidate windows are expected to already be token-bounded and
-frozen by the caller before either model runs (via `graph.text_window
-.best_window`, see `candidates_from_hits` below) — this module does not
-mutate or re-window candidate text.
+Laya currently has one trained retrieval question, not a trained role-choice
+question. Roles are consequently assigned by deterministic policy around the
+calibrated relevance probability instead of inventing an untrained prompt.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
+import threading
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from enum import StrEnum
+from pathlib import Path
+from typing import Callable, Protocol, runtime_checkable
 
 import tiktoken
 
@@ -44,17 +40,8 @@ logger = logging.getLogger("neuron.rerank")
 # (graph/rerank.py)".
 _encoding = tiktoken.get_encoding("cl100k_base")
 
-# Shared default candidate-window token budget. Not from the current
-# 25-plan.md §2.1 text (which leaves the number to the caller), but kept
-# consistent with the one concrete number this plan has stated for a model
-# in this family: Laya's own sequence cap is 512 tokens total, of which the
-# question/instructions already consume some budget (personal_exp/laya/
-# writeup.md: "the sequence is capped at 512 tokens... the question and its
-# options must fit in 192 tokens"). 300 tokens for the node/document side
-# leaves comfortable headroom for the question within that 512-token cap,
-# and is a reasonable shared default for a generic cross-encoder too, most
-# of which (including the one pinned below) also cap combined query+document
-# length around 512 tokens.
+# Laya caps the combined state/question sequence at 512 tokens. Keeping the
+# node side at 300 leaves room for the user question and trained instruction.
 DEFAULT_CANDIDATE_WINDOW_TOKENS = 300
 
 
@@ -99,10 +86,27 @@ class RerankScore:
     model_version: str
 
 
+class RetrievalRole(StrEnum):
+    """A candidate's query-local job in the two-pass search."""
+
+    DIRECT_EVIDENCE = "direct_evidence"
+    BRIDGE_CANDIDATE = "bridge_candidate"
+    TEMPORAL_CONTEXT = "temporal_context"
+    IRRELEVANT = "irrelevant"
+
+
+@dataclass(frozen=True)
+class RerankDecision:
+    uid: str
+    score: float
+    role: RetrievalRole
+    model: str
+    model_version: str
+
+
 @runtime_checkable
 class Reranker(Protocol):
-    """Common interface any scorer implementation (e.g. `LayaReranker`, or a
-    future generic cross-encoder) satisfies — 25-plan.md §2.1.
+    """Batched relevance scorer used by the retrieval policy.
 
     `typing.Protocol` rather than an ABC: this codebase has no existing
     precedent for swappable-backend classes at all (checked `graph/
@@ -110,16 +114,10 @@ class Reranker(Protocol):
     concrete classes, none define or subclass an ABC/abstract interface for
     a pluggable backend). Absent a precedent to match, Protocol is the
     simpler of the two options the task calls for: it lets both scorer
-    classes satisfy this interface structurally (matching method signature
-    is enough), with no shared base class, no `__init__` coupling, and no
-    import-time dependency from one scorer implementation on another --
-    matters concretely here since a future cross-encoder implementation
-    would need `sentence-transformers`/`torch` importable and `LayaReranker`
-    would need the separate `laya` package, and neither should have to
-    import a base class module that drags in the other's dependencies.
+    Implementations satisfy this interface structurally, so tests and offline
+    evaluation can inject a deterministic scorer without loading Laya.
 
-    Batched, not one-at-a-time, per 25-plan.md §2.1's batching requirement
-    for both implementations: a single `score()` call takes the *entire*
+    Batched, not one-at-a-time: a single `score()` call takes the *entire*
     candidate list for one question and returns one `RerankScore` per
     candidate, in the same order as the input list (deterministic,
     order-preserving -- see tests/test_rerank.py).
@@ -154,8 +152,7 @@ def candidates_from_hits(
 
     Not itself part of the `Reranker` protocol -- it is the "freeze the
     candidate windows before either model runs" step 25-plan.md §2.1 calls
-    for, shared by both implementations and reusable by whatever wires this
-    into `graph/chat.py`'s `retrieve` (§2.2, out of scope here).
+    for and is reusable by the chat retrieval path.
     """
     return [
         RerankCandidate(
@@ -171,10 +168,9 @@ def candidates_from_hits(
 
 def _log_scores(scores: list[RerankScore]) -> None:
     """Log every candidate's score — 25-plan.md §2.1: "Log every candidate
-    score for evaluation and calibration." This is deliberately every score,
-    not just the ones that will survive `select_final`'s threshold: §2.4's
-    future threshold tuning and calibration work needs the full distribution,
-    not a pre-filtered one.
+    score for evaluation and calibration." This includes direct, bridge and
+    irrelevant candidates because threshold tuning needs the full score
+    distribution, not a pre-filtered one.
 
     Matches graph/expand.py's logging convention: `logger =
     logging.getLogger("neuron.X")`, structured `logger.info("%s: ...", ...)`
@@ -187,77 +183,17 @@ def _log_scores(scores: list[RerankScore]) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Laya adapter -- best-effort stub, NOT full integration (see class
-# docstring for exactly what was and wasn't discoverable).
-#
-# No generic cross-encoder implementation lives in this module (removed 25
-# Sep 2026, per the repo owner: no `sentence-transformers`/`torch` dependency
-# footprint). Variant C of Phase 2's bake-off ("B + a generic pretrained
-# cross-encoder") therefore has no implementation to run yet -- either a
-# lighter-weight scorer (e.g. an ONNX-exported model, ONNX Runtime only, no
-# torch) or this exact model brought back deliberately would need to be
-# chosen before that variant can be benchmarked. See QUERIES.md.
-# ---------------------------------------------------------------------------
-
-
 class LayaReranker:
-    """Shape-compatible stub for a Laya `retrieval_relevance` reranker.
+    """Lazy, process-local adapter for Laya's trained relevance question.
 
-    This is intentionally NOT a working implementation. Per this task's
-    scope, full Laya integration (loading the real `laya` package and the
-    trained `laya-ingest` checkpoint, wiring it into retrieval) is
-    25-plan.md §5.3/§10, a separate, larger task. This class exists only so
-    `graph.rerank.Reranker` is verifiably shape-compatible with a Laya
-    adapter and 25-plan.md §2.2's future wiring is not blocked by an
-    interface that only fits one implementation.
+    The ``laya`` package is imported only when scoring starts, so Neuron can
+    still run with ``NEURON_RERANK=off`` in a lightweight environment. A
+    deployment enabling Laya must install that package and set
+    ``LAYA_MODEL_DIR`` to a checkpoint directory.
 
-    What was found in `/Users/akshaychame/personal_exp/laya` (read-only,
-    nothing there was modified) and used to write this stub as precisely as
-    possible without guessing:
-
-    - `ingest/schema.py`'s `QUESTIONS["retrieval_relevance"]` is the exact,
-      already-trained question this reranker must ask:
-      `{"type": "noul", "instructions": "Is this graph node needed to
-      answer the user's question?"}` -- reproduced verbatim below as
-      `RETRIEVAL_RELEVANCE_QUESTION`, matching 25-plan.md §2.1's "the
-      instruction text ... must match its trained schema exactly".
-    - The same file's comment above that entry gives the trained state
-      shape verbatim: `# state: {"question": "<user question>", "node":
-      "<serialized graph node or fact>"}` -- i.e. one state dict per
-      candidate of the form `{"question": question, "node":
-      candidate.window}`.
-    - `graph_view/reranker.py` (Laya's own, separate reranker prototype --
-      not part of Neuron, not imported by this file) shows a real,
-      *working* call shape against that same schema:
-      `agent.predict_batch(states, {"retrieval_relevance": questions[
-      "retrieval_relevance"], ...}, batch_size=self.batch_size,
-      sort_by_length=len(states) > self.batch_size)`, and reads each
-      prediction's score back as `prediction["answers"][
-      "retrieval_relevance"]["noul"]`. That confirms Laya's public batching
-      entry point is `agent.predict_batch`, not a loop over `agent.predict`.
-    - `writeup.md` documents the agent construction as `laya.Agent(str(
-      MODEL_DIR), device=...)`, where `MODEL_DIR` is a local directory
-      containing `model.safetensors`/`questions.json`/`rl_agent_config
-      .json` -- in the sibling repo, `personal_exp/laya/model/laya-ingest`.
-
-    What was intentionally NOT guessed or reproduced here:
-
-    - The `laya` package itself and the trained `model/laya-ingest`
-      checkpoint are not part of this repo, not a Neuron dependency, and
-      were not copied or vendored in -- doing so would be exactly the kind
-      of full integration this task is explicitly not scoped to do (and
-      `/Users/akshaychame/personal_exp/laya` was read-only for this task).
-    - `laya.Agent`'s exact constructor signature, `predict_batch`'s full
-      parameter set/return type, and any version-specific behavior were
-      only ever observed via `graph_view/reranker.py`'s usage, never via
-      the `laya` package's own source (it lives in an installed `.venv`,
-      not `personal_exp/laya`'s own tracked files) -- reproducing that
-      exact call as "working" code without being able to run or verify it
-      against the real package would be the kind of wrong guess baked into
-      a fake-working stub this task explicitly warns against.
-
-    See QUERIES (final report) for what a real implementer still needs.
+    ``agent_factory`` is intentionally injectable: it keeps unit tests
+    offline and also permits a deployment to supply an RPC-backed worker
+    with the same Agent call shape.
     """
 
     # Verbatim from personal_exp/laya/ingest/schema.py
@@ -268,35 +204,147 @@ class LayaReranker:
         "instructions": "Is this graph node needed to answer the user's question?",
     }
 
-    def __init__(self, model_dir: str | None = None, device: str = "cpu",
-                 batch_size: int = 8) -> None:
-        self.model_dir = model_dir
-        self.device = device
+    def __init__(
+        self,
+        model_dir: str | None = None,
+        device: str | None = None,
+        batch_size: int = 8,
+        *,
+        agent_factory: Callable[[str, str], object] | None = None,
+    ) -> None:
+        self.model_dir = model_dir or os.getenv("LAYA_MODEL_DIR")
+        self.device = device or os.getenv("LAYA_DEVICE", "cpu")
         self.batch_size = batch_size
+        self._agent_factory = agent_factory
         self._agent = None
+        self._question = None
+        self._model_version = None
+        self._lock = threading.Lock()
+
+    def _load(self):
+        if self._agent is not None:
+            return self._agent
+        if not self.model_dir:
+            raise RuntimeError("LAYA_MODEL_DIR is required when NEURON_RERANK=laya")
+        model_dir = Path(self.model_dir).expanduser()
+        question_path = model_dir / "questions.json"
+        if not question_path.is_file():
+            raise RuntimeError(f"Laya checkpoint is missing questions.json: {model_dir}")
+        questions = json.loads(question_path.read_text())
+        trained_question = questions.get("retrieval_relevance")
+        if trained_question != self.RETRIEVAL_RELEVANCE_QUESTION:
+            raise RuntimeError(
+                "Laya retrieval_relevance schema does not match the trained Neuron contract"
+            )
+
+        if self._agent_factory is None:
+            try:
+                import laya
+            except ImportError as exc:
+                raise RuntimeError(
+                    "NEURON_RERANK=laya requires the `laya` package in the Neuron runtime"
+                ) from exc
+            self._agent = laya.Agent(str(model_dir), device=self.device)
+        else:
+            self._agent = self._agent_factory(str(model_dir), self.device)
+
+        self._question = trained_question
+        version_material = question_path.read_bytes()
+        config_path = model_dir / "rl_agent_config.json"
+        if config_path.is_file():
+            version_material += config_path.read_bytes()
+        self._model_version = hashlib.sha256(version_material).hexdigest()[:12]
+        return self._agent
 
     def score(self, question: str, candidates: list[RerankCandidate]) -> list[RerankScore]:
-        raise NotImplementedError(
-            "LayaReranker.score is a shape-only stub (25-plan.md §2.1's Laya "
-            "adapter; full integration is §5.3/§10, out of this task's scope). "
-            "A real implementation would: (1) lazily load "
-            "`laya.Agent(self.model_dir, device=self.device)` once per process, "
-            "matching personal_exp/laya/graph_view/reranker.py's "
-            "`LayaRetriever._load`; (2) build one state dict per candidate as "
-            "`{'question': question, 'node': candidate.window}`, matching "
-            "personal_exp/laya/ingest/schema.py's own state-shape comment for "
-            "`retrieval_relevance` verbatim; (3) call `self._agent.predict_batch("
-            "states, {'retrieval_relevance': self.RETRIEVAL_RELEVANCE_QUESTION}, "
-            "batch_size=self.batch_size, sort_by_length=len(states) > "
-            "self.batch_size)`, matching personal_exp/laya/graph_view/"
-            "reranker.py's real (working, in that sibling repo) call shape; "
-            "(4) read each prediction's `answers['retrieval_relevance']['noul']` "
-            "as the RerankScore.score. Not implemented here because the `laya` "
-            "package and the trained model/laya-ingest checkpoint are not a "
-            "Neuron dependency and live outside this repo (personal_exp/laya "
-            "was read-only for this task) -- wiring them in for real is "
-            "25-plan.md §5.3/§10, a separate task."
+        if not candidates:
+            return []
+        states = [{"question": question, "node": candidate.window} for candidate in candidates]
+        with self._lock:
+            agent = self._load()
+            predictions = agent.predict_batch(
+                states,
+                {"retrieval_relevance": self._question},
+                batch_size=self.batch_size,
+                sort_by_length=len(states) > self.batch_size,
+            )
+        if len(predictions) != len(candidates):
+            raise RuntimeError(
+                f"Laya returned {len(predictions)} predictions for {len(candidates)} candidates"
+            )
+        scores = [
+            RerankScore(
+                uid=candidate.uid,
+                score=float(prediction["answers"]["retrieval_relevance"]["noul"]),
+                model="laya/retrieval_relevance",
+                model_version=self._model_version or "unknown",
+            )
+            for candidate, prediction in zip(candidates, predictions)
+        ]
+        _log_scores(scores)
+        return scores
+
+
+def assign_roles(
+    scores: list[RerankScore],
+    candidates: list[RerankCandidate],
+    *,
+    direct_threshold: float,
+    bridge_threshold: float,
+    bridge_limit: int,
+) -> list[RerankDecision]:
+    """Turn probabilities into query-local direct/bridge/temporal roles.
+
+    Temporal and exact deterministic lanes survive even with a low semantic
+    score. Rejected candidates above the bridge floor remain expansion seeds;
+    if none clears that floor, the best ``bridge_limit`` rejected candidates
+    are retained so a weak first hop cannot make a valid second hop
+    unreachable.
+    """
+    by_uid = {candidate.uid: candidate for candidate in candidates}
+    ranked = sorted(scores, key=lambda item: item.score, reverse=True)
+    provisional: list[RerankDecision] = []
+    rejected: list[RerankScore] = []
+    for score in ranked:
+        candidate = by_uid.get(score.uid)
+        if candidate is None:
+            continue
+        methods = set(candidate.methods)
+        if "time_window" in methods:
+            role = RetrievalRole.TEMPORAL_CONTEXT
+        elif methods & {"named_entity", "pair"} or score.score >= direct_threshold:
+            role = RetrievalRole.DIRECT_EVIDENCE
+        elif score.score >= bridge_threshold:
+            role = RetrievalRole.BRIDGE_CANDIDATE
+        else:
+            role = RetrievalRole.IRRELEVANT
+            rejected.append(score)
+        provisional.append(RerankDecision(
+            uid=score.uid, score=score.score, role=role,
+            model=score.model, model_version=score.model_version,
+        ))
+
+    ranked_bridge_uids = [
+        item.uid for item in provisional
+        if item.role == RetrievalRole.BRIDGE_CANDIDATE
+    ][:bridge_limit]
+    bridge_count = len(ranked_bridge_uids)
+    fallback_bridge_uids = {
+        item.uid for item in rejected[:max(0, bridge_limit - bridge_count)]
+    }
+    allowed_bridge_uids = set(ranked_bridge_uids) | fallback_bridge_uids
+    return [
+        RerankDecision(
+            uid=item.uid, score=item.score,
+            role=(RetrievalRole.BRIDGE_CANDIDATE
+                  if item.uid in allowed_bridge_uids
+                  else RetrievalRole.IRRELEVANT
+                  if item.role == RetrievalRole.BRIDGE_CANDIDATE
+                  else item.role),
+            model=item.model, model_version=item.model_version,
         )
+        for item in provisional
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { AlertTriangle, BookOpenText, BrainCircuit, Database, Download, FileText, FlaskConical, GitBranch, Github, GitFork, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat } from "./api";
+import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat, setReranker } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import EntityPanel from "./components/EntityPanel";
 import OntologyPanel from "./components/OntologyPanel";
@@ -127,6 +127,7 @@ export default function App() {
   const [retrievalUsage, setRetrievalUsage] = useState<TokenUsage>(EMPTY_TOKEN_USAGE);
   const [clearing, setClearing] = useState(false);
   const [graphLayer, setGraphLayer] = useState<GraphLayer>("all");
+  const [rerankerBusy, setRerankerBusy] = useState(false);
 
   const reportIngestionUsage = useCallback((usage: IngestionTokenUsage) => {
     setIngestionUsage((current) => ({ ...current, [usage.provider]: usage }));
@@ -249,6 +250,20 @@ export default function App() {
     [config],
   );
 
+  const toggleReranker = useCallback(async (enabled: boolean) => {
+    if (!config || rerankerBusy || chatBusy) return;
+    setRerankerBusy(true);
+    setChatError(null);
+    try {
+      const result = await setReranker(enabled);
+      setConfig((current) => current ? { ...current, reranker: result.reranker } : current);
+    } catch (reason) {
+      setChatError(reason instanceof Error ? reason.message : "Could not change the Laya setting.");
+    } finally {
+      setRerankerBusy(false);
+    }
+  }, [config, rerankerBusy, chatBusy]);
+
   const graphSummary = useMemo(() => {
     const visible = graphForLayer(graph, graphLayer);
     if (!visible) return "Loading the knowledge graph";
@@ -353,6 +368,9 @@ export default function App() {
           activeHighlight={highlight}
           onSend={(message) => void askAgent(message)}
           onClear={clearChat}
+          reranker={config?.reranker ?? null}
+          rerankerBusy={rerankerBusy}
+          onToggleReranker={(enabled) => void toggleReranker(enabled)}
           onShowPath={(value) => {
             setHighlight(value);
             setSelection(null);

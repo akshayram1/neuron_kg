@@ -26,6 +26,7 @@ import type {
   StoryRun,
   StoryState,
   StoryWisdomProposal,
+  RerankerStatus,
 } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -39,6 +40,14 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 export function getConfig(): Promise<AppConfig> {
   return request<AppConfig>("/api/config");
+}
+
+export function setReranker(enabled: boolean): Promise<{ reranker: RerankerStatus }> {
+  return request("/api/config/reranker", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
 }
 
 export function getGraphs(): Promise<{ graphs: GraphInfo[] }> {

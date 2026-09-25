@@ -51,7 +51,7 @@ The plan fixes these in eight phases. The first four deliver most of the value:
 |---|---|---|
 | 0 | Refresh both current baselines and build a mixed 200–300 question eval set | Nothing else can be judged without comparable evidence |
 | 1 | Token-bounded context, wide pool, 1-hop typed expansion, authority tiers | Largest retrieval and cost win, no new model needed |
-| 2 | Compare current RRF, bounded expansion, a generic cross-encoder and Laya on the same candidates | Selects the cheapest reranker that meets quality and latency goals |
+| 2 | Add Laya relevance roles and bounded retry over the wide RRF pool | Rejects answer noise without throwing away useful graph or temporal bridges |
 | 3 | Minimal SQLite review queue, then Laya triage in shadow and selective-ingestion changes only where measured gaps justify them | Gives later model decisions a safe landing place and avoids duplicating current ingestion work |
 | 4 | Scoped entity identities + escalating resolution + polarity veto + review-only Decision merges | Stops namespace collisions and wrong merges |
 | 5 | Writer contract first, then temporal facts for text: stated vs record time, classification-before-write, correction semantics and freshness | Answers both "what was true when" and "what did we believe when" |
@@ -64,7 +64,7 @@ What we take from other systems, in one line each:
 - **DICE** — escalating resolver with the exactly-one rule, polarity veto, four clocks, three kinds of conflict, admission gates, dry-run + audit for merges, query-time authority, two-hop candidate links.
 - **CoEvoKG** — generate verifiable multi-hop questions from graph chains; path-support scoring; verified write-back.
 - **GraphImmune** — measure isolated nodes and contradictions; non-destructive repairs behind approval.
-- **NeuralMemory (brain)** — route by query type; the rest is rejected.
+- **NeuralMemory (brain)** — bounded retry when first-pass evidence is insufficient; the rest is rejected.
 - **Laya** — the component that makes calibrated, cheap decisions at four points in Neuron.
 - **Utopia** — already adopted in the Sep 15 upgrade; nothing new taken.
 
@@ -246,8 +246,8 @@ For each source: what it is, what it does well, what we take, what we reject, an
 ### 4.3 Laya (`personal_exp/laya`) — the decision component
 
 - **What it is:** 421M non-autoregressive classifier (ModernBERT-large + decision head). Answers choice / yes-no / score questions with calibrated confidence in one forward pass. Fine-tuned on synthetic + Nilus data; ECE ≈ 0.019 on validation.
-- **Strong:** cheap, repeatable, calibrated; ideal as a cross-encoder reranker and a gate.
-- **Weak:** cannot generate or find entities; 512-token input; no batch API in the code we saw; synthetic-only data for `same_entity` and `fact_update`.
+- **Strong:** repeatable and calibrated; its batched `predict_batch` API can score a frozen candidate pool with the trained `retrieval_relevance` question.
+- **Weak:** cannot generate or find entities; 512-token input; CPU throughput and real-Neuron relevance quality still need measurement; synthetic-only data for `same_entity` and `fact_update`.
 - **Take:** four integration points — rerank (`retrieval_relevance`), triage (`chunk_type`, `has_durable_fact`), resolution gray zone (`same_entity`), fact revision (`fact_update`). Plus `relation_type` for candidate links.
 - **Reject:** the separate Laya graph pipeline (`ingest_to_falkor.py`, Knowledge/Wisdom template layers). Neuron already has Finding/Wisdom and a better fact graph.
 
@@ -319,9 +319,9 @@ For each source: what it is, what it does well, what we take, what we reject, an
 ### 4.9 NeuralMemory (`personal_exp/brain`)
 
 - **What it is:** spreading-activation memory with a query-type cascade, 7 retrievers, RRF, lateral inhibition, Hebbian write-back on read.
-- **Strong:** routing by query type (exact / temporal / causal / semantic) before deciding how much work to do.
+- **Strong:** an additional bounded retrieval round when first-pass evidence is insufficient.
 - **Weak:** ~1,150-line `query()`, silent exception swallowing, non-determinism by design (priming, session EMA), only top-5 fibers reach the context.
-- **Take:** query-type routing, implemented as a Laya `choice` question (Phase 2.5).
+- **Take:** the bounded retry idea, driven by first-pass evidence sufficiency rather than a learned tool router (Phase 2.2).
 - **Reject:** everything else. Park the repo.
 
 ### 4.10 llmtoslm
@@ -341,9 +341,9 @@ For each source: what it is, what it does well, what we take, what we reject, an
 |---|---|---|---|---|---|---|
 | Lexical + vector fusion | BM25 + 2 vector channels, tuned RRF | Hybrid RRF recipes | Router over vector / entity / graph / temporal / hybrid | NeuralMemory: 7 retrievers + RRF | Keep as is | Neuron |
 | Candidate cut | Fixed top 6 by rank | Top-k | `topK` clamped | NeuralMemory: top-5 fibers | Pool of 40, calibrated scorer threshold plus diversity/token/latency caps | Pasted plan + Phase 2 trial |
-| Reranker | None | Optional cross-encoder | None | — | Winner of a controlled generic cross-encoder vs Laya comparison; RRF remains fallback | Laya + standard retrieval baseline |
+| Reranker | None | Optional learned scorer | None | — | Laya `retrieval_relevance` assigns query-local evidence/bridge roles; RRF remains fallback | Laya |
 | Graph expansion | None (neighbour names only) | BFS in some recipes | Neighbourhood walk with depth clamp and authority floor | NeuralMemory: spreading activation | 1 hop, typed edges, hub labels excluded, per-seed cap, authority floor | DICE |
-| Query routing | Structured regex path + intent keywords | By search config | By `RetrievalMode` | NeuralMemory cascade | Laya `query_type` (optional) | NeuralMemory |
+| Query routing | Structured regex path + intent keywords | By search config | By `RetrievalMode` | NeuralMemory cascade | Run every applicable lane; deterministic applicability rules replace a learned tool router | Neuron + NeuralMemory critique |
 | Trust at read time | Prompt rule only | — | Authority tiers at query time | — | `extraction_method` → tier; used in expansion and tie-breaks | DICE |
 | Two-entity lookup | — | — | `withAllEntities` | — | Records `MENTIONED_IN` by both named nodes | DICE |
 | Context budget | None | — | — | NeuralMemory: value-per-token budget | Per-block token window + total token budget | NeuralMemory / Neuron logs |
@@ -458,17 +458,19 @@ write edges (`revive=False` for text/history) + FactHistory + ledger + discard l
 ```
 question
   │
-  ├─ 0. (optional) Laya query_type router                           (Phase 2.5)
-  ├─ 1. structured path (resolve_structured) ── complete → answer   (exists)
-  ├─ 2. anchors: named persons, two-entity lane, time window        (exists + Phase 1.7)
-  ├─ 3. candidate pool: hybrid_search(limit=40)                     (Phase 1.1)
-  ├─ 4. 1-hop typed expansion from top 8 seeds, authority floor      (Phase 1.3–1.4)
-  ├─ 5. selected reranker: generic cross-encoder or Laya             (Phase 2)
-  │      calibrated cut, diversity and latency bounds
+  ├─ 1. structured path (resolve_structured) ── complete → answer    (exists)
+  ├─ 2. run all applicable lanes: RRF pool, person, pair, temporal,
+  │      Wisdom and Finding                                          (Phase 1 + 2)
+  ├─ 3. Laya `retrieval_relevance` over text + linked/temporal facts (Phase 2.1)
+  │      roles: direct evidence · bridge · temporal · irrelevant
+  ├─ 4. if evidence is thin: expand only direct/temporal/bridge seeds
+  │      and rescore; at most two bounded rounds                     (Phase 2.2)
+  ├─ 5. direct + temporal evidence only; bridge/rejected candidates
+  │      never reach the answer model                               (Phase 2.2)
   ├─ 6. evidence: best token window per block + total token budget   (Phase 1.2)
   │      facts show valid_at_basis, last_confirmed, decay class      (Phase 5)
   ├─ 7. answer LLM (sol or luna by A/B)                             (Phase 1.6)
-  └─ 8. (Phase 7) path-support check, optional second round
+  └─ 8. (Phase 7) path-support verification
 ```
 
 ---
@@ -653,56 +655,65 @@ If the question contains two anchors that resolve to nodes (two ticket keys, a k
 
 ---
 
-### Phase 2 — Reranker bake-off: generic cross-encoder vs Laya
+### Phase 2 — Laya relevance gate with bounded bridge expansion
 
-**Goal:** select the cheapest scorer that closes the rank-cut gap without violating CPU latency or context limits.
+**Goal:** close the rank-cut gap while keeping query-rejected nodes available as bounded graph or temporal bridges.
 **Fixes:** P1, P2; starts P11.
+**Implementation status (25 Sep 2026):** the real batched Laya adapter, query-local roles, all-lane pool, conditional bounded expansion, score/rescore flow, RRF fallback and evaluation trace are implemented. Threshold calibration, deployment latency measurement and promotion remain open.
 
-Run four variants over the same frozen questions, candidate UIDs, candidate text windows, expansion settings and final token budget:
+Run three variants over the same frozen questions, initial candidate UIDs, candidate text windows and final token budget:
 
 | Variant | Retrieval / scoring |
 |---|---|
 | A | Current RRF and top-6 behavior |
-| B | Phase 1 bounded context + expansion, RRF final order |
-| C | B + a generic pretrained cross-encoder |
-| D | B + Laya `retrieval_relevance` |
+| B | Phase 1 wide pool + unconditional one-hop expansion, RRF final order |
+| C | All applicable lanes → Laya roles → conditional bounded expansion → Laya rescore |
 
-Report category-level candidate recall, final recall, post-packing evidence recall, MRR, answer/abstention accuracy, calibration, p50/p90 latency, peak memory and cost. Benchmark C and D on the same available CPU; GPU results are a separate operational profile. If the generic cross-encoder is within the predeclared quality margin of Laya and materially faster on CPU, choose it as the retrieval default. Laya can still serve triage, entity-review and fact-update decisions.
+Report category-level candidate recall, final recall, post-packing evidence recall, bridge recovery rate, MRR, answer/abstention accuracy, calibration, p50/p90 latency, peak memory and cost. CPU and GPU are separate operational profiles. Promote C only when it improves evidence and answer quality within the deployment latency budget; RRF remains the failure fallback.
 
-#### 2.1 Common reranker interface — new `graph/rerank.py` (M)
+#### 2.1 Laya scorer and query-local roles — `graph/rerank.py` (M)
 
-Both implementations accept the same `(question, candidate_window)` records and return a score plus model/version metadata. Candidate windows are token-bounded and frozen before either model runs. Log every candidate score for evaluation and calibration.
+The scorer accepts frozen `(question, candidate_window)` records and returns a probability plus model/version metadata. The candidate window contains the node text and a small ACL-filtered preview of linked and temporal facts, including historical intervals relevant to `at` / `as_of`. Log every score for evaluation and calibration.
 
-The final selector uses a threshold tuned on dev, followed by diversity and hard resource caps (`min_keep`, `max_keep`, token budget). The count caps protect latency and prompt size; they do not define relevance.
+Use the trained schema exactly: state `{"question", "node"}` and question `retrieval_relevance`. Load one process-level `laya.Agent` lazily and call `predict_batch`; do not invent an untrained role-choice prompt.
 
-For Laya, the instruction text and state format must match its trained schema exactly. Load one process-level agent. For the generic cross-encoder, pin the model and tokenizer version and batch candidates.
+Assign roles by deterministic policy around the probability and retrieval method:
 
-#### 2.2 Wiring — `graph/chat.py` → `retrieve` (S)
+- `direct_evidence` — clears the tuned threshold, or is a deterministic person/pair match;
+- `temporal_context` — came from the applicable time-window lane and remains visible even when semantic wording is weak;
+- `bridge_candidate` — a capped set below the direct threshold, retained only as expansion seeds; prefer candidates above the bridge floor, then backfill from the strongest rejected candidates so a weak first hop cannot make a valid second hop unreachable;
+- `irrelevant` — excluded from both the answer and expansion.
 
-`NEURON_RERANK=off|cross_encoder|laya` chooses the scorer. Named-person and time-window lanes remain deterministic reserved candidates but still consume the final evidence-token budget. The structured path still returns before model reranking.
+Rejection is query-local. Never store “rejected” on a node or fact, and never use a previous query's rejection as a permanent negative signal.
+
+#### 2.2 Two-pass retrieval — `graph/chat.py` → `retrieve` (M)
+
+1. Return immediately for a complete structured result.
+2. Run every applicable lane: wide hybrid RRF, Wisdom, Finding, pair, named-person and time-window. Applicability is deterministic; there is no learned tool selector.
+3. Score the deduplicated pool once with Laya.
+4. If accepted evidence is below `NEURON_RERANK_MIN_DIRECT`, expand only direct, temporal and bridge candidates with the typed authority-bounded graph expansion.
+5. Score only newly discovered neighbours. Repeat up to `NEURON_RERANK_MAX_ROUNDS`; never revisit a UID.
+6. Send only direct and temporal candidates to token packing. Bridge and irrelevant candidates never reach the answer model.
+
+On scorer/package/checkpoint failure, log the failure and fall back to the Phase 1 RRF + expansion order. The structured path is never model-gated.
 
 #### 2.3 Serving and latency (S–M)
 
-- Measure the actual post-expansion candidate count. A pool of 40 plus typed neighbours and knowledge lanes can exceed 40 scorer calls.
-- Benchmark cold start, warm p50/p90, batch throughput and peak memory on deployment-class CPU. Do not extrapolate from per-call GPU latency.
-- A pool of 20 still costs about 7.4 seconds at 2.7 sequential Laya decisions/s, before expansion and chat generation. Pool reduction alone is not an acceptable CPU plan.
-- For Laya, implement and verify a padded batch wrapper if the underlying model supports it. Otherwise require GPU or keep Laya off the synchronous retrieval path.
-- On scorer failure or timeout, log the model/version and fall back to the Phase 1 RRF order.
+- Measure first-pass pool size, candidates scored per retry, retry rate, cold start, warm p50/p90, batch throughput and peak memory on deployment-class hardware.
+- Use Laya's real `predict_batch`; verify order and score equality against single-item inference before promotion.
+- Cap bridge seeds, per-seed neighbours, retry rounds, accepted blocks and final evidence tokens independently.
+- If synchronous Laya misses the product latency target, keep `NEURON_RERANK=off` while retaining the RRF path; do not silently lower recall by shrinking the initial pool without measurement.
 
 #### 2.4 Tune and fine-tune (M)
 
-- Choose each model's threshold on the dev split, targeting post-packing evidence recall within 2 points of candidate recall while respecting latency and token budgets.
-- Training labels must be evidence-labelled. Gold nodes/spans are positive; reviewed irrelevant candidates are negative. A candidate absent from the annotated gold chain is **not automatically negative**, because another valid evidence path may exist.
-- Build hard negatives only after human review or deterministic evidence rules. Evaluate once on the frozen grouped test split.
+- Tune the direct threshold, bridge floor, bridge limit, minimum accepted evidence and retry count on the grouped dev split.
+- Labels must distinguish direct evidence, useful bridge, temporal context and irrelevant. Gold nodes/spans are direct positives; a node absent from one annotated chain is **not automatically irrelevant**, because another valid evidence path may exist.
+- Review hard negatives before training. Evaluate once on the frozen grouped test split and report first-pass success separately from bridge-recovered success.
 
-#### 2.5 Query-type router — optional, `graph/chat.py` (M)
-
-Add a Laya `choice` question `query_type` with options `lookup` (a key or a name), `temporal`, `person`, `why` (decision/reasoning), `overview`. Use it to pick: expansion `min_tier` and seed count, whether to boost Decision/Wisdom (`why`), whether to force the time-window lane (`temporal`). Requires training data (label ~300 real or golden questions). Defer if Phase 2.1 already meets the exit criteria.
-
-**Tests:** common input equality for both models; deterministic batching/order; fallback path; `min_keep` and token-budget safety; reserved-lane behavior; Laya instruction equality; pinned cross-encoder model/version.
-**Exit criteria (test split):** choose a scorer only if post-packing evidence recall stays within 2 points of candidate recall, MRR/answer accuracy improve over B, and deployment-class p90 meets the product latency target. Otherwise keep Phase 1 RRF and record that no reranker earned promotion.
-**Risks:** synthetic-trained Laya relevance underperforms; generic cross-encoder scores are not calibrated; CPU serving dominates latency. Mitigate with the same real labels, calibration protocol, batching and explicit no-promotion outcome.
-**Effort:** M (L with the router).
+**Tests:** exact Laya instruction/state equality; deterministic batched order; query-local roles; temporal/exact preservation; rejected-node bridge recovery; bridges never reach the answer; bounded retries and dedupe; scorer-failure RRF fallback; final token-budget safety.
+**Exit criteria (test split):** C improves post-packing evidence recall and answer/abstention accuracy over B, bridge recovery adds true answers without unacceptable false positives, and deployment p90 meets the product target. Otherwise keep Phase 1 RRF and record that Laya did not earn promotion.
+**Risks:** synthetic-trained Laya relevance may not transfer to Neuron; bridge expansion can amplify weak seeds; CPU serving can dominate latency. Mitigate with query-local roles, strict caps, real labels, batching and explicit no-promotion/fallback behavior.
+**Effort:** M.
 
 ---
 
@@ -1101,9 +1112,9 @@ Only start an item here when the eval shows the gap it closes.
 
 After the answer, take the cited blocks (`used_sources`) and score each adjacent pair: 1.0 if an edge connects them, 0.7 if one's name appears in the other's text, 0.5 if both appear in one `SourceRecord`, via one intermediate node at 0.8× the weaker hop, else ε. Path score = geometric mean. Below `NEURON_PATH_MIN=0.4`, mark the answer "low support" in the UI.
 
-#### 7.2 Second retrieval round for multi-hop (M)
+#### 7.2 Path validation for Laya-recovered hops (M)
 
-If the final set is thin (max p < `min_p`) or `query_type == "why"`, extract anchors (ticket keys, file paths, persons) from the top 3 hits and run anchors + pool + rerank once more. Accept second-round hits only if path support with first-round hits ≥ 0.4. Max one extra round. No LLM planner.
+Phase 2 already performs the bounded multi-hop retry. If evaluation shows false bridge recoveries, require each recovered answer candidate to have path support ≥ 0.4 with its direct/temporal/bridge seed before it can reach packing. Keep the Phase 2 round and seed caps; do not add another planner or retrieval round here.
 
 #### 7.3 Verified write-back (S) — CoEvoKG
 
@@ -1188,14 +1199,13 @@ Scoped identity is a real migration, not just an optional field. Start with a dr
 
 | Question | Type | Phase | Call site | Mode at start |
 |---|---|---|---|---|
-| `retrieval_relevance` | noul | 2 | `graph/rerank.py` ← `chat.retrieve` | trial against generic cross-encoder |
+| `retrieval_relevance` | noul | 2 | `graph/rerank.py` ← `chat.retrieve` | measured shadow, then conditional default |
 | `chunk_type` | choice | 3, 5.5 | `semantic_pass.run_semantic_pass` | shadow |
 | `has_durable_fact` | noul | 3 | same | shadow |
 | `same_entity` | noul | 4 | `semantic_pass._write_extraction` | suggest |
 | `fact_update` | choice | 5 | `writer.resolve_text_fact` | suggest |
 | `relation_type` | choice | 6 | `hygiene` candidate links | candidate only |
 | `entity_type` | choice | 4.5 | mention filter (optional) | log only |
-| `query_type` (new) | choice | 2.5 | `chat.retrieve` | optional |
 
 Not used by Neuron: `importance`, `contains_pii` (possible later for ACL/redaction), knowledge/wisdom composite scores from the Laya repo.
 
@@ -1208,7 +1218,6 @@ Not used by Neuron: `importance`, `contains_pii` (possible later for ACL/redacti
 | `same_entity` | synthetic only | Phase 4 review decisions on `POSSIBLY_SAME_AS` |
 | `fact_update` | synthetic only | Phase 5 review decisions; new `newer_state` / `corrects` split |
 | `relation_type` | Nilus edges | Phase 6 link-candidate reviews |
-| `query_type` | none | ~300 labelled questions (golden + real chat logs) |
 
 Hold out a **hand-labelled test set of 200–300 decisions** across these questions that never enters training. Report accuracy and calibration (ECE) per question on it.
 
@@ -1218,7 +1227,7 @@ Hold out a **hand-labelled test set of 200–300 decisions** across these questi
 - Model path from `LAYA_MODEL_DIR` (currently `laya/model/laya-ingest`).
 - Timeout per call and a fallback that never blocks chat or ingest.
 - Per-question temperature (the Laya writeup notes one shared temperature for all yes/no questions softens the others) — apply per-question calibration after inference, fitted on the hand-labelled set.
-- Batch: not available in the reviewed code. If CPU serving is required, write a padded-batch wrapper; verify against single-call outputs before use.
+- Use the public `predict_batch` API with stable input/output order; verify scores against single-item inference before promotion.
 
 ### 10.4 Promotion rule (suggest → auto)
 
@@ -1234,6 +1243,7 @@ A Laya decision type moves from suggest to auto only when, on ≥ 200 reviewed i
 | Final recall | share whose `answer_uid` reaches the answer prompt | 2 |
 | Post-packing evidence recall | share where a labelled supporting span/fact survives the final token pack | 1.2, 2 |
 | Rerank gap | candidate recall − final recall | 2.4 |
+| Bridge recovery rate | questions missed on pass one whose labelled evidence is accepted after a bounded bridge hop | 2.2 |
 | MRR | mean reciprocal rank of `answer_uid` in the final list | 2 |
 | Chain coverage | mean share of chain nodes in the final list | 1.3, 2 |
 | Hidden-edge recall | recall of both chain endpoints when one chain edge is hidden | 1.3, 6.2 |
@@ -1264,11 +1274,13 @@ Results go to `eval/results.md`, one row per run: date, git sha, flags, dev and 
 | `NEURON_EXPAND` | on | 1.3 | 1-hop expansion |
 | `NEURON_EXPAND_SEEDS` / `_PER_SEED` | 8 / 4 | 1.3 | expansion caps |
 | `CHAT_MODEL` | `gpt-5.6-sol` | 1.6 | existing; A/B with luna |
-| `NEURON_RERANK` | off | 2 | `off` \| `cross_encoder` \| `laya` |
-| `NEURON_RERANK_MIN_P` | 0.5 | 2 | probability cut (tune on dev) |
-| `NEURON_RERANK_MAX_KEEP` / `_MIN_KEEP` | 12 / 3 | 2 | bounds |
-| `NEURON_RERANK_TIMEOUT_S` | 5 | 2.3 | fallback trigger |
-| `NEURON_CROSS_ENCODER_MODEL` | pinned after trial | 2 | generic cross-encoder model/version |
+| `NEURON_RERANK` | off | 2 | `off` \| `laya` |
+| `NEURON_RERANK_MIN_P` | 0.5 | 2 | direct-evidence probability cut (tune on dev) |
+| `NEURON_RERANK_BRIDGE_MIN_P` / `_BRIDGE_LIMIT` | 0.2 / 4 | 2 | bounded bridge seed policy |
+| `NEURON_RERANK_MIN_DIRECT` / `_MAX_KEEP` | 2 / 12 | 2 | retry trigger and accepted-evidence cap |
+| `NEURON_RERANK_MAX_ROUNDS` | 2 | 2 | maximum bounded expansion/rescore rounds |
+| `NEURON_RERANK_FACTS` | 6 | 2 | ACL-filtered linked/temporal facts in each scorer window |
+| `NEURON_RERANK_TIMEOUT_S` | 5 | 2.3 | fallback trigger once serving moves to an interruptible worker |
 | `LAYA_MODEL_DIR`, `LAYA_DEVICE` | — / cpu | 2–6 | serving |
 | `NEURON_TRIAGE` | shadow | 3 | `off` \| `shadow` \| `enforce` |
 | `NEURON_RESOLVE_MODE` | suggest | 4 | `suggest` \| `auto` |
@@ -1286,8 +1298,8 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | Chain-generated questions are easier than real questions | medium | mixed frozen set; report real, ambiguous, unanswerable and chain slices separately |
-| Laya relevance underperforms a generic cross-encoder | medium | controlled four-way trial; select neither model unless it earns promotion |
-| CPU latency makes rerank unusable | high on CPU | benchmark batching on deployment hardware; generic cross-encoder option; RRF fallback |
+| Laya relevance underperforms RRF on real Neuron data | medium | controlled A/B/C trial; keep Laya off unless it earns promotion |
+| CPU latency makes rerank unusable | high on CPU | benchmark batching on deployment hardware; RRF fallback |
 | Triage drops real knowledge | medium | shadow mode first; lost-fact rate gate; skipped chunks still searchable |
 | Source eligibility changes raise Pass B cost | medium | require measured yield, retain the budget cap, and report cost per source type |
 | Wrong entity merges | low (with plan) | namespace identity, source-scoped Decisions, polarity veto, exactly-one, review-only Decision merges |
@@ -1305,7 +1317,7 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 
 - Returning to Graphiti or adopting DICE, NeuralMemory or any other framework as a dependency.
 - LLM extraction on every file or every chunk.
-- Open 2-hop expansion at query time.
+- Unbounded or open-ended graph expansion at query time.
 - Running more than one Laya question per candidate at query time.
 - Auto-accepting `same_entity` or `fact_update` before §10.4 is met.
 - Auto-merging Decisions across records; those merges always require review.
@@ -1318,7 +1330,7 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 
 ## 15. Open questions
 
-1. **Retrieval scorer:** Phase 2 decides whether RRF, a generic cross-encoder or Laya earns deployment. GPU availability is an input, not an assumption.
+1. **Retrieval promotion:** Phase 2 decides whether the Laya two-pass path beats the RRF fallback within the deployment latency target. GPU availability is an input, not an assumption.
 2. **Chat model:** sol vs luna after context bounding (Phase 1.6 answers it).
 3. **Who reviews?** The queue needs an owner and a weekly slot, or suggest mode never promotes.
 4. **Source-type yield:** measured durable-fact yield and cost for Jira comments, PR descriptions, commit messages and SourceFiles determine any Phase 3.3 eligibility change.
@@ -1339,7 +1351,7 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 | `graph/chat.py` | 1.1, 1.2, 1.5, 1.7, 2.2, 5.1, 5.5 | pool, budget, lanes, rerank wiring, prompt rules |
 | `graph/text_window.py` (new) | 1.2, 2.1, 4.2, 6.2 | `best_window` |
 | `graph/expand.py` (new) | 1.3, 1.4 | expansion, tiers |
-| `graph/rerank.py` (new) | 2 | common scorer interface, generic cross-encoder, Laya and fallback |
+| `graph/rerank.py` (new) | 2 | Laya adapter, relevance roles and score logging |
 | `graph/semantic_pass.py` | 3.1–3.4, 4.0–4.6, 5.1, 5.5 | measured triage, scoped identity, ladder, dates, decay class |
 | `connectors/core/ledger.py` | 3.0–3.2, 4.5–4.8, 5.2, 6.x | minimal review queue, drop reasons, aliases and audit tables |
 | `graph/jira_pipeline.py`, `graph/bitbucket_pipeline.py` | 3.3 | source eligibility changes only where measurements justify them |
@@ -1360,7 +1372,7 @@ Phase 0  ── refresh Nilus + less_token baselines · mixed grouped eval · pa
    │
 Phase 1  ── token budget · pool 40 · typed expansion · tiers · pair lane · luna A/B
    │
-Phase 2  ── four-way trial: current · bounded expansion · generic cross-encoder · Laya
+Phase 2  ── all applicable lanes · Laya roles · bounded bridge expansion · RRF fallback
    │
 Phase 3  ── minimal review queue · triage shadow → conditional enforce · measured source eligibility
    │
@@ -1370,7 +1382,7 @@ Phase 5  ── writer contract · classify-before-write · state vs correction 
    │
 Phase 6  ── isolated diagnostics · candidate links · pairwise collector · review UI · dashboard
    │
-Phase 7  ── path support · second round · write-back · (local embedding) · (multi-agent, conditional)
+Phase 7  ── path support · recovered-hop validation · write-back · (local embedding) · (multi-agent, conditional)
 ```
 
 Phases 0–2 are the first milestone and choose the retrieval architecture from measurements. Phase 3 installs the minimal review foundation before entity or temporal suggestions. Phases 4–6 carry identity, lifecycle and graph-health work. Phase 7 waits for measured gaps.
@@ -1387,5 +1399,5 @@ Phases 0–2 are the first milestone and choose the retrieval architecture from 
 | DICE | escalating resolver, polarity veto, four clocks, three conflict kinds, gates, collector |
 | Graphiti | date rule for invalidation, out-of-order backfill |
 | CoEvoKG | golden set from graph chains; path support |
-| NeuralMemory | route by query type |
+| NeuralMemory | bounded retry when first-pass evidence is insufficient |
 | llmtoslm | parked |

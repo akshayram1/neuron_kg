@@ -115,6 +115,12 @@ def _no_vector_search(*args, **kwargs):
     raise AssertionError("vector_store.search_above must not be called for this rung")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ladder_tests_from_qdrant(monkeypatch):
+    """Search is faked per test, so constructing a live client is accidental."""
+    monkeypatch.setattr(sp.vector_store, "client", lambda: object())
+
+
 # ------------------------------------------------------------- §4.1 polarity
 
 
