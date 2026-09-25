@@ -138,11 +138,9 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 
 ---
 
-## 6 — Phase 6.5/6.6 (review UI, health dashboard) skipped this wave, off-limits frontend
-**Raised:** 25 Sep 2026
-**Blocks:** nothing broken — a scoping note, not a bug.
-**Question:** §6.5 (`BridgePanel.tsx`, extending the Phase 3 review queue) and §6.6 (health dashboard) both realistically need to touch `demo_ui/frontend/src/App.tsx`/`api.ts` for routing and data-fetching, both currently off-limits (your in-progress Laya UI work). This wave only builds the backend half of Phase 6 (hygiene reporting, candidate generation, duplicate collection) — the frontend pieces are deferred until your frontend work lands, so a new `BridgePanel.tsx` isn't built against a picture of `App.tsx` that's about to change under it.
-**Assumption made for now:** none taken — genuinely skipped, not worked around.
+## 6 — Phase 6.5/6.6 (review UI, health dashboard) — deferred until backend lands, not blocked anymore
+**Raised:** 25 Sep 2026 · **Updated:** 25 Sep 2026 (Laya frontend work committed as `e3ad611` — `App.tsx`/`api.ts` no longer off-limits)
+**Not a question anymore** — this wave still builds the backend half of Phase 6 first (§6.1-§6.4: hygiene reporting, candidate generation, duplicate collection) before touching `BridgePanel.tsx`/the dashboard, simply because the UI needs to know the real shape of `link_candidate`/`duplicate_pair` review data before it can render it meaningfully — not because of any file restriction anymore.
 
 ## 2.1 — `select_final`'s token-budget cap has no data to work with yet
 **Raised:** 25 Sep 2026
