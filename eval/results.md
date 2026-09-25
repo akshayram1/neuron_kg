@@ -182,3 +182,27 @@ Fixed `graph/chat.py:1043` (`_rerank_candidates`): `best_window(question, serial
 Re-ran the same 44-case comparison (`--graph story-20260917-050343-5d26 --k 8 --with-chat --stage-metrics`): **numbers unchanged again** — `candidate_recall=0.4773`, `final_recall=0.0909`, `MRR=0.01388`, total $0.614. Still 31/44 `reranker=laya, rerank_fallback=True`.
 
 **Reason has changed, outcome hasn't:** the crash now happens one step later, at `LayaReranker._load()`, with a clean `RuntimeError: NEURON_RERANK=laya requires the \`laya\` package in the Neuron runtime` — the `laya` package genuinely isn't installed in this venv (confirmed: only exists in `personal_exp/laya`'s own separate `.venv`). The `encoder` bug is real and now fixed, but it was never the only thing standing between this environment and a real Laya score — the package itself needs to be installed, which is the packaging decision already open in `QUERIES.md` ("vendored dependency vs. sidecar service"). Until that's answered, no before/after Laya comparison is possible in this environment — every attempt will keep falling back to RRF, correctly, but silently unless someone reads the logs.
+
+---
+
+## Real before/after Laya accuracy comparison — 25 Sep 2026
+
+After installing the `laya` package (`uv add laya` — public PyPI package, `laya==0.3.20`, Apache-2.0, Convai Innovations; pulls in `torch`/`transformers` as transitive deps) and fixing the `encoder` bug above, `NEURON_RERANK=laya` runs for real: 0/31 applicable cases fell back to RRF (was 31/31 before both fixes). Same 44-question set, same graph, same `--k 8 --with-chat --stage-metrics`.
+
+| | Before (RRF only) | After (real Laya) | Change |
+|---|---|---|---|
+| candidate_recall | 0.4773 | 0.4773 | unchanged (expected — Laya reranks the pool, doesn't change what enters it) |
+| **final_recall** | **0.0909** | **0.2500** | **+175%** |
+| gold_evidence_recall | 0.0909 | 0.2500 | +175% |
+| chain_coverage_mean | 0.0682 | 0.2708 | +297% |
+| **MRR** | **0.01388** | **0.09598** | **+591%** |
+| median latency | 4.5s | 21.3s | +373% |
+| p90 latency | 6.7s | 25.3s | +278% |
+| total cost (44 q) | $0.612 | $1.014 | +66% |
+
+**Real, substantial retrieval-quality improvement from Laya reranking** on this dataset — final recall and MRR both improve markedly, consistent with the two-pass RRF+Laya design (role assignment: `direct_evidence`/`bridge_candidate`/`temporal_context`/`irrelevant`) doing real work once it isn't silently falling back. The cost is real too: CPU-only Laya inference roughly quadruples p90 latency (matches 25-plan.md §2.3's own prediction: "~2.7 sequential Laya decisions/s ... before expansion and chat generation") and adds ~66% to token/API cost (larger evidence context reaching the chat model from better-ranked candidates).
+
+**Caveats, so this isn't over-read:**
+- 44 questions, one graph, one model version (`laya/retrieval_relevance`, `a8eb6fc9503e`) — not yet the full dev/test split or the frozen mixed evaluation set Phase 0.2 calls for.
+- `laya` and its checkpoint were sourced ad hoc from `personal_exp/laya` for this test; the packaging question (vendored vs. sidecar) is still open in `QUERIES.md` — this proves the number is real and worth pursuing, not that today's ad hoc setup is the final deployment shape.
+- Latency at this level (p90 ~25s) needs Phase 2.3's real batching/serving work before this could run synchronously in a live chat path; that phase item is unstarted.
