@@ -41,7 +41,7 @@ What is still weak is **what reaches the answer** and **what happens to knowledg
 1. **Retrieval cuts too early.** Chat keeps the top 6 hits by rank from a pool of 200+ candidates. The right node is often in the pool and is cut at rank 7.
 2. **Isolated nodes stay isolated.** Nodes with no edge (e.g. a Notion page that never states the ticket key) are never pulled in through the graph.
 3. **Chat context is unbounded.** Whole file text goes into the prompt; one logged question used 54,835 input tokens on `gpt-5.6-sol` (≈ $0.22 input for one question).
-4. **We cannot measure progress.** The golden set has 7 questions. Every architecture switch so far (Neuron, Laya graph, llmtoslm, brain/NeuralMemory) was judged by feel.
+4. **We cannot measure progress consistently.** `less_token` has 7 scored questions and `nilus_golden` has 41 scored regression/target questions, but they answer different questions and do not cover the full chat workload. Architecture switches have therefore still been judged on incompatible evidence.
 5. **Text facts never expire.** API facts are superseded correctly, but LLM-extracted Decision/Term/System facts have no contradiction handling, and "when the document was written" is stored as "when the fact became true".
 6. **Entity resolution is one threshold.** A single 0.9 cosine cut, no gray zone, a per-chunk cache, and a real risk of merging a decision with its own negation.
 
@@ -49,13 +49,13 @@ The plan fixes these in eight phases. The first four deliver most of the value:
 
 | Phase | What | Why first |
 |---|---|---|
-| 0 | Build a 200–300 question golden set from graph chains + a hidden-edge test | Nothing else can be judged without it |
-| 1 | Wide candidate pool (40), 1-hop typed expansion, context windowing, authority tiers | Largest retrieval and cost win, no model needed |
-| 2 | Laya `retrieval_relevance` rerank with a probability cut | Replaces the fixed top-6 cut |
-| 3 | Laya triage before LLM extraction, then reopen Pass B for high-signal Jira/Bitbucket text | Brings back "why did we decide X" without the old cost |
-| 4 | Escalating entity resolution + polarity veto + gray-zone review | Stops duplicates and wrong merges |
-| 5 | Temporal facts for text: stated vs record time, `resolve_text_fact`, freshness | Answers "what was true when" and "is this still valid" |
-| 6 | Hygiene job: isolated-node report, candidate links, duplicate collector, review queue | Keeps the graph healthy as it grows |
+| 0 | Refresh both current baselines and build a mixed 200–300 question eval set | Nothing else can be judged without comparable evidence |
+| 1 | Token-bounded context, wide pool, 1-hop typed expansion, authority tiers | Largest retrieval and cost win, no new model needed |
+| 2 | Compare current RRF, bounded expansion, a generic cross-encoder and Laya on the same candidates | Selects the cheapest reranker that meets quality and latency goals |
+| 3 | Minimal SQLite review queue, then Laya triage in shadow and selective-ingestion changes only where measured gaps justify them | Gives later model decisions a safe landing place and avoids duplicating current ingestion work |
+| 4 | Scoped entity identities + escalating resolution + polarity veto + review-only Decision merges | Stops namespace collisions and wrong merges |
+| 5 | Writer contract first, then temporal facts for text: stated vs record time, classification-before-write, correction semantics and freshness | Answers both "what was true when" and "what did we believe when" |
+| 6 | Hygiene job: isolated-node diagnostics, candidate links and pairwise duplicate review | Keeps the graph healthy as it grows |
 | 7 | Path support, multi-hop second round, verified write-back | Only after 0–6 are measured |
 
 What we take from other systems, in one line each:
@@ -96,7 +96,7 @@ All numbers below come from `cost.md` (10 Sep), `cost2.md` (11 Sep), `neuron-upg
 
 The two chat numbers disagree by ~200×. The illustrative figure assumed a model and context size the code does not use by default (`run_chat_turn` defaults to `CHAT_MODEL=gpt-5.6-sol`, and context is not bounded).
 
-### 2.3 Retrieval quality (7-question golden set)
+### 2.3 Retrieval quality (existing eval sets)
 
 | Metric | Before 15 Sep | After 15 Sep |
 |---|---|---|
@@ -104,7 +104,7 @@ The two chat numbers disagree by ~200×. The illustrative figure assumed a model
 | recall@8 | 0.4286 | 0.8571 |
 | Passing questions | 3 / 7 | 6 / 7 |
 
-Good progress, but 7 questions cannot distinguish a real improvement from noise. One question flipping moves recall by 14 points.
+Good progress, but the 7 scored `less_token` questions cannot distinguish a real improvement from noise: one question moves recall by 14 points. The repository also contains `eval/nilus_golden.jsonl` with 41 scored cases (31 controls and 10 ontology targets). That set is valuable as a regression gate, but it was designed for ontology adoption rather than general retrieval quality. Phase 0 keeps both sets and adds a mixed workload instead of replacing them with graph-generated questions alone.
 
 ### 2.4 What the current code does (the parts this plan touches)
 
@@ -114,7 +114,7 @@ Good progress, but 7 questions cannot distinguish a real improvement from noise.
 | Chat retrieval | `graph/chat.py` → `retrieve` | Structured path first; else `hybrid_search(limit=search_limit)`; Wisdom/Finding lanes only when intent keywords match; named-person and time-window lanes prepended |
 | Chat limit | `graph/chat.py` → `run_chat_turn` | `search_limit=6` |
 | Evidence | `graph/chat.py` → `run_chat_turn` | Each block = `hit.summary` (full `search_text`) + all facts from `fetch_entity_detail` |
-| Semantic extraction | `graph/semantic_pass.py` → `run_semantic_pass`, `_call_llm` | `LLM_MODEL` default `gpt-5.6-luna`, `LLM_BUDGET_PER_RUN=200`, `LLM_CONCURRENCY=6`; writes stay on the main thread |
+| Semantic extraction | `graph/semantic_pass.py` → `run_semantic_pass`, `_call_llm` | `LLM_MODEL` default `gpt-5.6-luna`, `LLM_BUDGET_PER_RUN=200`, `LLM_CONCURRENCY=6`; writes stay on the main thread; Jira and Bitbucket already use `selective_chunk_writes`, so some free text can be pending while low-signal chunks become `NOT_APPLICABLE` |
 | Semantic dedup | `semantic_pass.py` → `_write_extraction` + `search.py` → `find_similar_uid` | Merge into an existing node if cosine similarity ≥ 0.9, else `semantic_uid` by normalized name |
 | Semantic fact time | `semantic_pass.py` → `_write_extraction` | `valid_at = source_time` for every LLM fact; `confidence = 0.9` |
 | Endpoint resolution | `semantic_pass.py` → `_resolve_endpoint` | Semantic labels by normalized name; own WorkItem via ledger; Person only via existing ASSIGNED_TO/REPORTED_BY/AUTHORED_BY neighbour; other WorkItems by name are rejected |
@@ -158,21 +158,21 @@ Each problem is written as: **symptom** (what a user sees), **root cause** (wher
 - **Impact:** ≈ $0.22 input per question on sol in that case; more blocks (P1 fix) would make it worse unless bounded first.
 - **Fixed in:** Phase 1.2 (windowing + budget), Phase 1.6 (luna A/B).
 
-### P5 — Progress cannot be measured
+### P5 — Progress cannot be measured on one representative benchmark
 
 - **Symptom:** every approach "sort of works"; the team keeps switching architecture.
-- **Root cause:** `eval/less_token_golden.jsonl` has 7 questions; `eval/argus_golden.jsonl` is similarly small. There is no per-stage metric (was the gold node ever a candidate, or was it ranked out?).
-- **Current behaviour:** decisions between Neuron, Laya-graph, llmtoslm and NeuralMemory were made without a shared benchmark.
+- **Root cause:** `eval/less_token_golden.jsonl` has 7 scored questions and `eval/nilus_golden.jsonl` has 41, but the latter is an ontology-adoption regression set. Neither is a representative mixed chat benchmark. There is no per-stage metric showing whether the evidence was absent, ranked out, or lost during context packing.
+- **Current behaviour:** decisions between Neuron, Laya-graph, llmtoslm and NeuralMemory were made without one shared workload and split discipline.
 - **Impact:** wasted weeks; no evidence to justify cost to management.
 - **Fixed in:** Phase 0.
 
-### P6 — Cheap ingestion lost the "why" knowledge
+### P6 — Selective ingestion coverage is not measured
 
 - **Symptom:** "why did we decide X" fails when X was decided in a Jira comment, a PR description or a commit message.
-- **Root cause:** `cost2.md` trade-off — Jira/Bitbucket/GitHub no longer run `run_semantic_pass`. Only Notion produces Decision/Term/System.
-- **Current behaviour:** 0 semantic entities from Jira and Bitbucket.
-- **Impact:** decisions outside Notion exist only as raw `search_text`.
-- **Fixed in:** Phase 3 (Laya triage makes it affordable to reopen Pass B on high-signal text only).
+- **Root cause:** Jira and Bitbucket now call `selective_chunk_writes`, but the plan has no measured breakdown of which record types become pending, are filtered as deterministic/no-signal, or actually yield durable facts.
+- **Current behaviour:** free text can already reach Pass B; coverage and yield by Jira description/comment, repository/PR description, commit message and SourceFile are not reported together.
+- **Impact:** adding Laya triage or changing record eligibility could duplicate existing filters, raise cost, or remove useful evidence without a measured benefit.
+- **Fixed in:** Phase 3 (shadow comparison against the existing selective filter; change record eligibility only for measured gaps).
 
 ### P7 — Entity resolution is one threshold with known risks
 
@@ -210,7 +210,7 @@ Each problem is written as: **symptom** (what a user sees), **root cause** (wher
 - **Symptom:** "it's not in the graph" with no way to tell whether it was never fetched.
 - **Root cause:** Notion `/v1/search` is documented as incomplete; Bitbucket ingests only HEAD `.py`/`.md` files and the last N commits (default 100); Jira keeps records that left the JQL.
 - **Impact:** retrieval is blamed for misses that are really ingestion misses.
-- **Fixed in:** Phase 0.4.
+- **Fixed in:** Phase 0.6.
 
 ### P11 — Laya is trained but not wired, and its weakest questions have no real data
 
@@ -271,13 +271,13 @@ For each source: what it is, what it does well, what we take, what we reject, an
 - **What it is:** a proposition-based knowledge substrate: LLM extracts natural-language propositions, entities are resolved, propositions are revised against the store, then projected to graph / vector / Prolog / memory.
 - **Strong:** the most carefully reasoned lifecycle and resolution design we reviewed.
 - **Take:**
-  - **Escalating resolver**, cheapest first, early stop, *exactly-one* rule, candidates accumulate for one final arbiter (Phase 4.1).
-  - **Resolution level logging** as the tuning diagnostic (Phase 4.5).
-  - **Tune toward under-merging** — a duplicate can be collected later, a wrong merge cannot be cleanly undone (Phase 4.2).
-  - **Polarity veto** — never merge a claim with its negation (Phase 4.0).
-  - **Run-level session cache** (Phase 4.3).
-  - **Mention filtering** before resolution (Phase 4.4).
-  - **Veto for non-mintable types** (already in `_resolve_endpoint`; Phase 4.6 makes it a tested rule).
+  - **Escalating resolver**, cheapest first, early stop, *exactly-one* rule, candidates accumulate for one final arbiter (Phase 4.2).
+  - **Resolution level logging** as the tuning diagnostic (Phase 4.6).
+  - **Tune toward under-merging** — a duplicate can be collected later, a wrong merge cannot be cleanly undone (Phase 4.3).
+  - **Polarity veto** — never merge a claim with its negation (Phase 4.1).
+  - **Run-level session cache** (Phase 4.4).
+  - **Mention filtering** before resolution (Phase 4.5).
+  - **Veto for non-mintable types** (already in `_resolve_endpoint`; Phase 4.7 makes it a tested rule).
   - **Four clocks**: created / content revised / metadata revised / last accessed; decay anchored on content only (Phase 5.6).
   - **Evidence accumulation** (`reinforceCount`) (Phase 5.7).
   - **Effective confidence** computed at query time; raw confidence never mutates (Phase 5.8).
@@ -313,7 +313,7 @@ For each source: what it is, what it does well, what we take, what we reject, an
 - **What it is:** RL training of 3–8B search agents; a proposer writes multi-hop questions from KG chains, a solver is rewarded for correct answers *and* for a path that the graph supports; verified evidence is written back.
 - **Strong:** verifiable questions from graph chains; path support as geometric mean of per-hop support (one unsupported hop sinks the score); ablation is honest (task generation +1.5, path reward +1.1, write-back +0.6 macro points).
 - **Weak for us:** GRPO training on Wikipedia with GPU clusters; not our problem.
-- **Take:** chain-generated golden set with no-leakage rules (Phase 0.1), path-support check on answers (Phase 7.1), verified write-back as candidate edges (Phase 7.3).
+- **Take:** chain-generated evaluation category with no-leakage rules (Phase 0.3), path-support check on answers (Phase 7.1), verified write-back as candidate edges (Phase 7.3).
 - **Reject:** RL training of any model.
 
 ### 4.9 NeuralMemory (`personal_exp/brain`)
@@ -340,20 +340,20 @@ For each source: what it is, what it does well, what we take, what we reject, an
 | Capability | Neuron today | Graphiti | DICE | Others | **Neuron target** | Idea from |
 |---|---|---|---|---|---|---|
 | Lexical + vector fusion | BM25 + 2 vector channels, tuned RRF | Hybrid RRF recipes | Router over vector / entity / graph / temporal / hybrid | NeuralMemory: 7 retrievers + RRF | Keep as is | Neuron |
-| Candidate cut | Fixed top 6 by rank | Top-k | `topK` clamped | NeuralMemory: top-5 fibers | Pool of 40, cut by Laya probability (max 12, min 3) | Pasted plan + Laya |
-| Reranker | None | Optional cross-encoder | None | — | Laya `retrieval_relevance` | Laya |
+| Candidate cut | Fixed top 6 by rank | Top-k | `topK` clamped | NeuralMemory: top-5 fibers | Pool of 40, calibrated scorer threshold plus diversity/token/latency caps | Pasted plan + Phase 2 trial |
+| Reranker | None | Optional cross-encoder | None | — | Winner of a controlled generic cross-encoder vs Laya comparison; RRF remains fallback | Laya + standard retrieval baseline |
 | Graph expansion | None (neighbour names only) | BFS in some recipes | Neighbourhood walk with depth clamp and authority floor | NeuralMemory: spreading activation | 1 hop, typed edges, hub labels excluded, per-seed cap, authority floor | DICE |
 | Query routing | Structured regex path + intent keywords | By search config | By `RetrievalMode` | NeuralMemory cascade | Laya `query_type` (optional) | NeuralMemory |
 | Trust at read time | Prompt rule only | — | Authority tiers at query time | — | `extraction_method` → tier; used in expansion and tie-breaks | DICE |
 | Two-entity lookup | — | — | `withAllEntities` | — | Records `MENTIONED_IN` by both named nodes | DICE |
-| Context budget | None | — | — | NeuralMemory: value-per-token budget | Per-block window + total char budget | NeuralMemory / Neuron logs |
+| Context budget | None | — | — | NeuralMemory: value-per-token budget | Per-block token window + total token budget | NeuralMemory / Neuron logs |
 | Answer verification | Model self-reports `used_sources` | — | Rationale projector | CoEvoKG: path support | Path-support check (Phase 7) | CoEvoKG |
 
 ### 5.2 Ingestion and extraction
 
 | Capability | Neuron today | Graphiti | DICE | Others | **Neuron target** | Idea from |
 |---|---|---|---|---|---|---|
-| What goes to the LLM | Every Notion chunk; nothing from Jira/Bitbucket | Every episode, several calls | Every chunk | Laya: classify first | Triaged chunks from Notion + Jira descriptions/comments + PR/commit messages | Laya |
+| What goes to the LLM | Chunks admitted by the existing deterministic `selective_chunk_writes` policy across supported sources | Every episode, several calls | Every chunk | Laya: classify first | Existing selective policy plus Laya only if shadow evaluation improves cost without unacceptable fact loss; source coverage changed only from measured gaps | Neuron + Laya |
 | Admission gates | Evidence verbatim, relation allow-list | — | Confidence, evidence, trust, merge, conflict, projection gates; observable | — | Explicit ordered list of 6 gates, all logged | DICE |
 | Schema strictness | Strict via axioms | Custom entity/edge types | STRICT / DEFAULT / RELAXED | — | Keep strict | Neuron |
 | Concurrency | LLM concurrent, writes serial | Concurrent | Extraction concurrent, resolution serial | — | Keep | Neuron = DICE |
@@ -362,7 +362,7 @@ For each source: what it is, what it does well, what we take, what we reject, an
 
 | Capability | Neuron today | Graphiti | DICE | Others | **Neuron target** | Idea from |
 |---|---|---|---|---|---|---|
-| Ladder | Normalized name, then vector ≥ 0.9 | Search + LLM dedupe | Exact → normalized → partial → fuzzy → vector → LLM verify → LLM bake-off | Pasted plan: block → shortlist → classifier | Normalized → alias → vector (exactly one ≥ 0.9) → gray zone 0.75–0.9 → Laya `same_entity` → new | DICE + Laya |
+| Identity / ladder | Name-derived UID, then vector ≥ 0.9 | Search + LLM dedupe | Exact → normalized → partial → fuzzy → vector → LLM verify → LLM bake-off | Pasted plan: block → shortlist → classifier | System/Term identity scoped by namespace; Decision identity scoped to source record + statement; normalized → alias → vector exactly-one → gray zone → review | Neuron + DICE + Laya |
 | Exactly-one rule | No | No | Yes | Margin rule (pasted plan) | Yes | DICE |
 | Gray zone | None | LLM decides | LLM decides | `possibly_same_as` (Laya doc) | `POSSIBLY_SAME_AS` + review queue | Laya doc |
 | Negation guard | None | None | Polarity veto | — | Polarity veto before any merge | DICE |
@@ -392,8 +392,8 @@ For each source: what it is, what it does well, what we take, what we reject, an
 | Candidate links | `derived.py` writes directly | — | Two-hop discovery, review state | Laya doc: cross-record worker | Two-hop + embedding candidates → Laya `relation_type` → review | DICE + Laya |
 | Duplicate cleanup | Write-time only | Write-time LLM | Multi-signal collector, dry-run, trace | — | Multi-signal collector for Decision/Term, dry-run + trace | DICE |
 | Contradiction audit | — | — | Contradiction pass | GraphImmune | Cardinality check from axioms + `DISPUTED_WITH` report | GraphImmune + axioms |
-| Review queue | Planned (`BridgePanel.tsx`), not built | — | Review state on links | GraphImmune: repair workbench | Built, fed by Phases 4–6 | Neuron plan + GraphImmune |
-| Golden set | 7 questions | — | — | CoEvoKG: chain-generated | 200–300 chain questions + hidden-edge test | CoEvoKG |
+| Review queue | Planned (`BridgePanel.tsx`), not built | — | Review state on links | GraphImmune: repair workbench | Minimal SQLite queue + CLI/endpoint before model suggestions; UI later | Neuron plan + GraphImmune |
+| Golden set | 7-question `less_token` set + 41-question Nilus ontology regression set | — | — | CoEvoKG: chain-generated | 200–300 mixed questions: regressions, real workload, unanswerable and chain categories | CoEvoKG + real workload |
 | Stage metrics | Final MRR / recall only | — | — | — | Candidate recall, rerank recall, hidden-edge recall, cost per question | This plan |
 
 ---
@@ -403,7 +403,7 @@ For each source: what it is, what it does well, what we take, what we reject, an
 Every change in §8 must satisfy all of these. A change that breaks one needs an explicit exception in its phase.
 
 1. **Store always; gate edges and model calls.** No model decides whether a record is kept. Raw text is always embedded and searchable. Models decide only which edges exist, which chunks reach the LLM, and what reaches the answer.
-2. **Cut by score, not by rank.** No fixed top-k as the final cut anywhere on the answer path.
+2. **Use calibrated relevance within explicit resource limits.** Prefer a tuned score threshold for relevance, then apply diversity, latency and token caps. A fixed count remains a safety bound, not the primary relevance decision.
 3. **Measure before and after.** Every phase names the metric it moves (§11) and records a before/after row.
 4. **Deterministic first, model last.** A regex, an index lookup or an axiom always runs before Laya; Laya always runs before an LLM.
 5. **Never guess time.** If a date is not stated, it is not invented. Unknown is a value (`ended_unknown`, `undated`).
@@ -429,7 +429,7 @@ PASS A (deterministic, unchanged)
   SourceRecord → structural nodes/edges → exact anchors → embed search_text
   │
   ▼  chunks saved for Pass B (Notion + NEW: Jira description/comments, PR/commit messages)
-GATE 1  Laya triage            chunk_type, has_durable_fact         (Phase 3)
+GATE 1  existing selective policy + Laya shadow triage              (Phase 3)
   │       skip → still embedded, drop reason LAYA_TRIAGE_SKIP
   ▼
 LLM extraction (_call_llm, unchanged prompt/schema)
@@ -439,18 +439,18 @@ GATE 2  evidence verbatim       evidence_in_chunk                    (exists)
 GATE 3  relation allowed        axioms.resolve_direction             (exists)
   │
   ▼
-ENTITY RESOLUTION ladder                                             (Phase 4)
-  mention filter → polarity veto → normalized → alias → vector exactly-one
-  → gray zone → Laya same_entity (suggest: POSSIBLY_SAME_AS) → new
+ENTITY IDENTITY + RESOLUTION                                         (Phase 4)
+  System/Term: namespace + name → alias → vector exactly-one → review
+  Decision: source record + normalized statement → review-only cross-record merge
   │
   ▼
 GATE 4  merge candidate         duplicate → reinforce, no new node   (Phase 4/5)
-GATE 5  conflict classification resolve_text_fact                    (Phase 5)
+GATE 5  conflict classification before any write                      (Phase 5)
           Laya fact_update + Graphiti date rule
 GATE 6  projection eligibility  low confidence → candidate, not live (Phase 5)
   │
   ▼
-write edges (upsert_fact_edges) + FactHistory + ledger edges + discard log
+write edges (`revive=False` for text/history) + FactHistory + ledger + discard log
 ```
 
 ### 7.2 Retrieval (after the plan)
@@ -463,9 +463,9 @@ question
   ├─ 2. anchors: named persons, two-entity lane, time window        (exists + Phase 1.7)
   ├─ 3. candidate pool: hybrid_search(limit=40)                     (Phase 1.1)
   ├─ 4. 1-hop typed expansion from top 8 seeds, authority floor      (Phase 1.3–1.4)
-  ├─ 5. Laya rerank: retrieval_relevance on every candidate          (Phase 2)
-  │      keep p ≥ min_p, max 12, min 3
-  ├─ 6. evidence: best_window per block + total char budget          (Phase 1.2)
+  ├─ 5. selected reranker: generic cross-encoder or Laya             (Phase 2)
+  │      calibrated cut, diversity and latency bounds
+  ├─ 6. evidence: best token window per block + total token budget   (Phase 1.2)
   │      facts show valid_at_basis, last_confirmed, decay class      (Phase 5)
   ├─ 7. answer LLM (sol or luna by A/B)                             (Phase 1.6)
   └─ 8. (Phase 7) path-support check, optional second round
@@ -486,11 +486,35 @@ Each phase lists: **goal**, **problems fixed**, **current vs target**, **changes
 
 | | Current | Target |
 |---|---|---|
-| Golden questions | 7 (`less_token_golden.jsonl`), similar size for `argus_golden.jsonl` | 200–300, generated from graph chains, 20–30 hand-checked |
-| Stage metrics | Final MRR / recall@8 | Candidate recall@40, rerank recall, MRR, hidden-edge recall, tokens and $ per question |
+| Evaluation | 7 scored `less_token` questions; 41 scored Nilus ontology-regression questions; small Argus set | 200–300 mixed questions, while preserving each existing set as a separately reported regression slice |
+| Stage metrics | Final MRR / recall@8 | Candidate recall, rerank recall, post-packing evidence recall, MRR, hidden-edge recall, tokens and $ per question |
 | Coverage | Unknown | Provider count vs ledger count per sync |
 
-#### 0.1 Chain-generated golden set — new `scripts/build_chain_golden.py` (M)
+#### 0.1 Refresh the current baselines (S)
+
+Run the current code without retrieval changes on:
+
+- all 41 scored entries in `eval/nilus_golden.jsonl`, preserving separate `control` and `target` results;
+- all scored entries in `eval/less_token_golden.jsonl`;
+- `argus_golden.jsonl` as a separate compatibility slice where its graph is available.
+
+Record date, git SHA, graph snapshot/collection, flags, model, candidate/final metrics, token usage, latency and cost in `eval/results.md`. Do not combine datasets with different purposes into one headline score.
+
+#### 0.2 Mixed evaluation set (M)
+
+Build a 200–300 question set with an explicit `category` and evidence annotations:
+
+1. **Existing regressions** — retain the Nilus, `less_token` and Argus cases without rewriting their expected answers.
+2. **Real workload questions** — de-identified chat questions where available, plus hand-written equivalents covering key/name lookup, explanation/"why", temporal, person/activity and overview queries.
+3. **Ambiguous questions** — cases with multiple plausible entities or insufficient qualifiers. The expected result may be a clarification rather than a node.
+4. **Unanswerable questions** — the evidence is absent from the authorized graph. The expected result is abstention; these measure false-positive answers.
+5. **Chain questions** — generated multi-hop questions as a distinct category, never treated as the whole benchmark.
+
+Split dev/test by project or connected evidence group so near-duplicate records and adjacent chain nodes cannot cross the split. Tune thresholds on dev only. Keep a frozen hand-labelled test set and report every category separately.
+
+Each mixed-set row records `category`, `project_or_evidence_group`, `expected_mode` (`answer|abstain|clarify`), zero or more acceptable `answer_uids`, and labelled support spans/fact UIDs. This makes post-packing evidence recall and abstention measurable without pretending every question has exactly one node answer.
+
+#### 0.3 Chain-generated category — new `scripts/build_chain_golden.py` (M)
 
 1. **Sample chains** from asserted edges only (`r.derived = false`, `r.invalid_at IS NULL`), 2–3 hops, along the relations that carry meaning:
    ```
@@ -500,7 +524,7 @@ Each phase lists: **goal**, **problems fixed**, **current vs target**, **changes
    ```
    Exclude `Repository`, `Project`, `Workspace`, `SourceRecord` as intermediate nodes (hubs). One chain per start node per relation pattern to avoid over-sampling popular nodes.
 2. **Generate one question per chain** with one LLM call (luna is enough). Prompt rules, taken from CoEvoKG:
-   - no chain entity named verbatim (no ticket key, no file path, no person's full name);
+   - generate both indirect questions and realistic anchored questions; mark the variant explicitly;
    - the answer is exactly one node on the chain (not always the last one);
    - answering requires at least two hops;
    - one concise answer.
@@ -511,17 +535,17 @@ Each phase lists: **goal**, **problems fixed**, **current vs target**, **changes
    {"id": "c-0142", "question": "...", "answer_uid": "...", "chain_uids": ["...", "...", "..."],
     "chain_relations": ["DOCUMENTS", "IMPLEMENTS"], "hops": 2, "generator": "chain-v1"}
    ```
-6. **Split** by chain start node: 70% dev (used for tuning thresholds), 30% test (reported only). Never tune on test.
+6. **Split** by project/evidence group using the same split map as the mixed set. Never tune on test.
 
 Cost: ~300 short LLM calls, one time.
 
-#### 0.2 Hidden-edge test — in the eval harness (S)
+#### 0.4 Hidden-edge test — in the eval harness (S)
 
 For each chain question, run retrieval twice: normal, and with one chain edge excluded from expansion (pass `exclude_edges={(from_uid, rel, to_uid)}` to the expansion step added in Phase 1.3). Report recall of both endpoints with the edge hidden. Before Phase 1 there is no expansion, so the two runs are identical — that is the baseline.
 
 This is the direct measurement of the isolated-node problem (P3).
 
-#### 0.3 Stage metrics — the harness that calls `retrieve()` (S)
+#### 0.5 Stage and packing metrics — the harness that calls `retrieve()` (S)
 
 Record per question:
 
@@ -529,20 +553,22 @@ Record per question:
 |---|---|
 | `candidate_uids` | Everything that entered the pool (before rerank) |
 | `final_uids` | What reached the answer prompt |
+| `packed_uids` | Nodes with at least one evidence span that survived the final token pack |
 | `gold_in_candidates` | Answer node present before rerank |
 | `gold_in_final` | Answer node present after rerank |
+| `gold_evidence_in_pack` | A labelled supporting span, fact or citation survived packing; a node whose useful evidence was truncated counts as a miss |
 | `gold_rank_final` | Rank in final list (for MRR) |
 | `chain_coverage` | Fraction of chain nodes in final list |
 | `input_tokens`, `output_tokens`, `usd` | From `TokenUsage` |
 
-Keep `retrieve()` as the measured function (it already includes structured and named-person lanes; the docstring explains why measuring `hybrid_search` alone reported false losses).
+Keep `retrieve()` as the retrieval measurement boundary, then separately measure the evidence pack produced by `run_chat_turn`. Candidate recall and post-packing evidence recall must never be conflated.
 
-#### 0.4 Sync coverage report — connector routes (S)
+#### 0.6 Sync coverage report — connector routes (S)
 
 After each sync, log and store in the ledger: provider-reported total (when the API gives one), fetched count, ledger count, skipped-by-rule count (e.g. Bitbucket non-`.py`/`.md`, commits beyond N). Surface it in `SyncProgress.tsx`.
 
-**Exit criteria:** baseline row recorded in `eval/results.md` for the current code: candidate recall@40 (pool before cut), final recall, MRR, hidden-edge recall, median and p90 tokens per question, $ per question.
-**Risks:** generated questions too easy → check the solver success rate; if > 85% on the current system, raise hop count or tighten the leakage rule.
+**Exit criteria:** current-code baseline rows recorded for Nilus and `less_token`; a frozen mixed test split exists; every result reports candidate, final and post-packing evidence recall plus MRR, abstention accuracy, median/p90 tokens, latency and cost.
+**Risks:** generated questions too easy or too unlike real use → report them as a separate slice and require real, ambiguous and unanswerable categories in the frozen test set.
 
 ---
 
@@ -551,12 +577,14 @@ After each sync, log and store in the ledger: provider-reported total (when the 
 **Goal:** stop cutting relevant nodes, pull neighbours in through the graph, and bound the context.
 **Fixes:** P1 (partially), P3 (partially), P4.
 
+Implementation order inside this phase is 1.2 first, then 1.1/1.3: the token pack must be bounded before a wider pool or expansion can reach production.
+
 | | Current | Target |
 |---|---|---|
 | Pool reaching the cut | 6 | 40 |
 | Neighbours as candidates | No | 1 hop, typed, capped |
-| Evidence per block | Full `search_text` | Best window (~2,000 chars) |
-| Total context | Unbounded | ~40,000 chars |
+| Evidence per block | Full `search_text` | Best token window with a labelled supporting span where available |
+| Total context | Unbounded | Explicit input-token budget |
 | Trust in expansion | None | Authority floor by tier |
 
 #### 1.1 Wide pool — `graph/chat.py` → `retrieve` (S)
@@ -565,13 +593,14 @@ In the `else` branch (no knowledge-layer intent), call `hybrid_search(..., limit
 
 Until Phase 2 lands, the final cut is `candidates[:search_limit]` as today, so behaviour does not change unless `NEURON_RERANK` is set. This lets Phase 0 measure candidate recall@40 immediately.
 
-#### 1.2 Context windowing and budget — `graph/chat.py` → `run_chat_turn` (S)
+#### 1.2 Token-based context windowing and packing — `graph/chat.py` → `run_chat_turn` (M)
 
-- New helper `best_window(question, text, chars)` (shared with Phase 2, lives in `graph/text_window.py`): slide a window of `chars` with 50% overlap, score by count of question terms (≥ 3 chars), return the best window. Return the text unchanged if shorter than `chars`.
-- Block text = `best_window(question, hit.summary, NEURON_BLOCK_CHARS=2000)`.
+- New helper `best_window(question, text, tokens, encoder)` (shared with Phase 2, lives in `graph/text_window.py`): create overlapping token windows, score them by lexical/query-term overlap, and return the best window. Preserve token boundaries and return the text unchanged when it fits.
+- Block text = `best_window(question, hit.summary, NEURON_BLOCK_TOKENS=500, encoder=model_encoder)`.
 - Facts per block capped at `NEURON_FACTS_PER_BLOCK=25`, asserted before derived.
-- Total budget `NEURON_CONTEXT_CHARS=40000`: add blocks in final order until the budget is reached; log dropped blocks.
-- Keep the existing per-block `evidence` log line; add `window_chars` and `truncated`.
+- Total evidence budget `NEURON_CONTEXT_TOKENS=10000` by default, leaving explicit room for the system prompt, question and answer. Count tokens with the answer model's tokenizer; do not infer tokens from characters.
+- Pack evidence spans and facts within the budget rather than accepting or dropping only whole nodes. Record which labelled support spans survived.
+- Keep the existing per-block `evidence` log line; add `window_tokens`, `packed_tokens`, `truncated` and `gold_support_preserved` in eval mode.
 
 #### 1.3 One-hop expansion — new `graph/expand.py` (M)
 
@@ -617,96 +646,86 @@ After 1.2, run the dev split with `CHAT_MODEL=gpt-5.6-luna` and `gpt-5.6-sol`. C
 
 If the question contains two anchors that resolve to nodes (two ticket keys, a key and a person, a key and a file path — reuse `graph/bridge/anchors.py` regexes and `find_named_persons`), fetch the `SourceRecord`s that both nodes are `MENTIONED_IN` and the edges between them, and prepend them as candidates with `methods=["pair"]`. DICE `withAllEntities`: claims mentioning both endpoints are the claims about the pair.
 
-**Tests:** unit tests for `best_window` (short text unchanged, window contains most terms), `expand_neighbors` (hub labels skipped, per-seed cap, derived after asserted, `exclude_edges` honoured, ACL filter applied), budget (blocks dropped in order, log line present).
-**Exit criteria:** on the dev split vs Phase 0 baseline — candidate recall@40 ≥ baseline recall@6 + 15 points; hidden-edge recall > 0 and rising; median input tokens per question ≤ 12k.
+**Tests:** unit tests for `best_window` (short text unchanged, token limit respected, window contains most terms), `expand_neighbors` (hub labels skipped, per-seed cap, derived after asserted, `exclude_edges` honoured, ACL filter applied), packing (hard token limit, deterministic order, support-span accounting).
+**Exit criteria:** on the dev split vs Phase 0 baseline — candidate recall@40 improves materially, hidden-edge recall rises, post-packing evidence recall does not fall more than 2 points below final-node recall, and median input tokens per question ≤ 12k. Do not hard-code a 15-point gain before the refreshed baseline is known.
 **Risks:** larger pool with the old fixed cut changes nothing (expected until Phase 2); expansion adds noise (mitigated by per-seed cap and by Phase 2).
 **Effort:** M overall.
 
 ---
 
-### Phase 2 — Laya in retrieval
+### Phase 2 — Reranker bake-off: generic cross-encoder vs Laya
 
-**Goal:** replace the rank cut with a relevance probability.
+**Goal:** select the cheapest scorer that closes the rank-cut gap without violating CPU latency or context limits.
 **Fixes:** P1, P2; starts P11.
 
-| | Current | Target |
-|---|---|---|
-| Final cut | Top 6 by RRF rank | `p ≥ min_p`, max 12, min 3 |
-| Scorer | None | Laya `retrieval_relevance` |
-| Tuning | — | `min_p` chosen on dev split |
+Run four variants over the same frozen questions, candidate UIDs, candidate text windows, expansion settings and final token budget:
 
-#### 2.1 Reranker — new `graph/rerank.py` (M)
+| Variant | Retrieval / scoring |
+|---|---|
+| A | Current RRF and top-6 behavior |
+| B | Phase 1 bounded context + expansion, RRF final order |
+| C | B + a generic pretrained cross-encoder |
+| D | B + Laya `retrieval_relevance` |
 
-```python
-_Q = {"retrieval_relevance": {"type": "noul",
-      "instructions": "Is this graph node needed to answer the user's question?"}}
+Report category-level candidate recall, final recall, post-packing evidence recall, MRR, answer/abstention accuracy, calibration, p50/p90 latency, peak memory and cost. Benchmark C and D on the same available CPU; GPU results are a separate operational profile. If the generic cross-encoder is within the predeclared quality margin of Laya and materially faster on CPU, choose it as the retrieval default. Laya can still serve triage, entity-review and fact-update decisions.
 
-def rerank(question, hits, *, min_p, min_keep=3, max_keep=12):
-    scored = []
-    for h in hits:
-        node = f"[{h.label}] {h.name}\n{best_window(question, h.summary, 1200)}"
-        ans = agent().predict({"question": question, "node": node}, _Q)
-        scored.append((ans["answers"]["retrieval_relevance"]["noul"], h))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    kept = [h for p, h in scored if p >= min_p][:max_keep]
-    return kept or [h for _, h in scored[:min_keep]], scored   # scored kept for logging/eval
-```
+#### 2.1 Common reranker interface — new `graph/rerank.py` (M)
 
-- The instruction text must match `laya/ingest/schema.py` exactly; the model learned one decision per question id.
-- State format `{"question", "node"}` matches the schema comment.
-- 1,200 chars ≈ 300 tokens leaves room for the question inside Laya's 512-token cap.
-- Log every candidate's probability (not just the kept ones) — this is the training and tuning data for 2.4.
+Both implementations accept the same `(question, candidate_window)` records and return a score plus model/version metadata. Candidate windows are token-bounded and frozen before either model runs. Log every candidate score for evaluation and calibration.
+
+The final selector uses a threshold tuned on dev, followed by diversity and hard resource caps (`min_keep`, `max_keep`, token budget). The count caps protect latency and prompt size; they do not define relevance.
+
+For Laya, the instruction text and state format must match its trained schema exactly. Load one process-level agent. For the generic cross-encoder, pin the model and tokenizer version and batch candidates.
 
 #### 2.2 Wiring — `graph/chat.py` → `retrieve` (S)
 
-```python
-if os.getenv("NEURON_RERANK") == "laya":
-    hits, scored = rerank(question, candidates, min_p=float(os.getenv("NEURON_RERANK_MIN_P", "0.5")))
-else:
-    hits = candidates[:limit]
-```
+`NEURON_RERANK=off|cross_encoder|laya` chooses the scorer. Named-person and time-window lanes remain deterministic reserved candidates but still consume the final evidence-token budget. The structured path still returns before model reranking.
 
-Named-person and time-window lanes stay prepended *after* rerank (they are deterministic and should not be scored away). The structured path still returns before any of this.
+#### 2.3 Serving and latency (S–M)
 
-#### 2.3 Serving (S–M)
-
-- `laya.Agent.predict` is one state per call in the code reviewed. 40 candidates = 40 calls.
-- GPU (T4, measured ~35 ms/call in the Laya work): ~1.5 s per question — acceptable.
-- CPU (measured ~2.7 decisions/s): ~15 s per question — not acceptable for chat. On CPU either set `NEURON_POOL_SIZE=20`, or write a padded-batch wrapper around the underlying model (check the `laya` package internals first; not verified here).
-- Load the agent once per process (module-level lazy singleton).
-- Fallback: if Laya fails to load or times out (`NEURON_RERANK_TIMEOUT_S=5`), log and use `candidates[:limit]`.
+- Measure the actual post-expansion candidate count. A pool of 40 plus typed neighbours and knowledge lanes can exceed 40 scorer calls.
+- Benchmark cold start, warm p50/p90, batch throughput and peak memory on deployment-class CPU. Do not extrapolate from per-call GPU latency.
+- A pool of 20 still costs about 7.4 seconds at 2.7 sequential Laya decisions/s, before expansion and chat generation. Pool reduction alone is not an acceptable CPU plan.
+- For Laya, implement and verify a padded batch wrapper if the underlying model supports it. Otherwise require GPU or keep Laya off the synchronous retrieval path.
+- On scorer failure or timeout, log the model/version and fall back to the Phase 1 RRF order.
 
 #### 2.4 Tune and fine-tune (M)
 
-- Choose `min_p` on the dev split: the lowest value where final recall stays within 2 points of candidate recall.
-- Build real training pairs from Phase 0: for each dev question, gold chain nodes = positive, other candidates below rank 20 = negative, hard negatives = candidates ranked 1–10 that are not on the chain. Fine-tune `retrieval_relevance` on these plus the existing data. Evaluate on the test split only.
+- Choose each model's threshold on the dev split, targeting post-packing evidence recall within 2 points of candidate recall while respecting latency and token budgets.
+- Training labels must be evidence-labelled. Gold nodes/spans are positive; reviewed irrelevant candidates are negative. A candidate absent from the annotated gold chain is **not automatically negative**, because another valid evidence path may exist.
+- Build hard negatives only after human review or deterministic evidence rules. Evaluate once on the frozen grouped test split.
 
 #### 2.5 Query-type router — optional, `graph/chat.py` (M)
 
 Add a Laya `choice` question `query_type` with options `lookup` (a key or a name), `temporal`, `person`, `why` (decision/reasoning), `overview`. Use it to pick: expansion `min_tier` and seed count, whether to boost Decision/Wisdom (`why`), whether to force the time-window lane (`temporal`). Requires training data (label ~300 real or golden questions). Defer if Phase 2.1 already meets the exit criteria.
 
-**Tests:** fallback path when Laya is unavailable; `min_keep` safety net; lanes prepended after rerank; instruction string equality test against Laya's schema file.
-**Exit criteria (test split):** final recall within 2 points of candidate recall@40; MRR above the Phase 1 value; p90 latency ≤ 3 s on GPU.
-**Risks:** synthetic-trained relevance underperforms on Neuron text → 2.4 fine-tune; CPU latency → pool 20 or batch wrapper.
+**Tests:** common input equality for both models; deterministic batching/order; fallback path; `min_keep` and token-budget safety; reserved-lane behavior; Laya instruction equality; pinned cross-encoder model/version.
+**Exit criteria (test split):** choose a scorer only if post-packing evidence recall stays within 2 points of candidate recall, MRR/answer accuracy improve over B, and deployment-class p90 meets the product latency target. Otherwise keep Phase 1 RRF and record that no reranker earned promotion.
+**Risks:** synthetic-trained Laya relevance underperforms; generic cross-encoder scores are not calibrated; CPU serving dominates latency. Mitigate with the same real labels, calibration protocol, batching and explicit no-promotion outcome.
 **Effort:** M (L with the router).
 
 ---
 
-### Phase 3 — Laya triage before LLM extraction
+### Phase 3 — Minimal review queue and measured ingestion triage
 
-**Goal:** send only knowledge-bearing chunks to the LLM, then use the savings to extract decisions from Jira and Bitbucket text again.
+**Goal:** give later model suggestions a safe review path, then test whether Laya improves the existing selective-ingestion policy.
 **Fixes:** P6; continues P11.
 
 | | Current | Target |
 |---|---|---|
-| Chunks to LLM | Every pending Notion chunk | Chunks passing triage |
-| Jira / Bitbucket extraction | Off | On for Jira description + comments, PR description, commit message |
+| Chunks to LLM | Chunks admitted by `selective_chunk_writes` | Existing admission plus Laya only if shadow results justify it |
+| Jira / Bitbucket extraction | Selective chunks can already become pending | Eligibility changed only for record types with measured missed durable facts |
 | Skipped chunks | — | Still embedded, logged as `LAYA_TRIAGE_SKIP` |
+| Review | No shared queue | Minimal SQLite queue with CLI or small API; frontend later |
 | Gates | 2 implicit | 6 explicit, ordered, logged |
 
-#### 3.1 Shadow mode — `graph/semantic_pass.py` → `run_semantic_pass` (S)
+#### 3.0 Minimal review queue — ledger + CLI/small endpoint (S)
 
-Before submitting to the thread pool, run Laya `chunk_type` + `has_durable_fact` on each chunk and store the result in the ledger (`chunk_triage` table or columns on `source_chunks`: `triage_type`, `triage_durable_p`, `triage_model`). Send every chunk to the LLM as today.
+Create `reviews(id, type, payload, state, decided_by, decided_at, created_at)` in SQLite with `pending`, `approved` and `rejected` states. Provide either a small CLI or the two endpoints `GET /api/reviews` and `POST /api/reviews/{id}/approve|reject`. Cache rejection identities so the same proposal is not recreated. This supports `possibly_same_as`, `fact_update` and later link/duplicate candidates. `BridgePanel` and dashboard work stay in Phase 6.
+
+#### 3.1 Shadow mode against the current policy — `graph/semantic_pass.py` (S)
+
+For every chunk admitted by the existing selective policy, run Laya `chunk_type` + `has_durable_fact` and store the result in the ledger (`triage_type`, `triage_durable_p`, `triage_model`). Do not change admission in shadow mode. Also sample chunks rejected by the existing policy so its own false-negative rate can be estimated rather than treating it as ground truth.
 
 After one full sync, compute: for chunks Laya *would* skip, how many facts did the LLM write? That number is the cost of enforcing triage.
 
@@ -724,12 +743,11 @@ Skipped chunks: `ledger.commit_chunk(..., SemanticStatus.DONE)` with drop reason
 
 Add `DropReason.LAYA_TRIAGE_SKIP` to `connectors/core/ledger.py`.
 
-#### 3.3 Reopen Pass B for high-signal text (M)
+#### 3.3 Change source eligibility only from measured gaps (M, conditional)
 
-- Jira: `graph/jira_pipeline.py` saves chunks for description and comments (not for summary alone) and sets `semantic_status = PENDING` instead of `NOT_APPLICABLE`. Profile: existing `work_management` in `graph/profiles.py`.
-- Bitbucket: PR description and commit message only (`pull_request_record`, `commit_record`). Never `SourceFile`.
-- Triage from 3.2 applies to all of them.
-- Budget: keep `LLM_BUDGET_PER_RUN`; the pending queue already makes large backlogs drain over several runs.
+First report pending/skipped/yield/cost by source and record type: Jira project/issue description and comments; Bitbucket repository/PR descriptions, commit messages and SourceFiles. The current pipelines already invoke `selective_chunk_writes`, including SourceFiles, so this is an audit of actual behavior rather than a blanket reopen.
+
+Only add or remove eligibility when the mixed evaluation and sampled skipped chunks demonstrate a gap. Preserve `LLM_BUDGET_PER_RUN`; the pending queue drains large backlogs over several runs. Any proposal to exclude SourceFiles must show that they add cost without unique durable facts or retrieval evidence.
 
 #### 3.4 Admission gates as an explicit list — `semantic_pass.py` (S)
 
@@ -737,16 +755,16 @@ Document and log in this order (each writes a `DropReason` when it rejects):
 
 | # | Gate | Where | Status |
 |---|---|---|---|
-| 1 | Laya triage | before `_call_llm` | new |
+| 1 | Existing selective admission + optional Laya triage | before `_call_llm` | existing + conditional new |
 | 2 | Evidence verbatim | `evidence_in_chunk` | exists |
 | 3 | Relation allowed / direction | `axioms.resolve_direction` | exists |
 | 4 | Merge candidate | resolution ladder (Phase 4) | new |
 | 5 | Conflict classification | `resolve_text_fact` (Phase 5) | new |
 | 6 | Projection eligibility | low-confidence facts written as candidates | new |
 
-**Tests:** skip rule unit test; skipped chunk still marked DONE and has a drop row; Jira chunks created only for description/comments; SourceFile never pending.
-**Exit criteria:** shadow run shows ≤ 5% of LLM-written facts come from would-be-skipped chunks; after enforcing, LLM calls per sync drop by ≥ 30% on Notion; Jira/Bitbucket produce Decision/Term entities; ingestion $ per sync reported.
-**Risks:** triage too aggressive → tune from shadow data; reopened Pass B increases cost → budget cap and triage.
+**Tests:** review state transitions and rejection dedupe; skip rule unit test; skipped chunk still marked DONE and has a drop row; source-type coverage accounting matches the existing selective policy.
+**Exit criteria:** review proposals have an auditable home; shadow run shows ≤ 5% of accepted durable facts come from would-be-skipped chunks; enforcement reduces calls materially without degrading the mixed eval; source-type extraction yield and ingestion cost are reported.
+**Risks:** triage too aggressive → tune from shadow data; eligibility changes increase cost → require measured yield and keep the budget cap.
 **Effort:** M.
 
 ---
@@ -758,15 +776,23 @@ Document and log in this order (each writes a `DropReason` when it rejects):
 
 | | Current | Target |
 |---|---|---|
-| Steps | normalized name → vector ≥ 0.9 | mention filter → polarity veto → normalized → alias → vector exactly-one → gray zone → Laya → new |
+| Identity | label + normalized name | System/Term: namespace + normalized name; Decision: source record + normalized statement |
+| Steps | normalized name → vector ≥ 0.9 | scoped exact identity → alias → vector exactly-one → gray zone → review |
 | Gray zone | none | 0.75–0.9 → `POSSIBLY_SAME_AS`, review |
 | Negation | not checked | veto |
 | Memory | per chunk | per run |
 | Diagnostics | none | `resolved_by` per entity, distribution per sync |
 
-All changes live in `graph/semantic_pass.py` → `_write_extraction`, around the existing `find_similar_uid(...) or semantic_uid(...)` call, plus `graph/vector_store.py` for a top-k variant.
+All changes live in `graph/semantic_pass.py` → `_write_extraction`, around the existing `find_similar_uid(...) or semantic_uid(...)` call, plus `graph/vector_store.py` for a thresholded candidate query. First replace global name identity with the scoped rules below; similarity must never override scope silently.
 
-#### 4.0 Polarity veto — do this first (S)
+#### 4.0 Scoped identity keys — do this before fuzzy resolution (M)
+
+- **System and Term:** `uid = make_uid(label, namespace_uid, normalized_name)`. Use project when the source maps unambiguously to one project; otherwise use workspace/connection namespace. Store `namespace_uid` explicitly. The same name in two namespaces is not the same entity by default.
+- **Decision:** `uid = make_uid("Decision", source_record_key, normalized_statement)`. A Decision is an assertion from a source, not a globally name-keyed entity. Reworded or cross-record Decisions may be proposed as duplicates, but can merge only after review.
+- **Other semantic types:** retain their current deterministic identity until a type-specific scope is defined.
+- Aliases are namespace-aware: `entity_aliases(label, namespace_uid, alias_norm, uid, source)`.
+
+#### 4.1 Polarity veto (S)
 
 Before any merge (vector or Laya), compare negation markers in the two texts:
 
@@ -779,37 +805,38 @@ def polarity_conflict(a: str, b: str) -> bool:
 
 If `polarity_conflict`, never merge; create a new node and, for Decisions, hand the pair to Phase 5 as a conflict candidate. This closes a real risk: two decisions that differ only by "not" embed very close together, possibly above the current 0.9 cut.
 
-#### 4.1 The ladder (M)
+#### 4.2 The scoped ladder (M)
 
 ```
-1. mention filter (4.4)                   → drop; DropReason.GENERIC_MENTION
-2. normalized name hit (semantic_uid)     → existing node          resolved_by = "normalized"
-3. alias table hit                        → existing node          resolved_by = "alias"
+1. mention filter (4.5)                   → drop; DropReason.GENERIC_MENTION
+2. scoped identity hit                    → existing node          resolved_by = "scoped_exact"
+3. scoped alias table hit                 → existing node          resolved_by = "alias"
 4. vector: candidates with sim ≥ 0.90
      exactly one, no polarity conflict    → existing node          resolved_by = "vector"
      more than one                        → go to 6 with all of them
 5. vector: candidates with 0.75 ≤ sim < 0.90 → go to 6
-6. Laya same_entity on every candidate (blocked by label)
+6. Laya same_entity on every candidate (blocked by label + namespace)
      top p ≥ 0.85 and top − second ≥ 0.15
+       Decision                           → new node + review proposal        resolved_by = "review_required"
        NEURON_RESOLVE_MODE=suggest        → new node + POSSIBLY_SAME_AS(top) resolved_by = "laya_suggest"
-       NEURON_RESOLVE_MODE=auto           → existing node                    resolved_by = "laya"
+       NEURON_RESOLVE_MODE=auto           → existing System/Term only        resolved_by = "laya"
      else                                 → new node                         resolved_by = "new"
 ```
 
 - "Exactly one" rule (DICE): a rung is confident only if it returns exactly one match. Two exact hits are not confident.
-- Candidates are **blocked by label** (a Decision is only compared with Decisions) and fetched with a new `vector_store.search_above(label, embedding, min_similarity, limit=20)` — threshold, not top-k, with a ceiling of 20.
+- Candidates are **blocked by label and namespace** and fetched with `vector_store.search_above(label, namespace_uid, embedding, min_similarity, limit=20)` — threshold with a resource ceiling of 20.
 - Laya state: `{"mention": name, "mention_context": best_window(chunk, 400), "candidate": node.name, "candidate_profile": node.search_text[:400]}` (matches the Laya schema comment).
-- Start in `suggest` mode. Promote to `auto` only after review data (§10) shows precision ≥ 0.95 on accepted merges.
+- Start in `suggest` mode. System/Term resolution may later promote to auto under §10.4. Decision merges remain review-only regardless of model precision.
 
-#### 4.2 Under-merge by default (policy)
+#### 4.3 Under-merge by default (policy)
 
 Thresholds are set so that doubt produces a new node. Duplicates are collected later by Phase 6.4 (auditable, reversible in review). A wrong merge mixes two entities' facts and cannot be cleanly split.
 
-#### 4.3 Run-level cache (S)
+#### 4.4 Run-level cache (S)
 
-Move `semantic_uids` from a local in `_write_extraction` to a per-run dict owned by `run_semantic_pass` and passed in. Writes are already serial on the main thread, so no locking is needed.
+Move `semantic_uids` from a local in `_write_extraction` to a per-run dict keyed by the scoped identity tuple and owned by `run_semantic_pass`. Writes are already serial on the main thread, so no locking is needed.
 
-#### 4.4 Mention filter (S)
+#### 4.5 Mention filter (S)
 
 For `Term` and `System` only:
 - stoplist (`data`, `pipeline`, `source`, `table`, `service`, `api`, `system`, `config`, `batch source`, `source_table`, …) kept in the ledger like the axioms, editable without deploy;
@@ -818,26 +845,26 @@ For `Term` and `System` only:
 
 Rejected mentions are recorded (`DropReason.GENERIC_MENTION`) and counted, like `record_miss` does for relations.
 
-#### 4.5 Diagnostics (S)
+#### 4.6 Diagnostics (S)
 
 Log `resolved_by` for every entity; aggregate per sync into the ledger (`resolution_stats`: label × resolved_by × count). Read it the DICE way:
 
 | Pattern | Meaning | Action |
 |---|---|---|
-| Mostly `normalized` / `alias` | healthy, free | none |
+| Mostly `scoped_exact` / `alias` | healthy, free | none |
 | Many `laya_suggest` with many candidates | recall too wide | raise 0.75 floor |
 | Many `new` for things that look duplicate | recall too narrow | add aliases, lower floor |
 | Many polarity vetoes | decisions being reversed | check Phase 5 conflict output |
 
-#### 4.6 Veto for API-only types (S)
+#### 4.7 Veto for API-only types (S)
 
 `_resolve_endpoint` already refuses to create Person / WorkItem / Commit from text. Add a test per label that an LLM mention of an unknown Person, WorkItem, Commit, PullRequest, SourceFile or Repository is rejected with `ENDPOINT_UNRESOLVED`, never minted.
 
-#### 4.7 Alias table (S)
+#### 4.8 Alias table (S)
 
-A ledger table `entity_aliases(label, alias_norm, uid, source)` filled by: approved `POSSIBLY_SAME_AS` reviews, approved Phase 6.4 merges, and manual entries. Step 3 of the ladder reads it.
+A ledger table `entity_aliases(label, namespace_uid, alias_norm, uid, source)` filled by approved `POSSIBLY_SAME_AS` reviews, approved Phase 6.4 pairwise merges, and manual entries. Step 3 of the ladder reads it.
 
-**Tests:** polarity veto blocks merge; exactly-one rule (two ≥ 0.9 candidates go to Laya, not auto-merge); suggest mode never changes uid; run cache reuses uid across chunks; stoplist drop recorded.
+**Tests:** same System/Term name in two namespaces produces different UIDs; repeated scoped name reuses a UID; Decision UID includes source record + statement; Decision merge always creates a review; polarity veto blocks merge; exactly-one rule; suggest mode never changes UID; scoped run cache; stoplist drop recorded.
 **Exit criteria:** on a hand-labelled set of 100 Decision/Term pairs — duplicates remaining down ≥ 30% vs today; wrong merges = 0; resolution stats visible per sync.
 **Risks:** Laya `same_entity` weak on real data → stays in suggest mode; stoplist too broad → counted drops make it visible.
 **Effort:** M.
@@ -852,11 +879,30 @@ A ledger table `entity_aliases(label, alias_norm, uid, source)` filled by: appro
 | | Current | Target |
 |---|---|---|
 | `valid_at` for LLM facts | `source_time` always | Stated date when present; else `source_time` with `valid_at_basis = "record_time"` |
-| Replacement of text facts | Never | `resolve_text_fact`: Laya `fact_update` + Graphiti date rule |
+| Write behavior | Matching edge is always revived | Text/history writes use `revive=False`; classify before write |
+| Replacement of text facts | Never | `resolve_text_fact`: Laya `fact_update` + explicit state-change vs correction operations |
 | Conflict kinds | — | `duplicate`, `extends`, `unrelated`, `newer_state`, `corrects`, `contradicts` |
 | Unknown end | `ended_unknown` field exists, unused for text | Used, with `attested_from` |
 | Age | Not shown | Decay class + last confirmed shown in evidence |
 | Clocks | `first_seen_at`, `last_confirmed_at` (loose) | Four clocks with strict update rules |
+
+#### 5.0 Writer contract — prerequisite, before temporal classification (M)
+
+Change `graph/writer.py` before enabling any text-fact lifecycle behavior:
+
+1. **`upsert_fact_edges(..., revive: bool = True)`** — keep `True` for existing deterministic current-state callers. Text facts and historical/backfill ingestion pass `revive=False`. On a match with `invalid_at IS NOT NULL`, `revive=False` may attach new provenance/confirmation metadata but must not clear `invalid_at` or change the closed world interval. Define `confirm` separately enough that it cannot accidentally reopen history.
+2. **`close_fact(fact_uid, valid_to, reason="superseded")`** — target exactly one live fact, archive its pre-change state into `FactHistory`, then set its world-time `invalid_at = valid_to`. Reject a missing/ambiguous `fact_uid` and an invalid interval. This is for `newer_state`, where the old fact was true until the replacement became valid.
+3. **`correct_fact(fact_uid, corrected_by, observed_to)`** — archive the assertion, set `assertion_status="corrected"`, `corrected_by`, `correction_observed_at=observed_to`, and close the record-time belief interval in `FactHistory`. A corrected assertion is excluded from every "what was true" world-time query, including dates before the correction, because it was never true. It remains available to "what did we believe as of" record-time queries until `observed_to`.
+4. **Classification before mutation** — find candidates and decide `duplicate|extends|unrelated|newer_state|corrects|contradicts` before inserting or updating the incoming edge. Only then call `upsert_fact_edges`, `close_fact`, `correct_fact`, or create a review proposal.
+5. **Attestation fields** — `attested_from` remains an ISO timestamp consumed by `time_axis.py`. Store provenance separately as `attested_by_record`. Never put a record key in a date field.
+6. **Read contract** — ordinary world-time readers require `assertion_status != "corrected"` and `projection_status = "live"`. Record-time history may return a corrected assertion only inside its archived `observed_from ≤ as_of < observed_to` interval. Apply these predicates centrally so chat, entity detail, history and graph views cannot drift.
+
+`newer_state` and `corrects` must remain distinct in storage and reads:
+
+| Kind | World axis | Record axis |
+|---|---|---|
+| `newer_state` | old fact valid until `new.valid_at`; `close_fact(old, new.valid_at)` | both observations retained normally |
+| `corrects` | old assertion marked corrected and never returned as true | old belief visible only until `correction_observed_at` |
 
 #### 5.1 Stated vs record time — `semantic_pass.py` → `_write_extraction` (M)
 
@@ -868,7 +914,7 @@ A ledger table `entity_aliases(label, alias_norm, uid, source)` filled by: appro
 
 Why not change `valid_at` semantics outright: `graph/time_axis.py` and every temporal query read `valid_at`. A basis flag is additive and safe; a semantic change needs a migration.
 
-#### 5.2 `resolve_text_fact` — new function in `graph/writer.py`, called from `_write_extraction` after each `upsert_fact_edges` (L)
+#### 5.2 `resolve_text_fact` — classify before write in `graph/writer.py` (L)
 
 Candidates (blocking — not a graph-wide search like Graphiti):
 
@@ -885,12 +931,12 @@ RETURN r, o
 
 For Decisions, also include live Decisions that `APPLIES_TO` the same target.
 
-Decision (Laya `fact_update` on each candidate, state = `{"existing_fact", "existing_valid_from", "new_evidence", "new_timestamp"}` as in the Laya schema):
+Decision (Laya `fact_update` on each candidate, state = `{"existing_fact", "existing_valid_from", "new_evidence", "new_timestamp"}` as in the Laya schema) is computed before the incoming edge is mutated:
 
 ```python
 def resolve_text_fact(new, old, kind):
     if kind == "duplicate":
-        confirm(old, at=new.source_time)            # last_confirmed_at, reinforce count
+        confirm(old, at=new.source_time, revive=False)  # provenance/reinforcement; never reopen
         return
     if kind in ("extends", "unrelated"):
         return
@@ -899,23 +945,28 @@ def resolve_text_fact(new, old, kind):
     if kind == "contradicts":
         link_disputed(old, new)                     # both live, DISPUTED_WITH
         return
-    # newer_state or corrects  (Graphiti date rule)
+    if kind == "corrects":
+        correct_fact(old.fact_uid, corrected_by=new.fact_uid,
+                     observed_to=new.source_time)   # old was never world truth
+        return
+    # newer_state (Graphiti date rule)
     if old.valid_at and new.valid_at:
         if windows_disjoint(old, new):
             return
         if old.valid_at < new.valid_at:
-            close(old, at=new.valid_at)             # FactHistory archive, then invalid_at
+            close_fact(old.fact_uid, valid_to=new.valid_at, reason="superseded")
         else:
-            close(new, at=old.valid_at)             # out-of-order backfill: new is the older fact
+            # Incoming historical fact is written closed and must not revive a matching edge.
+            new.invalid_at = old.valid_at
     else:
-        mark(old, ended_unknown=True, attested_from=new.source_record_key)   # never guess
-    if kind == "corrects":
-        mark(old, corrected_by=new.fact_uid)        # "was wrong", not just "ended"
+        mark(old, ended_unknown=True, attested_from=new.source_time,
+             attested_by_record=new.source_record_key)  # never put a key in a date field
 ```
 
-- `close()` reuses `supersede_fact_edges` + `_archive_history_rows` so text facts and API facts share one history mechanism.
-- `NEURON_FACT_UPDATE_MODE=suggest` (default): write the proposed action to a review table and do not change edges, except `duplicate` (safe). `auto` after review precision ≥ 0.95.
-- Conflicts involving a polarity veto from Phase 4.0 go straight to this function with `kind` from Laya.
+- `close_fact()` and `correct_fact()` reuse the same archival primitives as API supersession but target one `fact_uid` and accept explicit timestamps. Do not call subject-wide `supersede_fact_edges` for text facts.
+- `NEURON_FACT_UPDATE_MODE=suggest` (default): `duplicate` may safely reinforce the old fact; `extends`/`unrelated` may write normally with `revive=False`; `newer_state`, `corrects` and `contradicts` create a review proposal and keep the incoming assertion `pending_review`, excluded from live world-time answers. Approval atomically applies `close_fact`/`correct_fact`/`DISPUTED_WITH` and activates the incoming assertion. Rejection preserves an audit row but does not project the candidate as live.
+- `auto` is allowed only after review precision meets §10.4. The writer operation and incoming activation must share one transaction or compensating ledger state so a partial failure cannot leave both assertions live accidentally.
+- Conflicts involving a polarity veto from Phase 4.1 go straight to this function with `kind` from Laya.
 
 #### 5.3 Laya `fact_update` split (M, training)
 
@@ -968,7 +1019,7 @@ Stored `confidence` never changes. At read time: `effective = confidence × fres
 
 Add 30–50 questions built from `FactHistory` rows and from closed text facts: "who owned X in March", "what was decided about Y before the August change". Reuse the Phase 0 generator with a temporal template.
 
-**Tests:** `stated_dates` fixtures (explicit, relative, none); `resolve_text_fact` for each kind incl. out-of-order and missing dates; pinned facts never closed; suggest mode never mutates edges except `duplicate`; `last_confirmed_at` not bumped on KEEP.
+**Tests:** `revive=True/False`; a historical write cannot reopen a closed edge; `close_fact` affects exactly one fact and uses the supplied world time; `correct_fact` disappears from all world-time reads but remains in record-time history until `observed_to`; `attested_from` always parses as ISO and record provenance uses `attested_by_record`; classification happens before mutation; `stated_dates`; every conflict kind including out-of-order/missing dates; pinned facts; suggest mode; KEEP does not bump confirmation.
 **Exit criteria:** temporal questions measured; number of subject pairs with two contradicting live text facts reported and falling; no regression on non-temporal questions.
 **Risks:** Laya `fact_update` weak (synthetic-only) → suggest mode + review data; `dateparser` false positives → only accept dates inside the evidence span.
 **Effort:** L.
@@ -1018,24 +1069,24 @@ For Decision and Term, candidate pairs from `search_above(sim ≥ 0.8)`; score:
 | shared `source_record_keys` | 0.2 |
 | polarity veto | veto |
 
-Pairs ≥ 0.6 form connected components; one survivor per component (most reinforced, then oldest). **Dry run first, always.** Live run: survivor absorbs edges and `source_record_keys`; the others get `merged_into` and `invalid_at`, with a trace row per decision (`collector_trace`). Approved merges feed the alias table (4.7).
+Pairs ≥ 0.6 become independent review proposals. Do **not** merge connected components transitively: A≈B and B≈C does not prove A≈C. An approved pairwise merge chooses a survivor (most reinforced, then oldest), absorbs edges and `source_record_keys`, and records `merged_into` plus a trace row. Recompute remaining candidates after every approved merge. Decisions always require review; approved System/Term pairs may later feed the namespace-aware alias table (4.8).
 
-#### 6.5 Review queue UI — `demo_ui/frontend/src/components/BridgePanel.tsx` + `demo_ui/backend/bridge_routes.py` (M)
+#### 6.5 Review queue UI — extend the Phase 3 queue (M)
 
-One queue, typed items:
+Add `demo_ui/frontend/src/components/BridgePanel.tsx` over the existing Phase 3 SQLite queue/API. One queue, typed items:
 
 | Type | From | Approve does |
 |---|---|---|
-| `possibly_same_as` | 4.1 | merge + alias |
+| `possibly_same_as` | 4.2 | merge + namespace-aware alias; Decision requires explicit review |
 | `fact_update` | 5.2 | apply proposed close / dispute |
 | `link_candidate` | 6.2 | write derived edge |
-| `duplicate_component` | 6.4 | live merge for that component |
+| `duplicate_pair` | 6.4 | merge that approved pair, then recompute candidates |
 
 Endpoints from the original `plan.md` §6a.1 (`GET /api/reviews`, `POST /api/reviews/{id}/approve|reject`). Rejections are cached so the same pair is not proposed again (flag, not delete — Utopia lesson).
 
 #### 6.6 Health dashboard (S)
 
-Isolated ratio per label, open disputes, cardinality violations, review queue size by type, resolution stats (4.5), plus the latest eval row (§11). This is the page to show when justifying cost.
+Isolated ratio per label, open disputes, cardinality violations, review queue size by type, resolution stats (4.6), plus the latest eval row (§11). This is the page to show when justifying cost.
 
 **Exit criteria:** isolated Documents ratio falling sync over sync; zero cardinality violations; review queue has items of every type; every live merge has a trace.
 **Effort:** L overall.
@@ -1056,7 +1107,7 @@ If the final set is thin (max p < `min_p`) or `query_type == "why"`, extract anc
 
 #### 7.3 Verified write-back (S) — CoEvoKG
 
-On thumbs-up (or no correction within the session) and path support ≥ 0.6, for cited node pairs with no edge, create a `link_candidate` with `derived_rule = "query_verified"`. Goes through the review queue. Expect a small effect (CoEvoKG ablation: +0.6 points, the smallest of its three parts).
+Only on an explicit thumbs-up and path support ≥ 0.6, for cited node pairs with no edge, create a `link_candidate` with `derived_rule = "query_verified"`. Silence or absence of a correction is not verification. The candidate still goes through the review queue. Expect a small effect (CoEvoKG ablation: +0.6 points, the smallest of its three parts).
 
 #### 7.4 Local query embedding (S)
 
@@ -1079,10 +1130,15 @@ Only if the golden set shows multi-hop questions failing after 7.2, and behind a
 | `metadata_revised_at` | 5.6 | set on status / pin / dispute / review changes |
 | `pinned` | 5.8 | bool, default false |
 | `corrected_by` | 5.2 | `fact_uid` of the correcting fact |
-| `ended_unknown`, `attested_from` | 5.2 | already exist; now used for text facts |
+| `assertion_status`, `correction_observed_at` | 5.0 | `active` \| `corrected`; separates false assertions from later state changes |
+| `projection_status` | 5.2 | `live` \| `pending_review` \| `rejected`; only `live` participates in ordinary world-time answers |
+| `ended_unknown`, `attested_from` | 5.2 | `attested_from` is always an ISO timestamp |
+| `attested_by_record` | 5.0 | source record key proving the attestation; never parsed as a date |
 | `extraction_method` | 5.2 / 6.2 | adds `laya` for model-decided links (value exists in the schema doc; start using it) |
 | `derived_rule` | 6.2 / 7.3 | adds `two_hop`, `semantic_candidate`, `query_verified` |
 | `merged_into` | 6.4 | survivor uid after a live duplicate merge |
+
+`FactHistory` copies `assertion_status`, `corrected_by`, `correction_observed_at`, `projection_status`, `valid_at_basis`, `attested_from` and `attested_by_record` when an assertion is archived. This preserves the distinction between past world state and past belief.
 
 ### 9.2 Node properties
 
@@ -1090,13 +1146,14 @@ Only if the golden set shows multi-hop questions failing after 7.2, and behind a
 |---|---|---|
 | `last_retrieved_at` | 5.6 | last time the node reached a final answer set |
 | `pinned` | 5.8 | exempt from staleness |
-| `resolved_by` | 4.5 | how the node was first resolved (diagnostic) |
+| `resolved_by` | 4.6 | how the node was first resolved (diagnostic) |
+| `namespace_uid` | 4.0 | project or workspace/connection scope for System and Term identity |
 
 ### 9.3 Relations
 
 | Relation | Phase | Kind |
 |---|---|---|
-| `POSSIBLY_SAME_AS` | 4.1 | structural, symmetric, review-only |
+| `POSSIBLY_SAME_AS` | 4.2 | structural, symmetric, review-only |
 | `DISPUTED_WITH` | 5.4 | structural, symmetric, written by `resolve_text_fact` and hygiene |
 
 Both are added to the axioms as non-assertable by the LLM.
@@ -1106,20 +1163,22 @@ Both are added to the axioms as non-assertable by the LLM.
 | Table / column | Phase | Purpose |
 |---|---|---|
 | `source_chunks.triage_type`, `triage_durable_p`, `triage_model` | 3.1 | Laya triage result |
-| `DropReason.LAYA_TRIAGE_SKIP`, `GENERIC_MENTION` | 3.2, 4.4 | new drop reasons |
-| `entity_aliases(label, alias_norm, uid, source)` | 4.7 | alias rung |
-| `mention_stoplist(label, term)` | 4.4 | editable stoplist |
-| `resolution_stats(run_id, label, resolved_by, count)` | 4.5 | diagnostics |
+| `reviews(id, type, payload, state, decided_by, decided_at, created_at)` | 3.0 | minimal shared review queue |
+| `DropReason.LAYA_TRIAGE_SKIP`, `GENERIC_MENTION` | 3.2, 4.5 | new drop reasons |
+| `entity_aliases(label, namespace_uid, alias_norm, uid, source)` | 4.8 | namespace-aware alias rung |
+| `mention_stoplist(label, term)` | 4.5 | editable stoplist |
+| `resolution_stats(run_id, label, resolved_by, count)` | 4.6 | diagnostics |
 | `fact_update_proposals(...)` | 5.2 | suggest-mode actions |
 | `link_candidates(...)` | 6.2 | candidate links with review state |
 | `collector_trace(...)` | 6.4 | per-decision merge audit |
 | `hygiene_runs(...)` | 6.1 | isolated / dispute / violation counts |
-| `reviews(id, type, payload, state, decided_by, decided_at)` | 6.5 | one queue for all review items |
-| `sync_coverage(...)` | 0.4 | provider vs ledger counts |
+| `sync_coverage(...)` | 0.6 | provider vs ledger counts |
 
 ### 9.5 Migration notes
 
-All additions are optional properties or new tables. No existing property changes meaning. `valid_at` keeps its current semantics (§8 Phase 5.1 explains why). Backfill `valid_at_basis = "api"` for deterministic edges and `"record_time"` for existing LLM edges with one Cypher update per graph.
+`valid_at` keeps its current semantics (§8 Phase 5.1 explains why). Backfill `valid_at_basis = "api"` for deterministic edges and `"record_time"` for existing LLM edges. Backfill `assertion_status = "active"`; world-time readers must explicitly exclude `corrected` assertions while record-time history may still include them.
+
+Scoped identity is a real migration, not just an optional field. Start with a dry-run mapping from each existing System/Term to a project or workspace namespace using its source records. Create new scoped nodes and rewire provenance/fact edges in a traced migration; do not mutate UIDs in place. Put ambiguous mappings and every cross-record Decision merge into the Phase 3 review queue. Preserve old UIDs as aliases/redirects until graph edges, ledger references and Qdrant points have been rebuilt and verified.
 
 ---
 
@@ -1129,13 +1188,13 @@ All additions are optional properties or new tables. No existing property change
 
 | Question | Type | Phase | Call site | Mode at start |
 |---|---|---|---|---|
-| `retrieval_relevance` | noul | 2 | `graph/rerank.py` ← `chat.retrieve` | behind `NEURON_RERANK` |
+| `retrieval_relevance` | noul | 2 | `graph/rerank.py` ← `chat.retrieve` | trial against generic cross-encoder |
 | `chunk_type` | choice | 3, 5.5 | `semantic_pass.run_semantic_pass` | shadow |
 | `has_durable_fact` | noul | 3 | same | shadow |
 | `same_entity` | noul | 4 | `semantic_pass._write_extraction` | suggest |
 | `fact_update` | choice | 5 | `writer.resolve_text_fact` | suggest |
 | `relation_type` | choice | 6 | `hygiene` candidate links | candidate only |
-| `entity_type` | choice | 4.4 | mention filter (optional) | log only |
+| `entity_type` | choice | 4.5 | mention filter (optional) | log only |
 | `query_type` (new) | choice | 2.5 | `chat.retrieve` | optional |
 
 Not used by Neuron: `importance`, `contains_pii` (possible later for ACL/redaction), knowledge/wisdom composite scores from the Laya repo.
@@ -1144,7 +1203,7 @@ Not used by Neuron: `importance`, `contains_pii` (possible later for ACL/redacti
 
 | Question | Today | Real data source in this plan |
 |---|---|---|
-| `retrieval_relevance` | synthetic (0.90 synthetic val) | Phase 0 dev split + logged rerank probabilities (2.1) |
+| `retrieval_relevance` | synthetic (0.90 synthetic val) | evidence-labelled Phase 0 dev pairs + logged scores; unlabelled non-chain candidates are not negatives |
 | `chunk_type`, `has_durable_fact` | Nilus chunks + synthetic | Phase 3.1 shadow: did the LLM extract a fact from this chunk |
 | `same_entity` | synthetic only | Phase 4 review decisions on `POSSIBLY_SAME_AS` |
 | `fact_update` | synthetic only | Phase 5 review decisions; new `newer_state` / `corrects` split |
@@ -1163,7 +1222,7 @@ Hold out a **hand-labelled test set of 200–300 decisions** across these questi
 
 ### 10.4 Promotion rule (suggest → auto)
 
-A Laya decision type moves from suggest to auto only when, on ≥ 200 reviewed items, precision of the accepted class ≥ 0.95 at the chosen threshold, and the ECE on the hand-labelled set ≤ 0.05.
+A Laya decision type moves from suggest to auto only when, on ≥ 200 reviewed items, precision of the accepted class ≥ 0.95 at the chosen threshold, and the ECE on the hand-labelled set ≤ 0.05. Decision entity merges are permanently excluded from auto-promotion.
 
 ---
 
@@ -1173,13 +1232,15 @@ A Laya decision type moves from suggest to auto only when, on ≥ 200 reviewed i
 |---|---|---|
 | Candidate recall@40 | share of questions whose `answer_uid` is in the pool before rerank | 1.1, 1.3, 1.7 |
 | Final recall | share whose `answer_uid` reaches the answer prompt | 2 |
+| Post-packing evidence recall | share where a labelled supporting span/fact survives the final token pack | 1.2, 2 |
 | Rerank gap | candidate recall − final recall | 2.4 |
 | MRR | mean reciprocal rank of `answer_uid` in the final list | 2 |
 | Chain coverage | mean share of chain nodes in the final list | 1.3, 2 |
 | Hidden-edge recall | recall of both chain endpoints when one chain edge is hidden | 1.3, 6.2 |
 | Answer accuracy | LLM-judged vs `answer_uid`, with 30-question human spot check | all |
+| Abstention accuracy | correct refusal/clarification on unanswerable or ambiguous questions | all |
 | Tokens / $ per question | from `TokenUsage` | 1.2, 1.6 |
-| p90 latency | end-to-end chat | 2.3 |
+| p50/p90 latency | scorer and end-to-end chat, on deployment-class CPU and separately on GPU | 2.3 |
 | LLM calls / $ per sync | ingest | 3 |
 | Lost-fact rate | facts from would-be-skipped chunks ÷ all facts (shadow) | 3.1 |
 | Duplicate rate | duplicates in a 100-pair labelled sample | 4, 6.4 |
@@ -1197,16 +1258,17 @@ Results go to `eval/results.md`, one row per run: date, git sha, flags, dev and 
 | Flag | Default | Phase | Meaning |
 |---|---|---|---|
 | `NEURON_POOL_SIZE` | 40 | 1.1 | candidates before the cut |
-| `NEURON_BLOCK_CHARS` | 2000 | 1.2 | window per evidence block |
+| `NEURON_BLOCK_TOKENS` | 500 | 1.2 | token window per evidence block |
 | `NEURON_FACTS_PER_BLOCK` | 25 | 1.2 | facts per block |
-| `NEURON_CONTEXT_CHARS` | 40000 | 1.2 | total evidence budget |
+| `NEURON_CONTEXT_TOKENS` | 10000 | 1.2 | total evidence-token budget |
 | `NEURON_EXPAND` | on | 1.3 | 1-hop expansion |
 | `NEURON_EXPAND_SEEDS` / `_PER_SEED` | 8 / 4 | 1.3 | expansion caps |
 | `CHAT_MODEL` | `gpt-5.6-sol` | 1.6 | existing; A/B with luna |
-| `NEURON_RERANK` | off | 2 | `laya` to enable |
+| `NEURON_RERANK` | off | 2 | `off` \| `cross_encoder` \| `laya` |
 | `NEURON_RERANK_MIN_P` | 0.5 | 2 | probability cut (tune on dev) |
 | `NEURON_RERANK_MAX_KEEP` / `_MIN_KEEP` | 12 / 3 | 2 | bounds |
 | `NEURON_RERANK_TIMEOUT_S` | 5 | 2.3 | fallback trigger |
+| `NEURON_CROSS_ENCODER_MODEL` | pinned after trial | 2 | generic cross-encoder model/version |
 | `LAYA_MODEL_DIR`, `LAYA_DEVICE` | — / cpu | 2–6 | serving |
 | `NEURON_TRIAGE` | shadow | 3 | `off` \| `shadow` \| `enforce` |
 | `NEURON_RESOLVE_MODE` | suggest | 4 | `suggest` \| `auto` |
@@ -1223,13 +1285,15 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Chain-generated questions are easier than real questions | medium | hand-check sample; add real chat questions over time; report both |
-| Laya relevance underperforms on Neuron text | medium | flag-gated; fine-tune on dev pairs (2.4); fallback to rank cut |
-| CPU latency makes rerank unusable | high on CPU | GPU serving, pool 20, or batch wrapper |
+| Chain-generated questions are easier than real questions | medium | mixed frozen set; report real, ambiguous, unanswerable and chain slices separately |
+| Laya relevance underperforms a generic cross-encoder | medium | controlled four-way trial; select neither model unless it earns promotion |
+| CPU latency makes rerank unusable | high on CPU | benchmark batching on deployment hardware; generic cross-encoder option; RRF fallback |
 | Triage drops real knowledge | medium | shadow mode first; lost-fact rate gate; skipped chunks still searchable |
-| Reopened Pass B raises cost | medium | triage + existing budget cap; report $ per sync |
-| Wrong entity merges | low (with plan) | polarity veto, exactly-one, suggest mode, under-merge policy |
+| Source eligibility changes raise Pass B cost | medium | require measured yield, retain the budget cap, and report cost per source type |
+| Wrong entity merges | low (with plan) | namespace identity, source-scoped Decisions, polarity veto, exactly-one, review-only Decision merges |
 | `fact_update` closes valid facts | medium | suggest mode; pinning; FactHistory keeps everything |
+| Historical ingest revives a closed fact | medium without writer change | `revive=False`, classification before write, targeted `close_fact` tests |
+| Correction appears as past truth | medium without explicit status | `assertion_status=corrected`; world reads exclude it while record history retains prior belief |
 | Date parsing invents dates | low | only dates found inside the evidence span; basis flag |
 | Expansion floods candidates with hub noise | medium | typed rels only, hub labels excluded, per-seed cap, rerank |
 | Review queue grows faster than people review it | high | promote to auto per §10.4; prioritize by reinforce count |
@@ -1244,6 +1308,7 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 - Open 2-hop expansion at query time.
 - Running more than one Laya question per candidate at query time.
 - Auto-accepting `same_entity` or `fact_update` before §10.4 is met.
+- Auto-merging Decisions across records; those merges always require review.
 - Hard deletion of stale facts.
 - RL training of any model; fine-tuning a generator (`llmtoslm`).
 - LLM multi-agent retrieval before Phase 7.2 is measured.
@@ -1253,12 +1318,12 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 
 ## 15. Open questions
 
-1. **GPU for Laya in production?** Decides pool size and whether a batch wrapper is needed.
+1. **Retrieval scorer:** Phase 2 decides whether RRF, a generic cross-encoder or Laya earns deployment. GPU availability is an input, not an assumption.
 2. **Chat model:** sol vs luna after context bounding (Phase 1.6 answers it).
 3. **Who reviews?** The queue needs an owner and a weekly slot, or suggest mode never promotes.
-4. **Jira comment volume:** how many comments per ticket across real projects — sets the Phase 3.3 budget.
+4. **Source-type yield:** measured durable-fact yield and cost for Jira comments, PR descriptions, commit messages and SourceFiles determine any Phase 3.3 eligibility change.
 5. **Freshness windows** in 5.5 are starting values; confirm with the team what "stale" means for status updates vs decisions.
-6. **Coverage fixes** (Notion search incompleteness, Bitbucket file types, commit depth) are reported in Phase 0.4 but not fixed here; decide after seeing the numbers.
+6. **Coverage fixes** (Notion search incompleteness, Bitbucket file types, commit depth) are reported in Phase 0.6 but not fixed here; decide after seeing the numbers.
 
 ---
 
@@ -1268,46 +1333,47 @@ Existing flags unchanged: `LLM_MODEL`, `LLM_BUDGET_PER_RUN`, `LLM_CONCURRENCY`, 
 
 | File | Phases | Change |
 |---|---|---|
-| `scripts/build_chain_golden.py` (new) | 0.1, 5.9 | chain sampling, question generation, leakage filter |
-| eval harness (calls `retrieve`) | 0.2, 0.3 | stage metrics, hidden-edge runs, `eval/results.md` |
-| `demo_ui/backend/*_routes.py` | 0.4 | coverage counts |
+| `scripts/build_chain_golden.py` (new) | 0.3, 5.9 | chain sampling, question generation, leakage filter |
+| eval harness (calls `retrieve` + evidence packer) | 0.1–0.5 | refreshed baselines, grouped mixed set, stage/packing metrics, hidden-edge runs |
+| `demo_ui/backend/*_routes.py` | 0.6 | coverage counts |
 | `graph/chat.py` | 1.1, 1.2, 1.5, 1.7, 2.2, 5.1, 5.5 | pool, budget, lanes, rerank wiring, prompt rules |
-| `graph/text_window.py` (new) | 1.2, 2.1, 4.1, 6.2 | `best_window` |
+| `graph/text_window.py` (new) | 1.2, 2.1, 4.2, 6.2 | `best_window` |
 | `graph/expand.py` (new) | 1.3, 1.4 | expansion, tiers |
-| `graph/rerank.py` (new) | 2 | Laya rerank, agent singleton |
-| `graph/semantic_pass.py` | 3.1–3.4, 4.0–4.5, 5.1, 5.5 | triage, ladder, dates, decay class |
-| `connectors/core/ledger.py` | 3.2, 4.4, 4.5, 4.7, 5.2, 6.x | drop reasons, new tables |
-| `graph/jira_pipeline.py`, `graph/bitbucket_pipeline.py` | 3.3 | chunks for high-signal text |
-| `graph/vector_store.py` | 4.1, 6.2, 6.4 | `search_above` (threshold + ceiling) |
-| `graph/writer.py` | 5.2, 5.6 | `resolve_text_fact`, `close`, clock rules in `upsert_fact_edges` |
+| `graph/rerank.py` (new) | 2 | common scorer interface, generic cross-encoder, Laya and fallback |
+| `graph/semantic_pass.py` | 3.1–3.4, 4.0–4.6, 5.1, 5.5 | measured triage, scoped identity, ladder, dates, decay class |
+| `connectors/core/ledger.py` | 3.0–3.2, 4.5–4.8, 5.2, 6.x | minimal review queue, drop reasons, aliases and audit tables |
+| `graph/jira_pipeline.py`, `graph/bitbucket_pipeline.py` | 3.3 | source eligibility changes only where measurements justify them |
+| `graph/vector_store.py` | 4.2, 6.2, 6.4 | namespace-aware `search_above` (threshold + ceiling) |
+| `graph/writer.py` | 5.0, 5.2, 5.6 | `revive`, classification-before-write, `close_fact`, `correct_fact`, clock rules |
 | `graph/dates.py` (new) | 5.1 | `stated_dates` |
-| axioms (`graph/axioms.py` + ledger) | 4.1, 5.4 | `POSSIBLY_SAME_AS`, `DISPUTED_WITH` |
+| axioms (`graph/axioms.py` + ledger) | 4.2, 5.4 | `POSSIBLY_SAME_AS`, `DISPUTED_WITH` |
 | `graph/derived.py` | 6.2 | shared-concept → candidates |
 | `graph/hygiene.py` (new) | 6 | report, candidates, audit, collector |
-| `demo_ui/frontend/src/components/BridgePanel.tsx`, `demo_ui/backend/bridge_routes.py` | 6.5 | review queue |
-| dashboard component (new or in `SyncProgress.tsx`) | 0.4, 6.6 | health + eval numbers |
+| review CLI or small backend route | 3.0 | minimal review operations |
+| `demo_ui/frontend/src/components/BridgePanel.tsx`, `demo_ui/backend/bridge_routes.py` | 6.5 | UI over the existing review queue |
+| dashboard component (new or in `SyncProgress.tsx`) | 0.6, 6.6 | health + eval numbers |
 
 ### 16.2 Order of work
 
 ```
-Phase 0  ── baseline numbers
+Phase 0  ── refresh Nilus + less_token baselines · mixed grouped eval · packing metrics
    │
-Phase 1  ── pool 40 · windowing/budget · expansion · tiers · pair lane · luna A/B
+Phase 1  ── token budget · pool 40 · typed expansion · tiers · pair lane · luna A/B
    │
-Phase 2  ── Laya rerank (flag) · tune min_p · fine-tune on dev pairs · (router)
+Phase 2  ── four-way trial: current · bounded expansion · generic cross-encoder · Laya
    │
-Phase 3  ── triage shadow → enforce · reopen Pass B (Jira/PR/commit text) · gate list
+Phase 3  ── minimal review queue · triage shadow → conditional enforce · measured source eligibility
    │
-Phase 4  ── polarity veto · ladder · run cache · stoplist · stats · aliases
+Phase 4  ── scoped identity · Decision review-only merge · ladder · stoplist · stats · aliases
    │
-Phase 5  ── stated vs record time · resolve_text_fact · fact_update split · DISPUTED_WITH · freshness · clocks
+Phase 5  ── writer contract · classify-before-write · state vs correction · dates · freshness · clocks
    │
-Phase 6  ── isolated report · candidate links · audit · collector · review queue · dashboard
+Phase 6  ── isolated diagnostics · candidate links · pairwise collector · review UI · dashboard
    │
 Phase 7  ── path support · second round · write-back · (local embedding) · (multi-agent, conditional)
 ```
 
-Phases 0–3 carry most of the retrieval and cost value. Phases 4–6 carry quality and "is this still true". Phase 7 waits for numbers.
+Phases 0–2 are the first milestone and choose the retrieval architecture from measurements. Phase 3 installs the minimal review foundation before entity or temporal suggestions. Phases 4–6 carry identity, lifecycle and graph-health work. Phase 7 waits for measured gaps.
 
 ### 16.3 One-line summary per source
 
