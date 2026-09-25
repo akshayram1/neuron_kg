@@ -175,6 +175,84 @@ class ResolutionStat:
     created_at: str
 
 
+@dataclass(frozen=True)
+class HygieneCount:
+    """One label's isolated/total node count for a single hygiene run
+    (plan.md Phase 6 §6.1) -- the caller's INPUT to
+    `record_hygiene_counts`, not a stored row (see `HygieneRun` for that).
+    `label` is the node label being measured -- e.g. `"Document"`,
+    `"Decision"`, `"Commit"`, `"Term"`, `"System"` per §6.1's isolation
+    rules -- free text, not a StrEnum, since this module does not know or
+    enforce which labels the hygiene job chooses to measure."""
+
+    label: str
+    isolated_count: int
+    total_count: int
+
+
+@dataclass(frozen=True)
+class HygieneRun:
+    """One stored row of `hygiene_runs` (plan.md Phase 6 §6.1): one label's
+    isolated/total counts from one hygiene run, on one graph. One row per
+    `(run_id, label)` so trend queries can filter by label without
+    unpacking a wider per-run blob."""
+
+    id: int
+    run_id: str
+    graph_name: str
+    label: str
+    isolated_count: int
+    total_count: int
+    created_at: str
+
+
+@dataclass(frozen=True)
+class LinkCandidate:
+    """One row of `link_candidates` (plan.md Phase 6 §6.2): a proposed
+    derived edge between two nodes, not yet a real graph edge.
+    `derived_rule` is `"two_hop"` (DICE two-hop co-occurrence) or
+    `"semantic_candidate"` (embedding similarity) per §6.2 -- free text,
+    not a StrEnum, matching `Review.type`'s reasoning: new candidate
+    sources may be added later without a schema change.
+
+    `state` reuses `ReviewState` (pending/approved/rejected) rather than a
+    parallel enum with identical values -- this table's lifecycle is the
+    same propose-then-decide-once shape `reviews` already has, just
+    carrying the edge-specific columns (`from_uid`, `to_uid`, `relation`,
+    `confidence`, `derived_rule`) that `reviews`' generic `payload` blob
+    doesn't structure.
+    """
+
+    id: int
+    from_uid: str
+    to_uid: str
+    relation: str
+    confidence: float
+    derived_rule: str
+    state: str
+    created_at: str
+    decided_at: str | None
+
+
+@dataclass(frozen=True)
+class MergeTrace:
+    """One row of `merge_trace` (plan.md Phase 6 §6.4): a durable audit
+    record of one EXECUTED pairwise merge -- written once a merge actually
+    happens (survivor absorbs the other node's edges and
+    `source_record_keys`), never when a merge is merely proposed (that
+    proposal goes through the generic `reviews` table with
+    `type="duplicate_pair"`, built elsewhere, out of this module's scope).
+    `survivor_uid` absorbed `absorbed_uid`; `label` is their shared node
+    label (`Decision` or `Term` per §6.4)."""
+
+    id: int
+    survivor_uid: str
+    absorbed_uid: str
+    label: str
+    merged_at: str
+    reason: str | None
+
+
 class DropReason(StrEnum):
     """Why one extracted item did not become a fact. `DIRECTION_CORRECTED` is
     deliberately in this vocabulary while NOT being a loss — the fact was
@@ -569,6 +647,78 @@ class ConnectorLedger:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_resolution_stats_run ON resolution_stats(run_id)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hygiene_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    graph_name TEXT NOT NULL DEFAULT 'default',
+                    label TEXT NOT NULL,
+                    isolated_count INTEGER NOT NULL DEFAULT 0,
+                    total_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            # Covers `hygiene_trend`'s read shape (`WHERE graph_name = ? AND
+            # label = ? ORDER BY created_at DESC`) directly.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_hygiene_runs_trend "
+                "ON hygiene_runs(graph_name, label, created_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_hygiene_runs_run ON hygiene_runs(run_id)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS link_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_uid TEXT NOT NULL,
+                    to_uid TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    derived_rule TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    UNIQUE(from_uid, to_uid, relation)
+                )
+                """
+            )
+            # The UNIQUE constraint is `create_link_candidate`'s idempotency
+            # key (plan.md §6.2): the same triple proposed twice resolves to
+            # the same row instead of duplicating.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_link_candidates_state "
+                "ON link_candidates(state, created_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_link_candidates_rule "
+                "ON link_candidates(derived_rule, state)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS merge_trace (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    survivor_uid TEXT NOT NULL,
+                    absorbed_uid TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    merged_at TEXT NOT NULL,
+                    reason TEXT
+                )
+                """
+            )
+            # `merged_into` is the hot lookup (by absorbed_uid); the
+            # survivor-side index exists for the same diagnostics purpose as
+            # `idx_entity_aliases_uid`.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_merge_trace_absorbed "
+                "ON merge_trace(absorbed_uid)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_merge_trace_survivor "
+                "ON merge_trace(survivor_uid)"
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -1565,3 +1715,224 @@ class ConnectorLedger:
                            count=int(r["count"]), created_at=str(r["created_at"]))
             for r in rows
         ]
+
+    # ------------------------------------------------------------ hygiene runs
+
+    @staticmethod
+    def _hygiene_run_row(row: sqlite3.Row) -> HygieneRun:
+        return HygieneRun(
+            id=int(row["id"]), run_id=str(row["run_id"]), graph_name=str(row["graph_name"]),
+            label=str(row["label"]), isolated_count=int(row["isolated_count"]),
+            total_count=int(row["total_count"]), created_at=str(row["created_at"]),
+        )
+
+    def record_hygiene_counts(
+        self, run_id: str, counts: list[HygieneCount], *, graph_name: str = "default",
+    ) -> None:
+        """Persist one hygiene run's per-label isolated/total counts
+        (plan.md Phase 6 §6.1). Batch-friendly: one sync's hygiene pass
+        measures several labels (`Document`, `Decision`, `Commit`, `Term`,
+        `System`) at once, so this takes the whole list rather than being
+        called once per label. Append-only, one row per `(run_id, label)` --
+        counts are a measurement over time, not a mutable "latest" cell,
+        the same convention `record_sync_coverage` uses elsewhere in this
+        file, so a regression shows up as a row-to-row comparison instead of
+        overwriting the evidence of a healthier previous run.
+        """
+        if not counts:
+            return
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.executemany(
+                "INSERT INTO hygiene_runs(run_id, graph_name, label, isolated_count, "
+                "total_count, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (run_id, graph_name, c.label, c.isolated_count, c.total_count, now)
+                    for c in counts
+                ],
+            )
+
+    def hygiene_trend(
+        self, label: str, *, graph_name: str = "default", limit: int = 20,
+    ) -> list[HygieneRun]:
+        """The most recent `limit` hygiene runs for one `label` on one
+        graph, newest first (same ordering convention as `list_reviews`/
+        `adoptions` elsewhere in this file) -- a dashboard trend chart
+        reverses this list if it wants chronological order. No separate
+        date-range query is built here: nothing in §6.1/§6.6 needs one yet,
+        and `created_at` is a plain ISO-8601 string a caller can filter on
+        directly (`hygiene_trend` plus a Python-side date comparison) if
+        that need shows up later.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM hygiene_runs WHERE graph_name = ? AND label = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (graph_name, label, limit),
+            ).fetchall()
+        return [self._hygiene_run_row(row) for row in rows]
+
+    # ------------------------------------------------------------ link candidates
+
+    @staticmethod
+    def _link_candidate_row(row: sqlite3.Row) -> LinkCandidate:
+        return LinkCandidate(
+            id=int(row["id"]), from_uid=str(row["from_uid"]), to_uid=str(row["to_uid"]),
+            relation=str(row["relation"]), confidence=float(row["confidence"]),
+            derived_rule=str(row["derived_rule"]), state=str(row["state"]),
+            created_at=str(row["created_at"]), decided_at=row["decided_at"],
+        )
+
+    def create_link_candidate(
+        self, from_uid: str, to_uid: str, relation: str, *,
+        derived_rule: str, confidence: float = 0.5,
+    ) -> int:
+        """Propose one derived-edge candidate (plan.md Phase 6 §6.2).
+
+        Idempotent on `(from_uid, to_uid, relation)`: `INSERT OR IGNORE`
+        against the table's UNIQUE constraint means the same triple
+        proposed twice -- by the same hygiene run or a later one -- never
+        duplicates. This is a simpler mechanism than `reviews`' rejection
+        cache (§3.0): there is only ever one row per triple, so its `state`
+        alone already answers "is this still open" -- `pending` (new or
+        re-proposed), or already decided (`approved`/`rejected`). A
+        candidate that was already decided is deliberately NOT reset to
+        pending by a re-proposal: once decided, it stays decided, the same
+        "a human's no should not be silently overridden" principle
+        `review_rejections` exists for in Phase 3.
+
+        Returns the candidate's id, whether this call inserted a new row or
+        found the existing one for this triple.
+        """
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO link_candidates(from_uid, to_uid, relation, "
+                "confidence, derived_rule, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (from_uid, to_uid, relation, confidence, derived_rule, str(ReviewState.PENDING), now),
+            )
+            row = connection.execute(
+                "SELECT id FROM link_candidates WHERE from_uid = ? AND to_uid = ? AND relation = ?",
+                (from_uid, to_uid, relation),
+            ).fetchone()
+        return int(row["id"])
+
+    def get_link_candidate(self, candidate_id: int) -> LinkCandidate | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM link_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return self._link_candidate_row(row) if row else None
+
+    def list_link_candidates(
+        self, *, state: ReviewState | str | None = ReviewState.PENDING,
+        derived_rule: str | None = None, limit: int = 200,
+    ) -> list[LinkCandidate]:
+        """Newest first, optionally filtered by `state` (defaults to
+        `pending` -- §6.2's primary read shape is "what needs review", the
+        same default the review-queue UI (§6.5) will want) and by
+        `derived_rule`. Pass `state=None` to list candidates in every
+        state."""
+        query = "SELECT * FROM link_candidates"
+        clauses: list[str] = []
+        params: list = []
+        if state is not None:
+            clauses.append("state = ?")
+            params.append(str(state))
+        if derived_rule is not None:
+            clauses.append("derived_rule = ?")
+            params.append(derived_rule)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._link_candidate_row(row) for row in rows]
+
+    def approve_link_candidate(self, candidate_id: int) -> LinkCandidate | None:
+        """Approve a PENDING candidate. Returns the decided row, or `None`
+        if `candidate_id` does not exist or is no longer PENDING -- the
+        same decide-once guarantee `approve_review` gives `reviews`, so a
+        decided candidate cannot be re-decided out from under whoever
+        already acted on it. Writing the resulting real edge (`derived:
+        true`, `extraction_method: "derived"`, provenance from both nodes'
+        records, per §6.2) is the caller's job, not this accessor's."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE link_candidates SET state = ?, decided_at = ? WHERE id = ? AND state = ?",
+                (str(ReviewState.APPROVED), now, candidate_id, str(ReviewState.PENDING)),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM link_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return self._link_candidate_row(row) if row else None
+
+    def reject_link_candidate(self, candidate_id: int) -> LinkCandidate | None:
+        """Reject a PENDING candidate. Returns the decided row, or `None`
+        if `candidate_id` does not exist or is no longer PENDING. No
+        separate rejection cache is needed here (unlike `reviews`): the row
+        itself IS the identity (its UNIQUE triple), so it simply stays
+        `rejected` and `create_link_candidate`'s `INSERT OR IGNORE` will
+        never resurrect it as pending."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE link_candidates SET state = ?, decided_at = ? WHERE id = ? AND state = ?",
+                (str(ReviewState.REJECTED), now, candidate_id, str(ReviewState.PENDING)),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM link_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return self._link_candidate_row(row) if row else None
+
+    # ------------------------------------------------------------ merge trace
+
+    @staticmethod
+    def _merge_trace_row(row: sqlite3.Row) -> MergeTrace:
+        return MergeTrace(
+            id=int(row["id"]), survivor_uid=str(row["survivor_uid"]),
+            absorbed_uid=str(row["absorbed_uid"]), label=str(row["label"]),
+            merged_at=str(row["merged_at"]), reason=row["reason"],
+        )
+
+    def record_merge_trace(
+        self, survivor_uid: str, absorbed_uid: str, label: str, *, reason: str | None = None,
+    ) -> int:
+        """Record one EXECUTED pairwise merge (plan.md Phase 6 §6.4) --
+        called once a merge actually happens (survivor absorbs the other
+        node's edges and `source_record_keys`), never when a merge is
+        merely proposed (that proposal lives in `reviews` with
+        `type="duplicate_pair"`, built elsewhere, out of this module's
+        scope). Append-only: a node should be absorbed only once in
+        practice, but nothing here enforces that -- this is a durable audit
+        log, not a constraint surface. Returns the new trace row's id."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO merge_trace(survivor_uid, absorbed_uid, label, merged_at, reason) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (survivor_uid, absorbed_uid, label, datetime.now(UTC).isoformat(), reason),
+            )
+        return int(cursor.lastrowid)
+
+    def merged_into(self, uid: str) -> str | None:
+        """The uid this node was absorbed into, or `None` if it was never
+        merged -- a quick "was this node absorbed" check for downstream
+        code deciding whether to redirect a reference (plan.md §6.4). This
+        is a single-hop lookup only: if `uid`'s survivor was itself later
+        absorbed into a third node, this returns the immediate survivor,
+        not the end of the chain -- following multi-hop merge chains is
+        redirect logic, explicitly out of this module's scope. If a uid
+        somehow has more than one trace row, the most recent merge wins."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT survivor_uid FROM merge_trace WHERE absorbed_uid = ? "
+                "ORDER BY merged_at DESC, id DESC LIMIT 1",
+                (uid,),
+            ).fetchone()
+        return str(row["survivor_uid"]) if row else None
