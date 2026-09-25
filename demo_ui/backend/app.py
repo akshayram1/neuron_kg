@@ -41,6 +41,7 @@ from connectors.core.ledger import ConnectorLedger
 from demo_ui.backend.bitbucket_routes import router as bitbucket_router
 from demo_ui.backend.github_routes import router as github_router
 from demo_ui.backend.jira_routes import router as jira_router
+from demo_ui.backend.link_candidate_routes import router as link_candidate_router
 from demo_ui.backend.notion_routes import router as notion_router
 from demo_ui.backend.review_routes import router as review_router
 from demo_ui.backend.story_routes import router as story_router
@@ -143,6 +144,7 @@ app.include_router(notion_router)
 app.include_router(story_router)
 app.include_router(sync_coverage_router)
 app.include_router(review_router)
+app.include_router(link_candidate_router)
 
 
 @app.middleware("http")
