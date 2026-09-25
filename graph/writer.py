@@ -18,6 +18,8 @@ from typing import Any
 
 from falkordb import Graph
 
+from graph.time_axis import parse_iso
+
 _UID_NAMESPACE = uuid.UUID("2f9c9b0e-6c2a-4f7b-9b0a-8e2c3f6a1d4e")
 
 
@@ -136,25 +138,62 @@ def link_mentioned_in(graph: Graph, label: str, rows: list[dict[str, Any]]) -> N
 
 
 def upsert_fact_edges(
-    graph: Graph, rel_type: str, from_label: str, to_label: str, rows: list[dict[str, Any]]
+    graph: Graph,
+    rel_type: str,
+    from_label: str,
+    to_label: str,
+    rows: list[dict[str, Any]],
+    *,
+    revive: bool = True,
 ) -> None:
     """Create-or-confirm a live fact edge. rows: {from_uid, to_uid,
-    source_record_keys, evidence, extraction_method, confidence}.
+    source_record_keys, evidence, extraction_method, confidence, ...}.
+    Optional per-row fields: `pinned` (bool), `decay_class` (str),
+    `attested_by_record` (str, a source record key -- see below),
+    `projection_status` ("live" | "pending_review").
 
-    `ON MATCH` clears `invalid_at` even if it was just set — re-confirming an
-    edge means it's true again/still, which matters for the single-valued-fact
-    pattern: caller calls `supersede_fact_edges` first (invalidates whatever
-    is currently live out of `from_uid`), then this. If the new target is the
-    SAME as before, this MERGEs onto that just-invalidated edge and revives it
-    (verified: an unchanged Jira assignee across two syncs must stay live, not
-    get marked invalid by its own reconfirmation). If the new target DIFFERS,
-    this creates a fresh live edge via `ON CREATE` while the old one — a
-    different (a,rel,b) triple — stays invalidated from the supersede call.
+    `revive` (25-plan.md Phase 5 §5.0.1, default `True` — every existing
+    caller keeps today's exact behavior unless it opts in):
+
+    When `revive=True`, `ON MATCH` clears `invalid_at` even if it was just
+    set — re-confirming an edge means it's true again/still, which matters
+    for the single-valued-fact pattern: caller calls `supersede_fact_edges`
+    first (invalidates whatever is currently live out of `from_uid`), then
+    this. If the new target is the SAME as before, this MERGEs onto that
+    just-invalidated edge and revives it (verified: an unchanged Jira
+    assignee across two syncs must stay live, not get marked invalid by its
+    own reconfirmation). If the new target DIFFERS, this creates a fresh
+    live edge via `ON CREATE` while the old one — a different (a,rel,b)
+    triple — stays invalidated from the supersede call.
+
+    When `revive=False`, a match on a previously closed/corrected edge
+    (`r.invalid_at IS NOT NULL`) is left closed: `invalid_at` is NOT
+    cleared and `valid_at` is NOT changed. The write may still attach new
+    provenance (append to `source_record_keys`, update `evidence`/
+    `confidence`/etc.) — it just cannot reopen history. Text facts and
+    historical/backfill ingestion (25-plan.md §5.1/§5.2) pass `revive=False`
+    so that text re-asserting a claim identical to one already closed
+    cannot silently un-close it. A match on a still-live edge behaves the
+    same regardless of `revive` (there is nothing to "not reopen").
 
     Calling this WITHOUT superseding first just adds/confirms one edge among
     possibly several, which is correct for multi-valued facts (e.g. a
     WorkItem can BLOCK several others) and wrong for single-valued ones —
     that distinction is the caller's responsibility.
+
+    `last_confirmed_at` (25-plan.md §5.6, four clocks) only bumps on a
+    genuinely content-changing match: new/changed `evidence`, changed
+    `confidence`, a source record key not already recorded, or a revive
+    that actually reopens a closed edge. A KEEP-sync that re-asserts
+    identical content leaves `last_confirmed_at` untouched — this is a
+    behavior change from the previous unconditional `r.last_confirmed_at =
+    $now` on every match; see the module-level notes in the Phase 5 writer
+    report for why.
+
+    `attested_from` stays an ISO timestamp only (never a record key — see
+    `graph/time_axis.py`, which parses it as a date). A source record key
+    that documents *who/what confirmed this* belongs in the separate
+    `attested_by_record` field instead.
     """
     if not rows:
         return
@@ -164,6 +203,13 @@ def upsert_fact_edges(
         )}
         for row in rows
     ]
+    content_changed = """(
+                (row.evidence IS NOT NULL AND row.evidence <> r.evidence)
+                OR (row.confidence IS NOT NULL AND row.confidence <> r.confidence)
+                OR (row.source_record_keys IS NOT NULL AND size(row.source_record_keys) > 0
+                    AND NOT row.source_record_keys[0] IN coalesce(r.source_record_keys, []))
+                OR (r.invalid_at IS NOT NULL AND $revive)
+            )"""
     graph.query(
         f"""
         UNWIND $rows AS row
@@ -183,17 +229,30 @@ def upsert_fact_edges(
             r.premise_fact_uids = row.premise_fact_uids,
             r.ended_unknown = coalesce(row.ended_unknown, false),
             r.attested_from = row.attested_from,
-            r.adopted_batch = row.adopted_batch
+            r.attested_by_record = row.attested_by_record,
+            r.adopted_batch = row.adopted_batch,
+            r.pinned = coalesce(row.pinned, false),
+            r.decay_class = row.decay_class,
+            r.assertion_status = 'live',
+            r.projection_status = coalesce(row.projection_status, 'live')
         ON MATCH SET
-            r.last_confirmed_at = $now,
-            r.valid_at = CASE WHEN r.invalid_at IS NULL THEN r.valid_at ELSE coalesce(row.valid_at, $now) END,
-            r.invalid_at = null,
+            r.last_confirmed_at = CASE WHEN {content_changed} THEN $now ELSE r.last_confirmed_at END,
+            r.valid_at = CASE
+                WHEN NOT $revive THEN r.valid_at
+                WHEN r.invalid_at IS NULL THEN r.valid_at
+                ELSE coalesce(row.valid_at, $now)
+            END,
+            r.invalid_at = CASE WHEN $revive THEN null ELSE r.invalid_at END,
             r.derived = CASE WHEN row.derived IS NULL THEN r.derived ELSE row.derived END,
             r.derived_rule = CASE WHEN row.derived_rule IS NULL THEN r.derived_rule ELSE row.derived_rule END,
             r.premise_fact_uids = CASE WHEN row.premise_fact_uids IS NULL THEN r.premise_fact_uids ELSE row.premise_fact_uids END,
             r.ended_unknown = CASE WHEN row.ended_unknown IS NULL THEN r.ended_unknown ELSE row.ended_unknown END,
             r.attested_from = CASE WHEN row.attested_from IS NULL THEN r.attested_from ELSE row.attested_from END,
+            r.attested_by_record = CASE WHEN row.attested_by_record IS NULL THEN r.attested_by_record ELSE row.attested_by_record END,
             r.adopted_batch = CASE WHEN row.adopted_batch IS NULL THEN r.adopted_batch ELSE row.adopted_batch END,
+            r.pinned = CASE WHEN row.pinned = true THEN true ELSE coalesce(r.pinned, false) END,
+            r.decay_class = CASE WHEN row.decay_class IS NULL THEN r.decay_class ELSE row.decay_class END,
+            r.projection_status = CASE WHEN row.projection_status IS NULL THEN coalesce(r.projection_status, 'live') ELSE row.projection_status END,
             r.source_record_keys = CASE
                 WHEN row.source_record_keys[0] IN coalesce(r.source_record_keys, [])
                 THEN r.source_record_keys
@@ -205,7 +264,7 @@ def upsert_fact_edges(
             r.model = CASE WHEN row.model IS NULL THEN r.model ELSE row.model END,
             r.fact_uid = row.fact_uid
         """,
-        params={"rows": rows, "now": now_iso()},
+        params={"rows": rows, "now": now_iso(), "revive": revive},
     )
 
 
@@ -433,3 +492,302 @@ def supersede_fact_edges(
         """,
         params={"from_uids": from_uids, "now": now_iso()},
     )
+
+
+# ---------------------------------------------------------------------------
+# 25-plan.md Phase 5 §5.0 — writer contract for text facts.
+#
+# `supersede_fact_edges` above is subject-wide: it invalidates *every* live
+# edge of a relation type out of a `from_uid`, which is correct for
+# deterministic/single-valued facts (a Jira assignee, a WorkItem's status)
+# where the caller already knows "whatever is live now is about to be
+# replaced". Text facts don't have that guarantee — `resolve_text_fact`
+# (§5.2, built after this) identifies a *specific* conflicting fact by its
+# `fact_uid` via a candidate query, and closing/correcting anything wider
+# than that one edge would be wrong. `close_fact` and `correct_fact` are
+# that fact_uid-scoped alternative; both reuse the same `FactHistory`
+# archival shape as `_archive_history_rows`/`upsert_history_intervals`
+# rather than inventing a second history mechanism.
+# ---------------------------------------------------------------------------
+
+
+def _find_live_fact(graph: Graph, fact_uid: str) -> dict[str, Any]:
+    """Locate the one live edge carrying `fact_uid`, regardless of its
+    relationship type or endpoint labels (matches `uid` the same
+    label-agnostic way `invalidate_edges_by_uid_pairs`/`delete_node` do).
+
+    Raises `ValueError` — never silently no-ops — if no live edge matches,
+    or if more than one does (should not happen: `fact_uid` is deterministic
+    per (from_uid, rel_type, to_uid) via `make_uid`, so two *live* matches
+    would mean a real data bug, not a normal race)."""
+    result = graph.query(
+        """
+        MATCH (a)-[r]->(b)
+        WHERE r.fact_uid = $fact_uid AND r.invalid_at IS NULL
+        RETURN a.uid, a.name, type(r), b.uid, b.name, r.valid_at, r.first_seen_at,
+               r.last_confirmed_at, r.source_record_keys, r.evidence,
+               r.extraction_method, r.confidence, r.chunk_id, r.chunk_hash,
+               r.extractor_version, r.model
+        """,
+        params={"fact_uid": fact_uid},
+    ).result_set
+    if not result:
+        raise ValueError(f"no live fact edge found for fact_uid={fact_uid!r}")
+    if len(result) > 1:
+        raise ValueError(
+            f"ambiguous fact_uid={fact_uid!r}: matched {len(result)} live edges"
+        )
+    (from_uid, from_name, rel_type, to_uid, to_name, valid_at, first_seen_at,
+     last_confirmed_at, source_keys, evidence, method, confidence, chunk_id,
+     chunk_hash, extractor_version, model) = result[0]
+    return {
+        "from_uid": from_uid, "from_name": from_name, "rel_type": rel_type,
+        "to_uid": to_uid, "to_name": to_name, "valid_at": valid_at,
+        "first_seen_at": first_seen_at, "last_confirmed_at": last_confirmed_at,
+        "source_record_keys": source_keys, "evidence": evidence,
+        "extraction_method": method, "confidence": confidence,
+        "chunk_id": chunk_id, "chunk_hash": chunk_hash,
+        "extractor_version": extractor_version, "model": model,
+    }
+
+
+def close_fact(graph: Graph, fact_uid: str, valid_to: str, reason: str = "superseded") -> None:
+    """§5.0.2 — close exactly ONE live fact (found by `fact_uid`, never
+    subject-wide) at the caller-supplied WORLD-time instant `valid_to` — not
+    `now()`. Archives the pre-close snapshot into `FactHistory` (same shape
+    `_archive_history_rows` produces, plus `close_reason`), then sets
+    `r.invalid_at = valid_to` on the live edge.
+
+    This is the `newer_state` shape from §5.0's own table: "old fact valid
+    until `new.valid_at`" is exactly `close_fact(old.fact_uid, new.valid_at)`.
+    `close_fact` never sets `assertion_status` — a closed fact was true and
+    then stopped being true, which is a different claim than `correct_fact`'s
+    "was never true" (kept distinct in storage per §5.0.3).
+
+    Raises `ValueError` on a missing/ambiguous `fact_uid` (via
+    `_find_live_fact`) and on an invalid interval (`valid_to` before the
+    fact's own `valid_at`, when both parse as dates)."""
+    fact = _find_live_fact(graph, fact_uid)
+    parsed_to, parsed_from = parse_iso(valid_to), parse_iso(fact["valid_at"])
+    if parsed_to is not None and parsed_from is not None and parsed_to < parsed_from:
+        raise ValueError(
+            f"close_fact: valid_to={valid_to!r} is before this fact's own "
+            f"valid_at={fact['valid_at']!r} for fact_uid={fact_uid!r}"
+        )
+    now = now_iso()
+    history_row = {
+        "uid": make_uid(
+            "FactHistory", fact["from_uid"], fact["rel_type"], fact["to_uid"],
+            str(fact["valid_at"] or ""), now,
+        ),
+        "props": {
+            "name": f"{fact['from_name'] or fact['from_uid']} {fact['rel_type']} "
+                    f"{fact['to_name'] or fact['to_uid']}",
+            "from_uid": fact["from_uid"], "to_uid": fact["to_uid"], "relation": fact["rel_type"],
+            "fact_uid": fact_uid,
+            "valid_from": fact["valid_at"], "valid_to": valid_to,
+            "observed_from": fact["first_seen_at"], "observed_to": now,
+            "last_confirmed_at": fact["last_confirmed_at"],
+            "source_record_keys": fact["source_record_keys"] or [], "evidence": fact["evidence"],
+            "extraction_method": fact["extraction_method"], "confidence": fact["confidence"],
+            "chunk_id": fact["chunk_id"], "chunk_hash": fact["chunk_hash"],
+            "extractor_version": fact["extractor_version"], "model": fact["model"],
+            "close_reason": reason,
+        },
+    }
+    upsert_entities(graph, "FactHistory", [history_row])
+    graph.query(
+        f"""
+        MATCH (a {{uid: $from_uid}})-[r:{_label(fact['rel_type'])}]->(b {{uid: $to_uid}})
+        WHERE r.fact_uid = $fact_uid
+        SET r.invalid_at = $valid_to, r.close_reason = $reason
+        """,
+        params={
+            "from_uid": fact["from_uid"], "to_uid": fact["to_uid"],
+            "fact_uid": fact_uid, "valid_to": valid_to, "reason": reason,
+        },
+    )
+
+
+def correct_fact(graph: Graph, fact_uid: str, corrected_by: str, observed_to: str) -> None:
+    """§5.0.3 — mark a fact as WRONG, not merely superseded. Distinct from
+    `close_fact` (which keeps the fact's old world-time validity intact):
+    a corrected assertion "is excluded from every 'what was true' world-time
+    query, including dates before the correction, because it was never true."
+
+    Storage shape:
+    - `FactHistory` archive row: `assertion_status="corrected"`,
+      `corrected_by=<the new fact_uid>`, `correction_observed_at=observed_to`,
+      and — this is the "still visible via record-time history until
+      observed_to" mechanism the plan asks to verify — `observed_from` is
+      the original `first_seen_at` and `observed_to` is the given
+      `observed_to`, so `held_at(observed_from, observed_to, as_of)`
+      (graph/time_axis.py, unmodified) already returns True for any `as_of`
+      strictly before `observed_to` and False at/after it. No new record-time
+      machinery is needed; the existing `observed_from`/`observed_to`
+      interval on the archived row is exactly that machinery.
+    - Live edge: `assertion_status="corrected"`, `corrected_by`,
+      `correction_observed_at`, `metadata_revised_at` bumped (a review-style
+      metadata change), and — the conservative choice documented here since
+      the plan leaves the exact "how" to this task's judgment —
+      `invalid_at` is set equal to `valid_at`, collapsing the live edge's
+      world-time window to zero width. That is not a second "closing"
+      mechanism: it doesn't encode "true until X" — it encodes "there is no
+      instant at which `valid_at <= at < invalid_at` holds", i.e. never true
+      under ordinary interval math, so a reader who has NOT yet adopted the
+      §5.0.6 predicate (`graph/fact_predicates.py`) and only checks the
+      historical `invalid_at IS NULL` idiom still treats it as not-live, and
+      one who *does* check `holds_at(valid_at, invalid_at, at)` gets `False`
+      for every `at`, not just dates after the correction. The authoritative
+      check either way is `assertion_status != 'corrected'` from the
+      centralized predicate; the zero-width interval is defense in depth for
+      the ~23 call sites that don't use it yet (see `fact_predicates.py`).
+
+    Raises `ValueError` on a missing/ambiguous `fact_uid` (via
+    `_find_live_fact`, same guard as `close_fact`)."""
+    fact = _find_live_fact(graph, fact_uid)
+    now = now_iso()
+    history_row = {
+        "uid": make_uid(
+            "FactHistory", fact["from_uid"], fact["rel_type"], fact["to_uid"],
+            str(fact["valid_at"] or ""), now,
+        ),
+        "props": {
+            "name": f"{fact['from_name'] or fact['from_uid']} {fact['rel_type']} "
+                    f"{fact['to_name'] or fact['to_uid']}",
+            "from_uid": fact["from_uid"], "to_uid": fact["to_uid"], "relation": fact["rel_type"],
+            "fact_uid": fact_uid,
+            "valid_from": fact["valid_at"], "valid_to": fact["valid_at"],
+            "observed_from": fact["first_seen_at"], "observed_to": observed_to,
+            "last_confirmed_at": fact["last_confirmed_at"],
+            "source_record_keys": fact["source_record_keys"] or [], "evidence": fact["evidence"],
+            "extraction_method": fact["extraction_method"], "confidence": fact["confidence"],
+            "chunk_id": fact["chunk_id"], "chunk_hash": fact["chunk_hash"],
+            "extractor_version": fact["extractor_version"], "model": fact["model"],
+            "assertion_status": "corrected", "corrected_by": corrected_by,
+            "correction_observed_at": observed_to,
+        },
+    }
+    upsert_entities(graph, "FactHistory", [history_row])
+    graph.query(
+        f"""
+        MATCH (a {{uid: $from_uid}})-[r:{_label(fact['rel_type'])}]->(b {{uid: $to_uid}})
+        WHERE r.fact_uid = $fact_uid
+        SET r.assertion_status = 'corrected',
+            r.corrected_by = $corrected_by,
+            r.correction_observed_at = $observed_to,
+            r.metadata_revised_at = $now,
+            r.invalid_at = r.valid_at
+        """,
+        params={
+            "from_uid": fact["from_uid"], "to_uid": fact["to_uid"], "fact_uid": fact_uid,
+            "corrected_by": corrected_by, "observed_to": observed_to, "now": now,
+        },
+    )
+
+
+def confirm_fact(
+    graph: Graph,
+    fact_uid: str,
+    *,
+    at: str | None = None,
+    source_record_key: str | None = None,
+    evidence: str | None = None,
+    confidence: float | None = None,
+) -> None:
+    """§5.0.1 — the narrow "confirm" primitive: attach new provenance to an
+    existing LIVE fact edge (the §5.2 `duplicate` case — new evidence
+    restates a fact already known) WITHOUT touching `valid_at`/`invalid_at`
+    at all, ever.
+
+    Judgment call (flagged per the task instructions): `upsert_fact_edges(
+    revive=False)` already covers "don't reopen a closed edge", but its
+    `ON MATCH` branch still has to decide, in one query, what a match on a
+    CLOSED edge should do. `confirm_fact` is deliberately narrower and
+    fact_uid-scoped (matching `close_fact`/`correct_fact`'s shape rather
+    than `upsert_fact_edges`'s label/uid shape) so `resolve_text_fact` (§5.2)
+    has one call, for one already-identified live fact, that provably cannot
+    touch the temporal fields — there is no code path in this function that
+    writes `valid_at` or `invalid_at`. It only ever matches a LIVE edge (via
+    `_find_live_fact`, so a missing/closed `fact_uid` raises rather than
+    silently doing nothing) because every §5.2 caller of `duplicate` already
+    found `old` via a `r.invalid_at IS NULL` candidate query — confirming a
+    closed fact is not a case that arises for this primitive; a caller that
+    needs that should use `upsert_fact_edges(revive=False)` directly.
+
+    `last_confirmed_at` bumps to `at` (falling back to `now()`) only when
+    this is a genuinely new supporting record or changed evidence/confidence
+    — the same content-change rule as `upsert_fact_edges` (§5.6) — so a
+    `duplicate` confirmation that adds nothing new does not move the clock.
+    """
+    fact = _find_live_fact(graph, fact_uid)
+    graph.query(
+        f"""
+        MATCH (a {{uid: $from_uid}})-[r:{_label(fact['rel_type'])}]->(b {{uid: $to_uid}})
+        WHERE r.fact_uid = $fact_uid
+        SET r.last_confirmed_at = CASE WHEN (
+                ($evidence IS NOT NULL AND $evidence <> r.evidence)
+                OR ($confidence IS NOT NULL AND $confidence <> r.confidence)
+                OR ($key IS NOT NULL AND NOT $key IN coalesce(r.source_record_keys, []))
+            ) THEN coalesce($at, $now) ELSE r.last_confirmed_at END,
+            r.source_record_keys = CASE
+                WHEN $key IS NULL THEN r.source_record_keys
+                WHEN $key IN coalesce(r.source_record_keys, []) THEN r.source_record_keys
+                ELSE coalesce(r.source_record_keys, []) + [$key]
+            END,
+            r.evidence = CASE WHEN $evidence IS NULL THEN r.evidence ELSE $evidence END,
+            r.confidence = CASE WHEN $confidence IS NULL THEN r.confidence ELSE $confidence END
+        """,
+        params={
+            "from_uid": fact["from_uid"], "to_uid": fact["to_uid"], "fact_uid": fact_uid,
+            "at": at, "now": now_iso(), "key": source_record_key,
+            "evidence": evidence, "confidence": confidence,
+        },
+    )
+
+
+def touch_metadata(graph: Graph, fact_uid: str, at: str | None = None) -> None:
+    """§5.6 — bump `metadata_revised_at`, the third of the four clocks:
+    status/pin/dispute/review decisions, never content. Kept a distinct
+    primitive from `last_confirmed_at` (content restated, `upsert_fact_edges`
+    / `confirm_fact`) and `first_seen_at` (`ON CREATE` only) so the three
+    clocks can never be conflated by a caller reusing the wrong setter.
+
+    No real caller exists yet — the status/pin/dispute/review decisions that
+    should call this belong to Phase 6's review-approval flow, out of scope
+    here. This function exists so that field/primitive is ready when that
+    flow is built, per the writer-contract task ("just make sure the
+    field/helper EXISTS and is correctly scoped").
+
+    Matches by `fact_uid` alone (any relationship type/endpoints, live or
+    closed — metadata decisions like "pin" or "dispute" are not restricted
+    to live facts) and is a no-op if `fact_uid` matches nothing.
+    """
+    graph.query(
+        "MATCH ()-[r]->() WHERE r.fact_uid = $fact_uid SET r.metadata_revised_at = $at",
+        params={"fact_uid": fact_uid, "at": at or now_iso()},
+    )
+
+
+def reinforce_count(source_record_keys: list[str] | None) -> int:
+    """§5.7 — `reinforce_count = size(r.source_record_keys)` (distinct
+    supporting records). A pure computed value, not a stored field:
+    `source_record_keys` already exists on every fact edge and already
+    dedupes on write (`upsert_fact_edges`'s `ON MATCH` only appends a key
+    not already present). Consumers (a rerank tie-break boost, an evidence
+    line "seen in N records") live in `graph/chat.py`/`graph/rerank.py`,
+    both off-limits here; this is only the pure function they should call.
+    """
+    return len(source_record_keys or [])
+
+
+# `last_retrieved_at` (§5.6, fourth clock) is a NODE property, not an edge
+# property: it is set "when a node reaches the final answer set", which is a
+# `graph/chat.py` read-path concern (off-limits to this task). There is no
+# writer here for it — a future `graph/chat.py` change should, after
+# assembling the final answer set, do the node-scoped equivalent of:
+#     MATCH (n {uid: $uid}) SET n.last_retrieved_at = $now
+# for each node that made it into the answer, using this module's
+# `now_iso()`. Documented here, per the writer-contract task, as the
+# schema/property convention that change should follow — not implemented,
+# since its only real caller is in the off-limits file.
