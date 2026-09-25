@@ -11,7 +11,7 @@ from __future__ import annotations
 import itertools
 
 from connectors.core.ledger import ConnectorLedger
-from graph.axioms import AS_IS, SWAPPED, AxiomSet, DEFAULT_AXIOMS, RelationAxiom, load_axioms
+from graph.axioms import AS_IS, SWAPPED, AxiomSet, DEFAULT_AXIOMS, RelationAxiom, load_axioms, seed_axioms
 from graph.ontology import RELATION_TYPE_MAP, is_relation_allowed
 
 _KINDS = sorted(
@@ -61,6 +61,42 @@ def test_axioms_the_old_dict_could_not_express():
     assert "ASSIGNED_TO" in DEFAULT_AXIOMS.functional_relations()
     # An event happened once; it has no interval to be superseded over.
     assert [a.temporal for a in DEFAULT_AXIOMS.for_relation("MODIFIES")] == ["event"]
+
+
+def test_disputed_with_is_structural_and_symmetric_but_not_transitive():
+    """plan.md §5.4: DISPUTED_WITH is a structural axiom -- symmetric like
+    SAME_AS (A disputes B implies B disputes A) but, unlike SAME_AS, NOT
+    transitive (A vs B and B vs C says nothing about A vs C)."""
+    disputed = DEFAULT_AXIOMS.for_relation("DISPUTED_WITH")
+    assert len(disputed) == 1
+    axiom = disputed[0]
+    assert axiom.subject_kind == "Decision"
+    assert axiom.object_kind == "Decision"
+    assert axiom.is_symmetric is True
+    assert axiom.extractable is False
+    assert axiom.is_transitive is False
+
+    assert "DISPUTED_WITH" in DEFAULT_AXIOMS.symmetric_relations()
+    assert "DISPUTED_WITH" not in DEFAULT_AXIOMS.transitive_relations()
+
+
+def test_disputed_with_is_never_llm_extractable():
+    """The single most important behavior: an extraction must never be able
+    to assert a dispute directly -- it is written only by resolve_text_fact
+    and Phase 6.3 (plan.md §5.4)."""
+    assert DEFAULT_AXIOMS.is_allowed("Decision", "DISPUTED_WITH", "Decision") is False
+    assert DEFAULT_AXIOMS.resolve_direction("Decision", "DISPUTED_WITH", "Decision") is None
+    # Also unreachable through the ontology's own extraction allow-list.
+    assert is_relation_allowed("Decision", "DISPUTED_WITH", "Decision") is False
+
+
+def test_disputed_with_is_in_seed_axioms():
+    seeded = [a for a in seed_axioms() if a.relation == "DISPUTED_WITH"]
+    assert len(seeded) == 1
+    assert seeded[0].subject_kind == "Decision"
+    assert seeded[0].object_kind == "Decision"
+    assert seeded[0].is_symmetric is True
+    assert seeded[0].extractable is False
 
 
 def test_direction_resolution_reads_from_the_store():

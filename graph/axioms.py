@@ -146,6 +146,15 @@ _STRUCTURAL: list[RelationAxiom] = [
     # Identity: the same person seen through two providers. Symmetric and
     # transitive is what makes a merge cluster a cluster.
     RelationAxiom("SAME_AS", "Person", "Person", is_symmetric=True, is_transitive=True),
+    # A live conflict between two Decisions over the same fact (plan.md §5.4).
+    # Symmetric like SAME_AS -- A disputes B implies B disputes A -- but NOT
+    # transitive: A disputes B and B disputes C says nothing about A and C,
+    # unlike identity, which really does chain. Structural and non-extractable
+    # by construction (see module docstring): written only by
+    # `resolve_text_fact` (plan.md §5.2) and Phase 6.3, never by an
+    # extraction, so this row exists purely for its symmetry axiom and to
+    # keep the relation in the vocabulary for chat/derivation to reason about.
+    RelationAxiom("DISPUTED_WITH", "Decision", "Decision", is_symmetric=True),
     # One live assignee / reporter / project at a time -- a second one is a
     # contradiction, not an addition. (`functional` is what a cardinality
     # check reads; the writer already enforces it via supersede-then-upsert.)
