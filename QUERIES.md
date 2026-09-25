@@ -128,6 +128,14 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **Question:** `graph/fact_predicates.py`'s `live_fact_cypher()` is the one correct "is this fact edge live" check (`invalid_at IS NULL AND assertion_status != 'corrected' AND projection_status = 'live'`), but ~23 existing `invalid_at IS NULL` call sites across `graph/chat.py`, `graph/derived.py`, `graph/inference.py`, `graph/graph_view.py`, `graph/expand.py`, `graph/history.py`, `graph/structured_query.py` still use the old, narrower check. `correct_fact` defends against this today (it also collapses the live edge's `invalid_at` to `valid_at`, so even an unconverted reader treats a corrected fact as not-live) — but `pending_review` facts (§5.2, not built yet) have no such defense, since a zero-width interval doesn't make sense for "not yet approved." Once §5.2 exists, should propagating the centralized predicate to these readers be part of that same task, or a dedicated follow-up?
 **Assumption made for now:** none — `graph/chat.py` is off-limits to agents right now anyway (your in-progress Laya work), so this is naturally deferred, not actively worked around.
 
+---
+
+## 5.1 — `upsert_fact_edges` doesn't accept `valid_at_basis`/`invalid_at` yet; semantic_pass.py has a temporary stopgap
+**Raised:** 25 Sep 2026
+**Blocks:** nothing broken today — `graph/semantic_pass.py` (§5.1 wiring, merged) empirically confirmed `upsert_fact_edges` silently drops unrecognized row keys rather than erroring, so it added a small supplementary Cypher write (matched by `fact_uid`) right after the normal call, only when `valid_at_basis == "stated"` or an `invalid_at` resolved — zero extra graph calls for the common no-date case. Clearly marked `# STOPGAP` in the code with instructions to delete once fixed.
+**Question:** `graph/writer.py`'s `upsert_fact_edges` needs two small additive `ON CREATE`/`ON MATCH` lines for `valid_at_basis`/`invalid_at` (same pattern as the other optional fields already there — `pinned`, `decay_class`, etc.). This naturally belongs with the §5.2 `resolve_text_fact` work (same file, in flight as this is written) — worth folding into that task's cleanup, or a dedicated one-line follow-up after?
+**Assumption made for now:** the stopgap only persists `valid_at_basis` when it's `"stated"`, not the default `"record_time"` — a missing property should be read by any future reader as `"record_time"`. Flagging in case the repo owner would rather it always be persisted once `writer.py` is patched (trivial one-line change either way).
+
 ## 2.1 — `select_final`'s token-budget cap has no data to work with yet
 **Raised:** 25 Sep 2026
 **Blocks:** nothing yet (Phase 2.4 tuning, not started) — a heads-up for whoever wires Phase 2.2.
