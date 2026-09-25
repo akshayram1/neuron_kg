@@ -172,3 +172,13 @@ baseline. No `evaluate_retrieval.py` run was made for this dataset.
 **Tertiary, unrelated to the bug:** the `laya` package itself isn't installed in this venv (only in `personal_exp/laya`'s own venv) — even with the `encoder` bug fixed, real Laya inference still can't run here without a packaging decision (same open question in `QUERIES.md`).
 
 **Not fixed by me** — this is Akshay's in-progress, uncommitted code; flagging rather than editing it.
+
+---
+
+## Re-test after fixing the `encoder` bug — 25 Sep 2026
+
+Fixed `graph/chat.py:1043` (`_rerank_candidates`): `best_window(question, serialized, 300)` → `best_window(question, serialized, 300, vector_store._encoding)`, matching every other `best_window` call site in this file. Confirmed the `TypeError` is gone — reproduced directly with full logging, no crash at that line anymore.
+
+Re-ran the same 44-case comparison (`--graph story-20260917-050343-5d26 --k 8 --with-chat --stage-metrics`): **numbers unchanged again** — `candidate_recall=0.4773`, `final_recall=0.0909`, `MRR=0.01388`, total $0.614. Still 31/44 `reranker=laya, rerank_fallback=True`.
+
+**Reason has changed, outcome hasn't:** the crash now happens one step later, at `LayaReranker._load()`, with a clean `RuntimeError: NEURON_RERANK=laya requires the \`laya\` package in the Neuron runtime` — the `laya` package genuinely isn't installed in this venv (confirmed: only exists in `personal_exp/laya`'s own separate `.venv`). The `encoder` bug is real and now fixed, but it was never the only thing standing between this environment and a real Laya score — the package itself needs to be installed, which is the packaging decision already open in `QUERIES.md` ("vendored dependency vs. sidecar service"). Until that's answered, no before/after Laya comparison is possible in this environment — every attempt will keep falling back to RRF, correctly, but silently unless someone reads the logs.
