@@ -275,6 +275,81 @@ def find_similar_uid(
     return None
 
 
+def search_above(
+    client: QdrantClient | PostgresVectorClient,
+    label: str, embedding: list[float], min_similarity: float, *,
+    namespace_uid: str | None = None, max_similarity: float | None = None,
+    limit: int = 20, collection: str = COLLECTION,
+) -> list[tuple[str, float]]:
+    """Threshold, multi-candidate search for the Phase 4 resolution ladder
+    (25-plan.md §4.2, rungs 4 and 5). Where `find_similar_uid` returns only
+    the single best match, this returns EVERY candidate that clears
+    `min_similarity` (up to the `limit` resource ceiling), best first --
+    rung 4 needs to tell "exactly one candidate >= 0.90" apart from "more
+    than one", and rung 5 wants the whole 0.75 <= sim < 0.90 gray zone, hence
+    `max_similarity`.
+
+    Cosine similarity semantics and the 0.90 calibration rationale are
+    explained in `find_similar_uid`'s docstring; this function uses the same
+    scale, just without collapsing to top-1.
+
+    NAMESPACE GAP (flagged, not fixed here): `namespace_uid` filters on a
+    Qdrant payload key / Postgres `entity_embeddings.namespace_uid` column
+    that no write path populates yet. `upsert_vectors`'s payload today is
+    only `label`/`uid`/`embedded_text`/`embedded_model` -- see its docstring
+    -- so passing `namespace_uid` here is structurally correct (it narrows
+    results exactly as intended when a payload/row does carry the field, see
+    tests/test_vector_store.py) but will currently match nothing on data
+    written through the real pipelines, since none of them set it. Wiring
+    real values through means touching `upsert_vectors`'s callers
+    (`graph/jira_pipeline.py`, `graph/semantic_pass.py`,
+    `graph/embed_batch.py`, `scripts/rebuild_vectors.py`) -- out of scope
+    here; left as a follow-up.
+    """
+    if isinstance(client, PostgresVectorClient):
+        try:
+            return client.store.vector_search(
+                collection, embedding, label=label, limit=limit, channel=CONTENT_VECTOR,
+                min_similarity=min_similarity, max_similarity=max_similarity,
+                namespace_uid=namespace_uid,
+            )
+        except Exception:
+            logger.exception(
+                "pgvector search_above failed for label=%s collection=%s namespace_uid=%s",
+                label, collection, namespace_uid,
+            )
+            return []
+    query_filter = _label_filter(label)
+    if namespace_uid is not None:
+        must = list(query_filter.must) if query_filter is not None else []
+        must.append(FieldCondition(key="namespace_uid", match=MatchValue(value=namespace_uid)))
+        query_filter = Filter(must=must)
+    try:
+        result = client.query_points(
+            collection_name=collection,
+            query=embedding,
+            using=CONTENT_VECTOR,
+            query_filter=query_filter,
+            limit=limit,
+            score_threshold=min_similarity,
+            search_params=SearchParams(
+                # Same rescore rationale as `search`: quantization noise
+                # must not leak into a threshold comparison.
+                quantization=QuantizationSearchParams(rescore=True)
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "Qdrant search_above failed for label=%s collection=%s namespace_uid=%s",
+            label, collection, namespace_uid,
+        )
+        return []
+    hits = [(str(point.payload.get("uid") or point.id), float(point.score)) for point in result.points]
+    if max_similarity is not None:
+        hits = [hit for hit in hits if hit[1] < max_similarity]
+    return hits
+
+
 def delete_vectors(
     client: QdrantClient | PostgresVectorClient,
     uids: Iterable[str], collection: str = COLLECTION,
