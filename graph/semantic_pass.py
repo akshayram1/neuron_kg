@@ -45,6 +45,7 @@ from connectors.core.ledger import (
 from graph import vector_store
 from graph import writer as w
 from graph.axioms import SWAPPED, AxiomSet, DEFAULT_AXIOMS, load_axioms
+from graph.dates import stated_dates
 from graph.profiles import WorkManagementExtraction, profile_for_record_key
 from graph.token_usage import TokenUsage
 
@@ -1005,21 +1006,79 @@ def _write_extraction(
             drops.append(projection_drop)
             continue
 
-        w.upsert_fact_edges(graph, fact.relation, subject_kind, object_kind, [{
+        # §5.1 (25-plan.md "Stated vs record time"): parse this fact's own
+        # verbatim evidence span for a stated start/end date, anchored to
+        # the record's `source_time`. No LLM call -- `stated_dates` is a
+        # pure regex/keyword parser (graph/dates.py, Phase 5.1, merged).
+        #
+        # `valid_at` is NEVER left null: a stated start takes it, otherwise
+        # it falls back to `source_time` exactly as before this change --
+        # `graph/time_axis.py` and every temporal query read `valid_at`, so
+        # this is additive, not a semantic change (see 25-plan.md §5.1's own
+        # "why not change valid_at semantics outright").
+        stated = stated_dates(fact.evidence, source_time)
+        if stated.start:
+            valid_at = stated.start
+            valid_at_basis = "stated"
+        else:
+            valid_at = source_time
+            valid_at_basis = "record_time"
+        ended_unknown = stated.end_stated_but_unresolved
+        invalid_at = stated.end  # only set (below) when a real end date resolved
+
+        fact_row: dict = {
             "from_uid": subject_uid, "to_uid": object_uid, "source_record_keys": [chunk.record_key],
             "evidence": fact.evidence, "extraction_method": "llm", "confidence": 0.9,
             "chunk_id": chunk.chunk_id,
             "chunk_hash": hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
             "extractor_version": profile_name,
             "model": extraction_model,
-            "valid_at": source_time,
+            "valid_at": valid_at,
+            "valid_at_basis": valid_at_basis,
+            "ended_unknown": ended_unknown,
             "direction_corrected": direction == SWAPPED,
             # Stamped only when this triple entered the vocabulary through an
             # adoption. It is what makes the batch revertible: `unadopt` drops
             # the axiom rows, then deletes exactly the edges they let in --
             # edges from the seeded vocabulary carry NULL and are never touched.
             "adopted_batch": axioms.adopted_batch_for(subject_kind, fact.relation, object_kind),
-        }])
+        }
+        if invalid_at is not None:
+            fact_row["invalid_at"] = invalid_at
+        w.upsert_fact_edges(graph, fact.relation, subject_kind, object_kind, [fact_row])
+
+        # STOPGAP -- see QUERIES.md ("§5.1 valid_at_basis/invalid_at not yet
+        # accepted by upsert_fact_edges"). Verified empirically (real
+        # FalkorDB): `w.upsert_fact_edges`'s UNWIND/SET Cypher only reads the
+        # row keys it explicitly names -- `valid_at_basis` and `invalid_at`
+        # above are silently ignored (no error, but also never written) by
+        # today's graph/writer.py, which is off-limits to this task (a
+        # parallel §5.2 task owns it). Until writer.py grows two additive
+        # ON CREATE/ON MATCH lines for these fields, persist them here
+        # directly with a small supplementary write, matched by `fact_uid`
+        # (same deterministic id `upsert_fact_edges` just computed) so this
+        # feature's data is actually readable from the graph today. Skipped
+        # entirely -- zero extra queries -- for the common case (no date
+        # stated, no end resolved), which is today's exact unchanged
+        # behavior. Delete this block once graph/writer.py accepts the
+        # fields natively; `fact_row` above already needs no change then.
+        if valid_at_basis == "stated" or invalid_at is not None:
+            fact_uid = w.make_uid("Fact", str(subject_uid), fact.relation, str(object_uid))
+            set_clause = "r.valid_at_basis = $valid_at_basis"
+            supp_params = {
+                "from_uid": subject_uid, "to_uid": object_uid, "fact_uid": fact_uid,
+                "valid_at_basis": valid_at_basis,
+            }
+            if invalid_at is not None:
+                set_clause += ", r.invalid_at = $invalid_at"
+                supp_params["invalid_at"] = invalid_at
+            graph.query(
+                "MATCH (a {uid: $from_uid})-[r]->(b {uid: $to_uid}) "
+                "WHERE r.fact_uid = $fact_uid "
+                f"SET {set_clause}",
+                params=supp_params,
+            )
+
         edges_supported.append(RecordEdgeRef(fact.relation, subject_uid, object_uid))
         facts_written += 1
         logger.info(
