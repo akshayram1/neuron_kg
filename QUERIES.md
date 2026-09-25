@@ -68,3 +68,17 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **Blocks:** nothing yet (Phase 2.4 tuning, not started) — a heads-up for whoever wires Phase 2.2.
 **Question:** the plan lists `min_keep`/`max_keep`/token budget together as `select_final`'s hard caps, but `RerankScore` carries no token count, so token-budget enforcement was left out of `select_final` and left to the future `chat.py` caller (which already has candidate text + a real prompt budget from Phase 1.2's packing work). Fine as designed, or do you want `RerankCandidate`/`RerankScore` extended with a token count now so `select_final` can enforce the budget itself?
 **Assumption made for now:** threshold → diversity (documented no-op, dedupe-by-uid only — the plan names "diversity" with no concrete algorithm) → min_keep/max_keep, implemented and tested; token budget deferred to the caller.
+
+---
+
+## 1.4 — `min_tier` can never be `"primary"` in today's control flow
+**Raised:** 25 Sep 2026
+**Blocks:** nothing broken; the "primary for lookup questions" half of §1.4's expansion trust floor is currently dead code.
+**Question:** in `graph/chat.py`'s `retrieve()`, `expand_neighbors()` is only ever reached when `structured is None` (a non-`None` `resolve_structured()` result already returns earlier in the function) — but the plan's §1.4 "primary for lookup questions" branch is keyed off exactly that same `structured`-result signal. So expansion's `min_tier` is always `"derived"` in practice today; the `"primary" if structured is not None else "derived"` conditional is implemented but unreachable. Is there a different signal you want for "this is a lookup-shaped question" (e.g. a regex/anchor check independent of whether structured resolution fully answered it), or is always-`"derived"` fine until Phase 2.5's query-type router exists?
+**Assumption made for now:** implemented the conditional as documented, dead-but-ready code, rather than hardcoding a bare `"derived"` constant that would need rediscovering later.
+
+## 1.7 — two-entity lane prepends entity nodes, not literal SourceRecords
+**Raised:** 25 Sep 2026
+**Blocks:** nothing broken — flagging a deviation from the plan's literal wording, not a bug.
+**Question:** the plan says to "fetch the `SourceRecord`s that both nodes are `MENTIONED_IN`... and prepend them as candidates." `SourceRecord` nodes have no `uid` (keyed by `record_key`) and no raw text content (only `content_hash`) — see `graph/writer.py::upsert_source_records` — so they can't literally be prepended as scoreable/evidence-block candidates the way other `SearchHit`s are. The two-entity lane instead prepends the two resolved **entity** nodes themselves (`methods=["pair"]`), whose evidence naturally surfaces via `_entity_evidence`, with their summary prefixed by the names of the `SourceRecord`s that mention both. Is this the right substitution, or was something else intended (e.g. surfacing the `SourceRecord`'s own text/link directly in the evidence block, which would need `SourceRecord` given a synthetic uid/content shape first)?
+**Assumption made for now:** entity-node substitution, since it's the closest reachable approximation of "the shared evidence between these two nodes" with the data `SourceRecord` actually carries today.
