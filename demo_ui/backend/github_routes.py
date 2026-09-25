@@ -261,6 +261,26 @@ async def _run_sync(
         )
 
         orphans_removed = gp.delete_orphaned_shared_entities(graph)
+
+        # Sync coverage (plan.md Phase 0.4). `skipped_by_rule_count` covers
+        # what this run's own rules dropped before writing (files over
+        # `max_file_bytes`, files that failed to decode as text) -- it does
+        # NOT include files whose extension doesn't match
+        # `payload.file_types` (filtered inside GitHubApiClient.list_files
+        # without a counter) or commits beyond `max_commits_per_sync`
+        # (unknown without a provider total). `provider_reported_total` is
+        # left None: the GitHub tree/commit listing calls used here
+        # (connectors/github_app/api.py) don't return an aggregate total.
+        record_keys = list(present_file_keys) + list(present_commit_keys)
+        sync_ledger_count = ledger.count_present(record_keys)
+        sync_skipped_by_rule = too_large + without_text
+        ledger.record_sync_coverage(
+            run_id, "github", connection_id=str(payload.installation_id),
+            provider_reported_total=None,
+            fetched_count=total, ledger_count=sync_ledger_count,
+            skipped_by_rule_count=sync_skipped_by_rule,
+        )
+
         result = {
             **base, "phase": "done", "current": f"Finished {repository.full_name}",
             "records_done": total, "records_total": total, "records_kept": kept,
@@ -269,6 +289,8 @@ async def _run_sync(
             "chunks_ingested": 0,
             "entities_written": 0, "facts_written": 0,
             "orphans_removed": orphans_removed,
+            "provider_reported_total": None, "fetched_count": total,
+            "ledger_count": sync_ledger_count, "skipped_by_rule_count": sync_skipped_by_rule,
             **TokenUsage().as_dict("ingestion"),
         }
         store.finish_source_sync(payload.installation_id, payload.repository_id)

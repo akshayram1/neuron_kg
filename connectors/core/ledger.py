@@ -56,6 +56,25 @@ class RecordEdgeRef:
     to_uid: str
 
 
+@dataclass(frozen=True)
+class SyncCoverage:
+    """One sync's accounting (plan.md Phase 0.4): what the provider says
+    exists (when its API exposes a total), what we actually fetched, what
+    landed in the ledger, and what a deliberate rule dropped before it ever
+    reached the ledger (e.g. Bitbucket/GitHub non-.py/.md files, a commit
+    cap). `provider_reported_total` is `None` -- not 0 or a guess -- for any
+    provider/endpoint whose API does not hand back a total count."""
+
+    run_id: str
+    provider: str
+    connection_id: str | None
+    provider_reported_total: int | None
+    fetched_count: int
+    ledger_count: int
+    skipped_by_rule_count: int
+    created_at: str
+
+
 class DropReason(StrEnum):
     """Why one extracted item did not become a fact. `DIRECTION_CORRECTED` is
     deliberately in this vocabulary while NOT being a loss — the fact was
@@ -311,6 +330,28 @@ class ConnectorLedger:
                     PRIMARY KEY(kind, key)
                 )
                 """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sync_coverage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    connection_id TEXT,
+                    provider_reported_total INTEGER,
+                    fetched_count INTEGER NOT NULL DEFAULT 0,
+                    ledger_count INTEGER NOT NULL DEFAULT 0,
+                    skipped_by_rule_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_coverage_provider "
+                "ON sync_coverage(provider, id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_coverage_run ON sync_coverage(run_id)"
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -944,3 +985,102 @@ class ConnectorLedger:
             connection.execute("DELETE FROM source_chunks WHERE record_key = ?", (record_key,))
             connection.execute("DELETE FROM record_edges WHERE record_key = ?", (record_key,))
             connection.execute("DELETE FROM source_records WHERE record_key = ?", (record_key,))
+
+    def count_present(self, record_keys: list[str]) -> int:
+        """How many of these exact keys are in the ledger right now.
+
+        Used for sync coverage's `ledger_count` (plan.md Phase 0.4): a
+        `fetched == written` tally only proves the write call was invoked,
+        not that it committed -- a mid-batch crash or a record that was
+        deleted and never recommitted would still look complete without
+        actually re-reading the ledger.
+        """
+        if not record_keys:
+            return 0
+        total = 0
+        with self._connect() as connection:
+            # SQLite's default bound-parameter limit is 999 -- chunk the IN clause.
+            for start in range(0, len(record_keys), 500):
+                batch = record_keys[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                row = connection.execute(
+                    f"SELECT COUNT(*) AS n FROM source_records WHERE record_key IN ({placeholders})",
+                    batch,
+                ).fetchone()
+                total += int(row["n"])
+        return total
+
+    # ------------------------------------------------------------ sync coverage
+
+    def record_sync_coverage(
+        self,
+        run_id: str,
+        provider: str,
+        *,
+        connection_id: str | None = None,
+        provider_reported_total: int | None = None,
+        fetched_count: int = 0,
+        ledger_count: int = 0,
+        skipped_by_rule_count: int = 0,
+    ) -> None:
+        """Log one sync's coverage numbers (plan.md Phase 0.4).
+
+        Append-only, one row per run -- coverage is a measurement over time,
+        not a single mutable "latest" cell, so a regression shows up as a
+        row-to-row comparison instead of overwriting the evidence of a
+        previous, better run.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO sync_coverage(run_id, provider, connection_id, "
+                "provider_reported_total, fetched_count, ledger_count, "
+                "skipped_by_rule_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id, provider, connection_id, provider_reported_total,
+                    fetched_count, ledger_count, skipped_by_rule_count,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    @staticmethod
+    def _sync_coverage_row(row: sqlite3.Row) -> SyncCoverage:
+        return SyncCoverage(
+            run_id=str(row["run_id"]), provider=str(row["provider"]),
+            connection_id=row["connection_id"],
+            provider_reported_total=row["provider_reported_total"],
+            fetched_count=int(row["fetched_count"]), ledger_count=int(row["ledger_count"]),
+            skipped_by_rule_count=int(row["skipped_by_rule_count"]),
+            created_at=str(row["created_at"]),
+        )
+
+    def latest_sync_coverage(self, provider: str | None = None) -> list[SyncCoverage]:
+        """The most recent coverage row per provider, newest sync only.
+
+        With `provider` given, just that provider's latest row (0 or 1
+        results); otherwise one row per provider that has ever synced.
+        """
+        with self._connect() as connection:
+            if provider:
+                rows = connection.execute(
+                    "SELECT * FROM sync_coverage WHERE provider = ? ORDER BY id DESC LIMIT 1",
+                    (provider,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT s.* FROM sync_coverage s
+                    INNER JOIN (
+                        SELECT provider, MAX(id) AS max_id FROM sync_coverage GROUP BY provider
+                    ) latest ON s.provider = latest.provider AND s.id = latest.max_id
+                    ORDER BY s.provider
+                    """
+                ).fetchall()
+        return [self._sync_coverage_row(row) for row in rows]
+
+    def sync_coverage_for_run(self, run_id: str) -> SyncCoverage | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sync_coverage WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return self._sync_coverage_row(row) if row else None

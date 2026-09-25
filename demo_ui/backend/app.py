@@ -39,6 +39,7 @@ from demo_ui.backend.github_routes import router as github_router
 from demo_ui.backend.jira_routes import router as jira_router
 from demo_ui.backend.notion_routes import router as notion_router
 from demo_ui.backend.story_routes import router as story_router
+from demo_ui.backend.sync_coverage_routes import router as sync_coverage_router
 from demo_ui.backend.access import access_scope_for_request
 from demo_ui.backend.job_worker import run_worker
 from graph import multigraph
@@ -107,6 +108,7 @@ app.include_router(github_router)
 app.include_router(bitbucket_router)
 app.include_router(notion_router)
 app.include_router(story_router)
+app.include_router(sync_coverage_router)
 
 
 @app.middleware("http")
