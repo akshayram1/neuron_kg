@@ -118,3 +118,11 @@ class GraphRegistry:
                 "INSERT INTO graphs(name, display_name, created_at) VALUES (?, ?, ?)",
                 (name, display_name or name, datetime.now(UTC).isoformat()),
             )
+
+    def delete(self, name: str) -> bool:
+        name = validate_graph_name(name)
+        if name == DEFAULT_GRAPH_NAME:
+            raise ValueError("the default graph registry entry cannot be deleted")
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM graphs WHERE name = ?", (name,))
+        return cursor.rowcount > 0

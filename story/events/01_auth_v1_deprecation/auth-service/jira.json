@@ -1,0 +1,54 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-jira-connection",
+  "site": {
+    "cloud_id": "story-cloud-001",
+    "name": "Story Engineering Jira",
+    "url": "https://story.atlassian.test"
+  },
+  "project": {
+    "project_id": "10003",
+    "key": "AUTH",
+    "name": "Auth Service",
+    "description": "Owns the internal authentication service and its versioned HTTP APIs."
+  },
+  "issues": [
+    {
+      "issue_id": "22900",
+      "key": "AUTH-900",
+      "summary": "Remove Auth API v1 on October 1",
+      "content": "Issue: AUTH-900\nSummary: Remove Auth API v1 on October 1\nType: Change\nStatus: Approved\nAssignee: Asha Rao\nReporter: Neel Shah\nLabels: breaking-change, api, deprecation\n\nDescription:\nOn 2026-10-01 Auth Service will remove Auth API v1 and the POST /v1/auth endpoint. Auth API v2 at POST /v2/auth replaces v1. Every consumer must migrate before the removal date. Known consumers are MCP Gateway and Argo Orchestrator.",
+      "description": "On 2026-10-01 Auth Service will remove Auth API v1 and the POST /v1/auth endpoint. Auth API v2 at POST /v2/auth replaces v1. Every consumer must migrate before the removal date. Known consumers are MCP Gateway and Argo Orchestrator.",
+      "status": "Approved",
+      "issue_type": "Change",
+      "assignee": {
+        "account_id": "jira-asha-rao",
+        "display_name": "Asha Rao",
+        "email": "asha.rao@story.test"
+      },
+      "reporter": {
+        "account_id": "jira-neel-shah",
+        "display_name": "Neel Shah",
+        "email": "neel.shah@story.test"
+      },
+      "labels": ["breaking-change", "api", "deprecation"],
+      "blocks": ["20150", "21250"],
+      "created_at": "2026-09-10T08:00:00Z",
+      "updated_at": "2026-09-10T14:30:00Z",
+      "parent_id": null,
+      "parent_key": null,
+      "changes": [
+        {
+          "at": "2026-09-10T14:30:00Z",
+          "field": "status",
+          "from_id": "proposed",
+          "from_string": "Proposed",
+          "to_id": "approved",
+          "to_string": "Approved",
+          "author": "Neel Shah"
+        }
+      ]
+    }
+  ]
+}

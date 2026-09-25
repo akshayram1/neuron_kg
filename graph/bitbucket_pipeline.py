@@ -31,8 +31,9 @@ from graph import writer as w
 from graph.jira_pipeline import _embed_now, delete_orphaned_shared_entities, delete_record
 from graph.resolver import (
     anchor_properties, link_verified_person_identity, resolve_backlinks_for_target,
-    resolve_exact_anchors,
+    resolve_exact_anchors, resolved_anchor_values,
 )
+from graph.selective_ingestion import has_pending, selective_chunk_writes
 
 
 def _time(value: str) -> datetime | None:
@@ -263,8 +264,14 @@ def write_repository(
         target_provider="bitbucket", repository_name=repository.full_name,
         url=repository.html_url,
     )
+    if repository.description:
+        chunk_writes = selective_chunk_writes(prepared.chunks)
+        ledger.save_chunks(
+            record.record_key, chunk_writes,
+        )
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=(SemanticStatus.PENDING if repository.description and has_pending(chunk_writes)
+                                   else SemanticStatus.NOT_APPLICABLE))
     return prepared.action
 
 
@@ -293,8 +300,13 @@ def write_file(
     resolve_exact_anchors(graph, ledger, record, uid, "SourceFile")
     if record.content.strip():
         _embed_now(uid, "SourceFile", record.content, collection=collection, name=record.name)
+    chunk_writes = selective_chunk_writes(
+        prepared.chunks, resolved_anchors=resolved_anchor_values(graph, record, uid),
+    )
+    ledger.save_chunks(record.record_key, chunk_writes)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=(SemanticStatus.PENDING if has_pending(chunk_writes)
+                                   else SemanticStatus.NOT_APPLICABLE))
     return prepared.action
 
 
@@ -344,8 +356,13 @@ def write_commit(
     resolve_exact_anchors(graph, ledger, record, uid, "Commit")
     if record.content.strip():
         _embed_now(uid, "Commit", record.content, collection=collection, name=record.name)
+    chunk_writes = selective_chunk_writes(
+        prepared.chunks, resolved_anchors=resolved_anchor_values(graph, record, uid),
+    )
+    ledger.save_chunks(record.record_key, chunk_writes)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=(SemanticStatus.PENDING if has_pending(chunk_writes)
+                                   else SemanticStatus.NOT_APPLICABLE))
     return prepared.action
 
 
@@ -388,8 +405,13 @@ def write_pull_request(
     resolve_exact_anchors(graph, ledger, record, uid, "PullRequest")
     if record.content.strip():
         _embed_now(uid, "PullRequest", record.content, collection=collection, name=record.name)
+    chunk_writes = selective_chunk_writes(
+        prepared.chunks, resolved_anchors=resolved_anchor_values(graph, record, uid),
+    )
+    ledger.save_chunks(record.record_key, chunk_writes)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=(SemanticStatus.PENDING if has_pending(chunk_writes)
+                                   else SemanticStatus.NOT_APPLICABLE))
     return prepared.action
 
 

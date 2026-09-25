@@ -1,0 +1,16 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "workspace_id": "story-notion-workspace",
+  "workspace_name": "Story Architecture",
+  "pages": [
+    {
+      "page_id": "notion-mcp-architecture-001",
+      "title": "MCP Gateway Architecture",
+      "url": "https://notion.story.test/mcp-gateway-architecture",
+      "content": "# MCP Gateway\n\nMCP Gateway exposes model-context tools to internal applications. Before a tool session is opened, the gateway authenticates the caller through Auth Service.\n\n## Authentication migration status\n\nAs of 2026-09-12, MCP Gateway consumes Auth API v2 and calls POST /v2/auth. The Auth API v1 dependency is retired and MCP no longer calls POST /v1/auth. MCP-150 records completion of the migration.\n\nThis statement was written from the migration review. The current Bitbucket production-branch snapshot has not yet been checked against it.",
+      "last_edited_time": "2026-09-12T11:15:00Z",
+      "parent_page_id": null
+    }
+  ]
+}

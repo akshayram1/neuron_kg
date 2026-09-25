@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import hashlib
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
@@ -63,7 +64,7 @@ def evidence_in_chunk(evidence: str | None, chunk_text: str) -> bool:
     haystack = " ".join(chunk_text.casefold().split())
     return bool(needle) and needle in haystack
 
-_SEMANTIC_LABELS = {"Decision", "Term", "System"}
+_SEMANTIC_LABELS = {"Decision", "Term", "System", "Api", "Endpoint"}
 _ENTITY_TYPE_TO_LABEL = {
     "work_item": "WorkItem", "project": "Project", "repository": "Repository",
     "source_file": "SourceFile", "commit": "Commit", "pull_request": "PullRequest",
@@ -72,7 +73,10 @@ _ENTITY_TYPE_TO_LABEL = {
 # Must match graph.schema.VECTOR_LABELS -- System has no vector index (it's
 # usually just a proper noun with little embeddable text), Project isn't a
 # content-bearing label either.
-_EMBEDDABLE_LABELS = {"WorkItem", "Document", "Decision", "Term", "PullRequest", "Commit", "SourceFile"}
+_EMBEDDABLE_LABELS = {
+    "WorkItem", "Document", "Decision", "Term", "Api", "Endpoint",
+    "PullRequest", "Commit", "SourceFile",
+}
 
 
 def _embed(
@@ -109,7 +113,14 @@ class SemanticPassResult:
     facts_written: int = 0
     facts_rejected: int = 0
     records_completed: int = 0
+    findings_written: int = 0
     token_usage: TokenUsage = field(default_factory=TokenUsage)
+
+
+@dataclass(frozen=True)
+class SemanticContext:
+    text: str
+    candidate_uids: frozenset[str] = frozenset()
 
 
 def _resolve_endpoint(
@@ -119,7 +130,20 @@ def _resolve_endpoint(
     record_primary_uid: str,
     record_own_kind: str | None,
     semantic_uids: dict[tuple[str, str], str],
+    candidate_uid: str | None = None,
+    allowed_candidate_uids: frozenset[str] = frozenset(),
 ) -> str | None:
+    if candidate_uid:
+        if candidate_uid not in allowed_candidate_uids:
+            return None
+        rows = graph.query(
+            "MATCH (n {uid: $uid}) RETURN labels(n), n.name, n.path, n.method, "
+            "n.version, n.issue_key, n.sha, n.pr_ref",
+            params={"uid": candidate_uid},
+        ).result_set
+        if rows and kind in rows[0][0] and _candidate_identity_matches(kind, name, rows[0][1:]):
+            return candidate_uid
+        return None
     if kind in _SEMANTIC_LABELS:
         key = (kind, name.strip().lower())
         if key in semantic_uids:
@@ -159,6 +183,41 @@ def _resolve_endpoint(
     return None
 
 
+def _candidate_identity_matches(kind: str, proposed_name: str, properties: list) -> bool:
+    """A same-kind vector candidate is not automatically the same entity.
+
+    This guard prevents a retrieved ``POST /v1/auth`` Endpoint from being
+    attached to new evidence that explicitly says ``POST /v2/auth``.
+    """
+    node_name, path, method, version, issue_key, sha, pr_ref = properties
+    proposed = proposed_name.strip().casefold()
+    if kind == "Endpoint":
+        proposed_path = re.search(r"/v\d+/[a-z0-9_./-]+", proposed)
+        if path:
+            if not proposed_path:
+                return proposed == str(node_name or "").strip().casefold()
+            if proposed_path.group(0).rstrip(".,`") != str(path).casefold().rstrip(".,`"):
+                return False
+        proposed_method = re.search(r"\b(GET|POST|PUT|PATCH|DELETE)\b", proposed_name, re.I)
+        return not proposed_method or not method or proposed_method.group(1).upper() == str(method).upper()
+    if kind == "Api" and version:
+        proposed_version = re.search(r"\bv\d+\b", proposed)
+        if proposed_version:
+            return proposed_version.group(0) == str(version).casefold()
+
+    def normalized(value) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+    proposed_norm = normalized(proposed_name)
+    identities = [normalized(value) for value in (node_name, path, issue_key, sha, pr_ref) if value]
+    return any(
+        proposed_norm == identity
+        or (min(len(proposed_norm), len(identity)) >= 8
+            and (proposed_norm in identity or identity in proposed_norm))
+        for identity in identities
+    )
+
+
 
 def _drop(reason: str, fact, detail: str | None = None) -> ExtractionDrop:
     """One discarded (or corrected) extraction, with enough of the original
@@ -177,6 +236,10 @@ def _embedding_text(label: str, item) -> str:
         return " — ".join(filter(None, [item.name, item.statement, item.rationale]))
     if label == "Term":
         return " — ".join(filter(None, [item.name, item.definition]))
+    if label == "Api":
+        return " — ".join(filter(None, [item.name, item.version, item.status]))
+    if label == "Endpoint":
+        return " ".join(filter(None, [item.method, item.path])) or item.name
     return item.name
 
 
@@ -194,6 +257,7 @@ def _write_extraction(
     token_usage: TokenUsage,
     collection: str = vector_store.COLLECTION,
     axioms: AxiomSet = DEFAULT_AXIOMS,
+    allowed_candidate_uids: frozenset[str] = frozenset(),
 ) -> tuple[int, int, int]:
     source_rows = graph.query(
         "MATCH (sr:SourceRecord {record_key: $record_key}) RETURN sr.source_time LIMIT 1",
@@ -217,14 +281,20 @@ def _write_extraction(
         # below ever gets the chance to swap it.
         if axioms.resolve_direction(fact.subject_kind, fact.relation, fact.object_kind) is None:
             continue
-        referenced.add((fact.subject_kind, fact.subject_name.strip().lower()))
-        referenced.add((fact.object_kind, fact.object_name.strip().lower()))
+        # A retrieved candidate UID means "attach to this existing node";
+        # do not also create a second semantic node from the model's wording.
+        if fact.subject_candidate_uid is None:
+            referenced.add((fact.subject_kind, fact.subject_name.strip().lower()))
+        if fact.object_candidate_uid is None:
+            referenced.add((fact.object_kind, fact.object_name.strip().lower()))
 
     entities_written = 0
     semantic_uids: dict[tuple[str, str], str] = {}
     edges_supported: list[RecordEdgeRef] = []
     for label, all_items in (
-        ("Term", extraction.terms), ("Decision", extraction.decisions), ("System", extraction.systems)
+        ("Term", extraction.terms), ("Decision", extraction.decisions),
+        ("System", extraction.systems), ("Api", extraction.apis),
+        ("Endpoint", extraction.endpoints),
     ):
         items = []
         for item in all_items:
@@ -374,9 +444,12 @@ def _write_extraction(
         # endpoints and say so -- never silently.
         subject_kind, subject_name = fact.subject_kind, fact.subject_name
         object_kind, object_name = fact.object_kind, fact.object_name
+        subject_candidate_uid = fact.subject_candidate_uid
+        object_candidate_uid = fact.object_candidate_uid
         if direction == SWAPPED:
             subject_kind, object_kind = object_kind, subject_kind
             subject_name, object_name = object_name, subject_name
+            subject_candidate_uid, object_candidate_uid = object_candidate_uid, subject_candidate_uid
             logger.info(
                 "  direction corrected: (%s) %r -%s-> (%s) %r  [as extracted: %s -> %s]",
                 subject_kind, subject_name, fact.relation, object_kind, object_name,
@@ -390,10 +463,12 @@ def _write_extraction(
         subject_uid = _resolve_endpoint(
             graph, subject_kind, subject_name,
             primary_uid, record_own_kind, semantic_uids,
+            subject_candidate_uid, allowed_candidate_uids,
         )
         object_uid = _resolve_endpoint(
             graph, object_kind, object_name,
             primary_uid, record_own_kind, semantic_uids,
+            object_candidate_uid, allowed_candidate_uids,
         )
         if subject_uid is None or object_uid is None:
             facts_rejected += 1
@@ -435,18 +510,41 @@ def _write_extraction(
     # change must clear the drops its previous run recorded, or the counts
     # describe a system that no longer exists.
     ledger.record_drops(chunk.record_key, chunk.chunk_id, drops)
+    accepted_assessments = []
+    for assessment in extraction.assessments:
+        if not evidence_in_chunk(assessment.evidence, chunk.text):
+            continue
+        if any(uid not in allowed_candidate_uids for uid in assessment.related_candidate_uids):
+            continue
+        accepted_assessments.append(assessment.model_dump())
+    recorder = getattr(ledger, "record_ingestion_assessments", None)
+    if recorder is not None:
+        recorder(chunk.record_key, chunk.chunk_id, accepted_assessments)
     return entities_written, facts_written, facts_rejected
 
 
-def _call_llm(client: OpenAI, model: str, chunk: PendingChunk):
+def _call_llm(
+    client: OpenAI, model: str, chunk: PendingChunk,
+    related_context: str | SemanticContext | None = None,
+):
     """The only part of a chunk's processing that's safe to run concurrently:
     a pure network round-trip with no graph/ledger side effects."""
     profile = profile_for_record_key(chunk.record_key)
+    user_content = chunk.text
+    context_text = related_context.text if isinstance(related_context, SemanticContext) else related_context
+    if context_text:
+        user_content += (
+            "\n\n[RELATED EXISTING EVIDENCE + CANDIDATE NODES]\n"
+            "The following small set was retrieved from knowledge that existed before "
+            "this source update. Use it only to disambiguate identity and notice additions "
+            "or conflicts. Do not extract a fact unless its verbatim evidence occurs in "
+            "the NEW SOURCE above.\n\n" + context_text
+        )
     response = client.responses.parse(
         model=model,
         input=[
             {"role": "system", "content": profile.instructions},
-            {"role": "user", "content": chunk.text},
+            {"role": "user", "content": user_content},
         ],
         text_format=profile.schema,
     )
@@ -464,6 +562,7 @@ def run_semantic_pass(
     on_progress: Callable[[int, int, str, SemanticPassResult], None] | None = None,
     max_concurrency: int | None = None,
     collection: str = vector_store.COLLECTION,
+    context_provider: Callable[[PendingChunk], str | SemanticContext | None] | None = None,
 ) -> SemanticPassResult:
     """Process up to `budget` pending chunks (default: $LLM_BUDGET_PER_RUN).
     A chunk that fails its LLM call is left 'pending' and retried on a later
@@ -497,19 +596,25 @@ def run_semantic_pass(
     chunks = ledger.pending_chunks(budget, record_prefix=record_prefix)
     total_chunks = len(chunks)
 
-    runnable: list[tuple[PendingChunk, object]] = []
+    runnable: list[tuple[PendingChunk, object, str | SemanticContext | None]] = []
     for chunk in chunks:
         entry = ledger.get(chunk.record_key)
         if entry is None or entry.primary_node_uid is None:
             logger.warning("no primary_node_uid for %s, skipping chunk", chunk.record_key)
             continue
-        runnable.append((chunk, entry))
+        related_context = context_provider(chunk) if context_provider else None
+        runnable.append((chunk, entry, related_context))
 
     completed = 0
     with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
-        futures = {pool.submit(_call_llm, client, model, chunk): (chunk, entry) for chunk, entry in runnable}
+        futures = {
+            pool.submit(_call_llm, client, model, chunk, related_context): (
+                chunk, entry, related_context,
+            )
+            for chunk, entry, related_context in runnable
+        }
         for future in as_completed(futures):
-            chunk, entry = futures[future]
+            chunk, entry, related_context = futures[future]
             result.llm_calls += 1
             try:
                 profile, response = future.result()
@@ -523,15 +628,30 @@ def run_semantic_pass(
                 graph, ledger, chunk, extraction, entry.primary_node_uid,
                 _record_own_kind(chunk.record_key), client, embedding_model, model, profile.name,
                 result.token_usage, collection=collection, axioms=axioms,
+                allowed_candidate_uids=(
+                    related_context.candidate_uids
+                    if isinstance(related_context, SemanticContext) else frozenset()
+                ),
+            )
+            result.findings_written += sum(
+                1 for item in extraction.assessments
+                if item.should_flag
+                and evidence_in_chunk(item.evidence, chunk.text)
+                and all(uid in (
+                    related_context.candidate_uids
+                    if isinstance(related_context, SemanticContext) else frozenset()
+                ) for uid in item.related_candidate_uids)
             )
             result.chunks_processed += 1
             result.entities_written += entities
             result.facts_written += facts
             result.facts_rejected += rejected
             logger.info(
-                "chunk %s of %s: %d terms, %d decisions, %d systems extracted, %d facts written, %d rejected",
+                "chunk %s of %s: %d terms, %d decisions, %d semantic entities extracted, %d facts written, %d rejected",
                 chunk.chunk_index, chunk.record_key,
-                len(extraction.terms), len(extraction.decisions), len(extraction.systems), facts, rejected,
+                len(extraction.terms), len(extraction.decisions),
+                len(extraction.systems) + len(extraction.apis) + len(extraction.endpoints),
+                facts, rejected,
             )
 
             ledger.commit_chunk(chunk.record_key, chunk.chunk_id, SemanticStatus.DONE)

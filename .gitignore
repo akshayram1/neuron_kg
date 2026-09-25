@@ -12,3 +12,6 @@ dist/
 logs/
 .secrets/
 *.pem
+
+# Local ML model weights (too large for GitHub)
+model/

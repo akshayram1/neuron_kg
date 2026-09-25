@@ -1,4 +1,8 @@
-"""Qdrant-backed dense vector index.
+"""Dense vector index with PostgreSQL/pgvector and legacy Qdrant adapters.
+
+Postgres is selected when ``VECTOR_BACKEND=postgres`` (or when DATABASE_URL
+is configured and VECTOR_BACKEND is unset). Qdrant remains as a compatibility
+backend while existing deployments migrate.
 
 Why Qdrant instead of FalkorDB's built-in vector index: FalkorDB stores
 vectors as full-precision float32 in RAM with no quantization option
@@ -49,9 +53,11 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from storage.postgres import PostgresVectorClient, database_url
+
 logger = logging.getLogger("neuron.vector_store")
 
-COLLECTION = os.getenv("QDRANT_COLLECTION", "neuron_entities")
+COLLECTION = os.getenv("VECTOR_COLLECTION", os.getenv("QDRANT_COLLECTION", "neuron_entities"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIMENSION = 1536  # text-embedding-3-small
 # Changing the model or dimension requires recreating the collection:
@@ -81,14 +87,21 @@ def truncate_for_embedding(text: str) -> str:
     return _encoding.decode(tokens[:_MAX_EMBEDDING_TOKENS])
 
 
-def build_client() -> QdrantClient:
+def build_client() -> QdrantClient | PostgresVectorClient:
+    backend = os.getenv("VECTOR_BACKEND", "postgres" if database_url() else "qdrant").lower()
+    if backend == "postgres":
+        handle = PostgresVectorClient()
+        handle.store.bootstrap()
+        return handle
+    if backend != "qdrant":
+        raise ValueError("VECTOR_BACKEND must be 'postgres' or 'qdrant'")
     return QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
 
 
-_client: QdrantClient | None = None
+_client: QdrantClient | PostgresVectorClient | None = None
 
 
-def client() -> QdrantClient:
+def client() -> QdrantClient | PostgresVectorClient:
     """Process-wide lazy client, collection ensured on first use. Qdrant's
     HTTP client is safe to share, and holding it here keeps every call site
     free of plumbing another handle through signatures that already carry
@@ -100,7 +113,9 @@ def client() -> QdrantClient:
     return _client
 
 
-def ensure_collection(client: QdrantClient, collection: str = COLLECTION) -> None:
+def ensure_collection(
+    client: QdrantClient | PostgresVectorClient, collection: str = COLLECTION,
+) -> None:
     """Idempotent. Quantized vectors stay in RAM (small, fast first pass),
     originals live on disk and are only read to rescore the shortlist — the
     standard Qdrant memory-efficiency setup.
@@ -119,6 +134,9 @@ def ensure_collection(client: QdrantClient, collection: str = COLLECTION) -> Non
     So: `name` embeds the node's name/path alone, `content` embeds the full
     `search_text`. Short queries are matched against short documents.
     """
+    if isinstance(client, PostgresVectorClient):
+        client.store.bootstrap()
+        return
     if client.collection_exists(collection):
         return
     params = VectorParams(
@@ -144,7 +162,10 @@ def ensure_collection(client: QdrantClient, collection: str = COLLECTION) -> Non
     logger.info("created Qdrant collection %s (named vectors)", collection)
 
 
-def upsert_vectors(client: QdrantClient, rows: list[dict[str, Any]], collection: str = COLLECTION) -> None:
+def upsert_vectors(
+    client: QdrantClient | PostgresVectorClient,
+    rows: list[dict[str, Any]], collection: str = COLLECTION,
+) -> None:
     """rows: {uid, label, embedding, name_embedding, embedded_text?}.
     `uid` is already a uuid5 string, which Qdrant accepts directly as a point
     id — so a re-upsert of the same entity overwrites in place rather than
@@ -157,6 +178,9 @@ def upsert_vectors(client: QdrantClient, rows: list[dict[str, Any]], collection:
     text", and only the text itself answers that.
     """
     if not rows:
+        return
+    if isinstance(client, PostgresVectorClient):
+        client.store.vector_upsert(collection, rows)
         return
     client.upsert(
         collection_name=collection,
@@ -188,7 +212,8 @@ def _label_filter(label: str | None) -> Filter | None:
 
 
 def search(
-    client: QdrantClient, embedding: list[float], *, label: str | None = None, limit: int = 20,
+    client: QdrantClient | PostgresVectorClient,
+    embedding: list[float], *, label: str | None = None, limit: int = 20,
     collection: str = COLLECTION, using: str = CONTENT_VECTOR,
 ) -> list[tuple[str, float]]:
     """Returns (uid, similarity) pairs, best first. Similarity is cosine in
@@ -198,6 +223,17 @@ def search(
     two channels are NOT comparable and must never be merged by score — see
     `graph.search.interleave`.
     """
+    if isinstance(client, PostgresVectorClient):
+        try:
+            return client.store.vector_search(
+                collection, embedding, label=label, limit=limit, channel=using,
+            )
+        except Exception:
+            logger.exception(
+                "pgvector search failed for label=%s collection=%s using=%s",
+                label, collection, using,
+            )
+            return []
     try:
         result = client.query_points(
             collection_name=collection,
@@ -221,7 +257,8 @@ def search(
 
 
 def find_similar_uid(
-    client: QdrantClient, label: str, embedding: list[float], min_similarity: float = 0.90,
+    client: QdrantClient | PostgresVectorClient,
+    label: str, embedding: list[float], min_similarity: float = 0.90,
     collection: str = COLLECTION,
 ) -> str | None:
     """Write-time entity dedup: reuse an existing node's uid when the LLM
@@ -238,12 +275,20 @@ def find_similar_uid(
     return None
 
 
-def delete_vectors(client: QdrantClient, uids: Iterable[str], collection: str = COLLECTION) -> None:
+def delete_vectors(
+    client: QdrantClient | PostgresVectorClient,
+    uids: Iterable[str], collection: str = COLLECTION,
+) -> None:
     ids = list(uids)
     if not ids:
+        return
+    if isinstance(client, PostgresVectorClient):
+        client.store.vector_delete(collection, ids)
         return
     client.delete(collection_name=collection, points_selector=ids)
 
 
-def count(client: QdrantClient, collection: str = COLLECTION) -> int:
+def count(client: QdrantClient | PostgresVectorClient, collection: str = COLLECTION) -> int:
+    if isinstance(client, PostgresVectorClient):
+        return client.store.vector_count(collection)
     return client.count(collection_name=collection, exact=True).count

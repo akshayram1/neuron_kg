@@ -39,19 +39,29 @@ def fetch_graph(
         WITH n, collect(DISTINCT sr.provider) AS providers, collect(DISTINCT sr.name) AS documents
         RETURN n.uid AS id, labels(n)[0] AS type, n.name AS label,
                n.search_text AS search_text, n.definition AS definition, n.statement AS statement,
-               n.purpose AS purpose, providers, documents
+               n.purpose AS purpose, providers, documents,
+               n.status AS status, n.severity AS severity,
+               n.created_at AS created_at, n.stale_at AS stale_at,
+               n.wisdom_type AS wisdom_type
         """,
         params={**node_acl_params, **({"providers": providers} if providers else {})},
     ).result_set
 
     nodes = []
     for row in node_rows:
-        node_id, node_type, label, search_text, definition, statement, purpose, node_providers, documents = row
+        (
+            node_id, node_type, label, search_text, definition, statement, purpose,
+            node_providers, documents, status, severity, created_at, stale_at,
+            wisdom_type,
+        ) = row
         summary = definition or statement or purpose or (search_text[:200] if search_text else "") or ""
         nodes.append({
             "id": node_id, "label": label or node_id, "type": node_type,
             "group": node_providers[0] if node_providers else "",
             "summary": summary, "documents": sorted(documents),
+            "status": status, "severity": severity,
+            "createdAt": created_at, "staleAt": stale_at,
+            "wisdomType": wisdom_type,
         })
 
     known_ids = {n["id"] for n in nodes}
@@ -68,6 +78,7 @@ def fetch_graph(
                r.valid_at AS valid_at, r.invalid_at AS invalid_at,
                r.source_record_keys AS source_record_keys, r.extraction_method AS method,
                r.confidence AS confidence, r.derived AS derived, r.derived_rule AS derived_rule,
+               r.finding_status AS finding_status, r.finding_severity AS finding_severity,
                collect(DISTINCT support.name) AS documents
         """,
         params={**edge_acl_params, **({"providers": providers} if providers else {})},
@@ -76,7 +87,7 @@ def fetch_graph(
     edges = []
     for row in edge_rows:
         (source, target, label, evidence, valid_at, invalid_at, source_record_keys,
-         method, confidence, derived, derived_rule, documents) = row
+         method, confidence, derived, derived_rule, finding_status, finding_severity, documents) = row
         if source not in known_ids or target not in known_ids:
             continue
         edges.append({
@@ -88,6 +99,7 @@ def fetch_graph(
             "superseded": invalid_at is not None,
             "derived": bool(derived) or method == "derived",
             "derivedRule": derived_rule,
+            "findingStatus": finding_status, "findingSeverity": finding_severity,
             "documents": sorted(documents or []), "confidence": confidence,
         })
 

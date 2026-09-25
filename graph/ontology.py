@@ -95,10 +95,30 @@ class System(BaseModel):
     purpose: str | None = Field(None, description="What it is used for here, if stated.")
 
 
+class Api(BaseModel):
+    """A named, versioned software interface such as Auth API v1. Keep
+    versions distinct when the source distinguishes them; do not collapse v1
+    and v2 into one entity."""
+
+    name: str = Field(description="Canonical API name including version when stated.")
+    version: str | None = None
+    status: Literal["active", "deprecated", "removed", "planned", "unknown"] | None = None
+
+
+class Endpoint(BaseModel):
+    """A concrete callable API route, including its HTTP method when known."""
+
+    name: str = Field(description="Canonical endpoint, e.g. 'POST /v1/auth'.")
+    method: str | None = None
+    path: str | None = None
+
+
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Term": Term,
     "Decision": Decision,
     "System": System,
+    "Api": Api,
+    "Endpoint": Endpoint,
 }
 
 EXTRACTION_INSTRUCTIONS = """\
@@ -169,6 +189,34 @@ class OWNS(BaseModel):
     concept) to anything — only a named person or a specifically named team."""
 
 
+class PROVIDES_API(BaseModel):
+    """The subject explicitly exposes or owns the target API."""
+
+
+class CONSUMES_API(BaseModel):
+    """The subject explicitly depends on or calls the target API."""
+
+
+class EXPOSES_ENDPOINT(BaseModel):
+    """The API makes the concrete target endpoint available."""
+
+
+class CALLS_ENDPOINT(BaseModel):
+    """The subject code or project explicitly calls the target endpoint."""
+
+
+class CHANGES(BaseModel):
+    """The subject change modifies the target system, API, or endpoint."""
+
+
+class DEPRECATES(BaseModel):
+    """The subject explicitly deprecates or schedules removal of the target."""
+
+
+class MIGRATES_TO(BaseModel):
+    """The subject explicitly moves from an older interface to the target."""
+
+
 EDGE_TYPES: dict[str, type[BaseModel]] = {
     "DEFINES": DEFINES,
     "APPLIES_TO": APPLIES_TO,
@@ -176,10 +224,19 @@ EDGE_TYPES: dict[str, type[BaseModel]] = {
     "DECIDED_BY": DECIDED_BY,
     "SUPERSEDES": SUPERSEDES,
     "OWNS": OWNS,
+    "PROVIDES_API": PROVIDES_API,
+    "CONSUMES_API": CONSUMES_API,
+    "EXPOSES_ENDPOINT": EXPOSES_ENDPOINT,
+    "CALLS_ENDPOINT": CALLS_ENDPOINT,
+    "CHANGES": CHANGES,
+    "DEPRECATES": DEPRECATES,
+    "MIGRATES_TO": MIGRATES_TO,
 }
 
 RelationName = Literal[
-    "DEFINES", "APPLIES_TO", "CAVEAT_OF", "DECIDED_BY", "SUPERSEDES", "OWNS"
+    "DEFINES", "APPLIES_TO", "CAVEAT_OF", "DECIDED_BY", "SUPERSEDES", "OWNS",
+    "PROVIDES_API", "CONSUMES_API", "EXPOSES_ENDPOINT", "CALLS_ENDPOINT",
+    "CHANGES", "DEPRECATES", "MIGRATES_TO",
 ]
 
 # Which (subject_kind, object_kind) pairs may carry which relations. `Person`,
@@ -207,6 +264,21 @@ RELATION_TYPE_MAP: dict[tuple[str, str], list[RelationName]] = {
     ("System", "System"): ["APPLIES_TO"],
     ("Document", "Term"): ["DEFINES"],
     ("SourceFile", "Term"): ["DEFINES"],
+    ("Project", "Api"): ["PROVIDES_API", "CONSUMES_API", "MIGRATES_TO"],
+    ("System", "Api"): ["PROVIDES_API", "CONSUMES_API", "MIGRATES_TO"],
+    ("Api", "Endpoint"): ["EXPOSES_ENDPOINT"],
+    ("SourceFile", "Endpoint"): ["CALLS_ENDPOINT"],
+    ("Project", "Endpoint"): ["CALLS_ENDPOINT", "MIGRATES_TO"],
+    ("WorkItem", "Api"): ["CHANGES", "DEPRECATES", "MIGRATES_TO"],
+    ("WorkItem", "Endpoint"): ["CHANGES", "DEPRECATES", "MIGRATES_TO"],
+    ("Decision", "Api"): ["APPLIES_TO", "CHANGES", "DEPRECATES", "MIGRATES_TO"],
+    ("Decision", "Endpoint"): ["APPLIES_TO", "CHANGES", "DEPRECATES", "MIGRATES_TO"],
+    ("PullRequest", "Api"): ["CHANGES", "MIGRATES_TO"],
+    ("PullRequest", "Endpoint"): ["CHANGES", "MIGRATES_TO"],
+    ("Commit", "Api"): ["CHANGES", "MIGRATES_TO"],
+    ("Commit", "Endpoint"): ["CHANGES", "MIGRATES_TO"],
+    ("Document", "Api"): ["DEFINES", "APPLIES_TO"],
+    ("Document", "Endpoint"): ["DEFINES", "APPLIES_TO"],
 }
 
 

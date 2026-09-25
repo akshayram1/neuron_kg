@@ -16,6 +16,11 @@ export interface GraphNode {
   group: string;
   summary: string;
   documents: string[];
+  status?: string | null;
+  severity?: string | null;
+  wisdomType?: "Policy" | "Principle" | "Pattern" | "AntiPattern" | "Playbook" | "Heuristic" | null;
+  createdAt?: string | null;
+  staleAt?: string | null;
 }
 
 export interface GraphEdge {
@@ -33,6 +38,8 @@ export interface GraphEdge {
   factUid?: string;
   derived?: boolean;
   derivedRule?: string | null;
+  findingStatus?: string | null;
+  findingSeverity?: string | null;
 }
 
 export interface GraphPayload {
@@ -52,9 +59,20 @@ export interface ChatCitation {
   url: string | null;
 }
 
+export interface KnowledgeCitation {
+  uid: string;
+  type: "Wisdom" | "Finding" | string;
+  name: string;
+  status: string | null;
+  severity: string | null;
+  createdAt: string | null;
+  staleAt: string | null;
+}
+
 export interface ChatResponse {
   answer: string;
   citations: ChatCitation[];
+  knowledgeCitations: KnowledgeCitation[];
   highlight: Highlight;
   readOnly: boolean;
   tokenUsage: TokenUsage;
@@ -175,6 +193,96 @@ export interface ConnectorSyncProgress {
   ingestion_input_tokens?: number;
   ingestion_output_tokens?: number;
   ingestion_total_tokens?: number;
+  llm_calls?: number;
+  llm_findings?: number;
+  chunks_deterministic?: number;
+  chunks_partial?: number;
+  chunks_unresolved?: number;
+  pass1_records_linked?: number;
+  pass1_links_written?: number;
+  chunks_llm_skipped?: number;
+  chunks_hybrid?: number;
+  chunks_llm_only?: number;
+  routing_runs_measured?: number;
+  wisdom_llm_calls?: number;
+  wisdom_proposals?: number;
+  wisdom_input_tokens?: number;
+  wisdom_output_tokens?: number;
+  wisdom_total_tokens?: number;
+}
+
+export interface StoryFinding {
+  id: string;
+  key: string;
+  kind: string;
+  severity: string;
+  status: "open" | "stale" | "resolved" | "accepted" | "dismissed";
+  title: string;
+  summary: string;
+  reasoning: string;
+  confidence: number;
+  projectRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt: string;
+  statusChangedAt: string;
+  staleAt: string | null;
+  staleReason: string | null;
+  resolvedAt: string | null;
+  sources: Array<{
+    recordKey: string;
+    role: string;
+    excerpt: string | null;
+    chunkId: string | null;
+    provider: string | null;
+    name: string | null;
+    url: string | null;
+    sourceTime: string | null;
+  }>;
+}
+
+export interface StoryRun {
+  runId: string;
+  graphId: string | null;
+  phase: string;
+  status: "running" | "completed" | "failed";
+  progress: ConnectorSyncProgress & { open_findings?: number };
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface StoryWisdomProposal {
+  id: string;
+  key: string;
+  type: "Policy" | "Principle" | "Pattern" | "AntiPattern" | "Playbook" | "Heuristic";
+  topicKey: string;
+  title: string;
+  statement: string;
+  rationale: string;
+  recommendedAction: string;
+  status: "proposed" | "active" | "rejected" | "superseded";
+  confidence: number;
+  scope: Record<string, unknown>;
+  properties: Record<string, unknown>;
+  version: number;
+  generationMethod: string;
+  createdAt: string;
+  updatedAt: string;
+  reviewedAt: string | null;
+  reviewedBy: string | null;
+  signalIds: string[];
+  supportingFindings: Array<StoryFinding & { role: string }>;
+}
+
+export interface StoryState {
+  graph: GraphInfo & { id: string; falkorName: string; vectorCollection: string };
+  completedPhases: string[];
+  running: StoryRun | null;
+  lastRun: StoryRun | null;
+  routingTotals: ConnectorSyncProgress;
+  findings: StoryFinding[];
+  wisdom: StoryWisdomProposal[];
 }
 
 export interface GitHubInstallation {

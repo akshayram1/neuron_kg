@@ -1,7 +1,23 @@
 from graph.structured_query import (
-    _ASSIGNED_TO, _LATEST_COMMIT, _SECOND, _UNASSIGNED,
+    _ASSIGNED_TO, _CURRENT_API_USAGE, _CURRENT_REMOVAL_IMPACT,
+    _LATEST_COMMIT, _SECOND, _UNASSIGNED,
     _commit_summary, _issue_keys, _repo_hint, _sha_prefixes,
 )
+
+
+def test_current_api_usage_intent_uses_structured_code_authority_lane():
+    assert _CURRENT_API_USAGE.search(
+        "Which projects currently consume Auth API v1 and Auth API v2?"
+    )
+    assert _CURRENT_API_USAGE.search("What API endpoint does MCP currently call?")
+    assert not _CURRENT_API_USAGE.search("What is the Auth API migration plan?")
+
+
+def test_current_removal_impact_intent_uses_open_findings_lane():
+    assert _CURRENT_REMOVAL_IMPACT.search(
+        "Which projects are currently affected by the removal of Auth API v1?"
+    )
+    assert not _CURRENT_REMOVAL_IMPACT.search("What was the original removal plan?")
 
 
 def test_unassigned_matches_negation_questions():

@@ -1,7 +1,7 @@
 """Jira deterministic pass (plan.md §3 Pass A, Block 6). Builds Project/
 WorkItem/Person nodes and structural edges straight from Jira API fields —
-zero LLM. Jira records are committed `NOT_APPLICABLE` — the semantic pass
-runs only on Notion prose.
+zero LLM. Free-text chunks are queued for the shared semantic pass after the
+deterministic write succeeds.
 
 `project_record`/`issue_record` are ported near-verbatim from the source
 project's `graph/jira_ingest.py` — they only build `SourceRecord`s and never
@@ -29,8 +29,9 @@ from graph.embed_batch import active_batch
 from graph import writer as w
 from graph.resolver import (
     anchor_properties, link_verified_person_identity, resolve_backlinks_for_target,
-    resolve_exact_anchors,
+    resolve_exact_anchors, resolved_anchor_values,
 )
+from graph.selective_ingestion import has_pending, selective_chunk_writes
 
 logger = logging.getLogger("neuron.jira_pipeline")
 
@@ -185,10 +186,14 @@ def write_project(
     # actual description instead, or every project would queue a pointless
     # LLM call that can only ever extract nothing (plan.md §4: don't spend
     # budget where there's no real free text).
-    # Jira is Pass A only: API fields + exact anchors. Free text stays on
-    # the node for search; it is not queued for LLM extraction.
+    if project.description:
+        chunk_writes = selective_chunk_writes(prepared.chunks)
+        ledger.save_chunks(
+            record.record_key, chunk_writes,
+        )
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=uid,
-                  semantic_status=SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=(SemanticStatus.PENDING if project.description and has_pending(chunk_writes)
+                                   else SemanticStatus.NOT_APPLICABLE))
     return prepared.action
 
 
@@ -319,8 +324,14 @@ def write_issue(
     )
 
     _embed_now(wi_uid, "WorkItem", record.content, collection=collection, name=record.name)
+    chunk_writes = selective_chunk_writes(
+        prepared.chunks,
+        resolved_anchors=resolved_anchor_values(graph, record, wi_uid),
+    )
+    ledger.save_chunks(record.record_key, chunk_writes)
     ledger.commit(record.record_key, prepared.content_hash, primary_node_uid=wi_uid,
-                  semantic_status=SemanticStatus.NOT_APPLICABLE)
+                  semantic_status=(SemanticStatus.PENDING if has_pending(chunk_writes)
+                                   else SemanticStatus.NOT_APPLICABLE))
     return prepared.action
 
 

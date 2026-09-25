@@ -1,0 +1,16 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "workspace_id": "story-notion-workspace",
+  "workspace_name": "Story Architecture",
+  "pages": [
+    {
+      "page_id": "notion-auth-v1-deprecation-001",
+      "title": "Auth API v1 Deprecation Plan",
+      "url": "https://notion.story.test/auth-api-v1-deprecation-plan",
+      "content": "# Decision\n\nAuth Service will remove Auth API v1 and POST /v1/auth on 2026-10-01. Auth API v2 and POST /v2/auth replace the v1 contract. The reason is that v2 uses the new scoped-token format required by the security program.\n\n## Known consumers\n\nMCP Gateway consumes Auth API v1 through src/auth_client.py. Argo Orchestrator consumes Auth API v1 through src/token_client.py. Both projects are potentially broken by the removal until their repositories stop calling /v1/auth.\n\nTracking tickets: AUTH-900, MCP-150, ARGO-250.",
+      "last_edited_time": "2026-09-10T14:45:00Z",
+      "parent_page_id": "notion-auth-architecture-001"
+    }
+  ]
+}

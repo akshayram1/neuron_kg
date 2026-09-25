@@ -1,4 +1,6 @@
 import {
+  AlertTriangle,
+  BrainCircuit,
   ChevronDown,
   CircleAlert,
   CornerDownLeft,
@@ -25,6 +27,7 @@ interface ChatPanelProps {
   onSend: (message: string) => void;
   onClear: () => void;
   onShowPath: (highlight: Highlight) => void;
+  onOpenKnowledge: (uid: string, type: string) => void;
 }
 
 export default function ChatPanel({
@@ -35,6 +38,7 @@ export default function ChatPanel({
   onSend,
   onClear,
   onShowPath,
+  onOpenKnowledge,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -69,6 +73,9 @@ export default function ChatPanel({
 
         {messages.map((message) => {
           const highlighted = message.result?.highlight;
+          const knowledgeCitations = message.result?.knowledgeCitations ?? [];
+          const findingCitations = knowledgeCitations.filter((citation) => citation.type === "Finding");
+          const wisdomCitations = knowledgeCitations.filter((citation) => citation.type === "Wisdom");
           const isActive = Boolean(
             highlighted
             && highlighted.nodes.every((id) => activeHighlight.nodes.includes(id))
@@ -87,13 +94,63 @@ export default function ChatPanel({
                 <div className="answer-evidence">
                   <details>
                     <summary>
-                      <span><DatabaseZap size={15} /> View sources</span>
+                      <span><DatabaseZap size={15} /> View lineage &amp; sources</span>
                       <span className="fact-count">
+                        {knowledgeCitations.length > 0 && `${knowledgeCitations.length} graph ${knowledgeCitations.length === 1 ? "node" : "nodes"} · `}
                         {message.result.citations.length} {message.result.citations.length === 1 ? "source" : "sources"}
                       </span>
                       <ChevronDown className="chevron" size={15} />
                     </summary>
                     <div className="grounding-list citation-list">
+                      {wisdomCitations.length > 0 && (
+                        <section className="citation-section knowledge-section wisdom-source-section">
+                          <h4><BrainCircuit size={12} /> Wisdom</h4>
+                          {wisdomCitations.map((citation) => (
+                            <button
+                              type="button"
+                              className={`knowledge-citation ${citation.type.toLowerCase()}`}
+                              key={citation.uid}
+                              onClick={() => onOpenKnowledge(citation.uid, citation.type)}
+                            >
+                              <BrainCircuit size={15} />
+                              <span>
+                                <strong>{citation.name}</strong>
+                                <small>
+                                  {citation.type}
+                                  {citation.status && ` · ${citation.status.toUpperCase()}`}
+                                  {citation.severity && ` · ${citation.severity.toUpperCase()}`}
+                                  {citation.staleAt && ` · stale ${citation.staleAt.slice(0, 10)}`}
+                                </small>
+                              </span>
+                            </button>
+                          ))}
+                        </section>
+                      )}
+                      {findingCitations.length > 0 && (
+                        <section className="citation-section knowledge-section finding-source-section">
+                          <h4><AlertTriangle size={12} /> Findings</h4>
+                          {findingCitations.map((citation) => (
+                            <button
+                              type="button"
+                              className="knowledge-citation finding"
+                              key={citation.uid}
+                              onClick={() => onOpenKnowledge(citation.uid, citation.type)}
+                            >
+                              <AlertTriangle size={15} />
+                              <span>
+                                <strong>{citation.name}</strong>
+                                <small>
+                                  {citation.status && citation.status.toUpperCase()}
+                                  {citation.severity && ` · ${citation.severity.toUpperCase()}`}
+                                  {citation.staleAt && ` · stale ${citation.staleAt.slice(0, 10)}`}
+                                </small>
+                              </span>
+                            </button>
+                          ))}
+                        </section>
+                      )}
+                      <section className="citation-section source-section">
+                        <h4><DatabaseZap size={12} /> Facts &amp; source evidence</h4>
                       {message.result.citations.length > 0 ? message.result.citations.map((citation) => (
                         citation.url ? (
                           <a href={citation.url} target="_blank" rel="noreferrer" key={citation.recordKey}>
@@ -101,6 +158,7 @@ export default function ChatPanel({
                           </a>
                         ) : <span className="citation-item" key={citation.recordKey}>{citation.name}</span>
                       )) : <p className="muted-copy">No source record was attached to this answer.</p>}
+                      </section>
                       <div className="write-note">Read-only answer — chat does not change the graph.</div>
                     </div>
                   </details>

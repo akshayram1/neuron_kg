@@ -98,6 +98,32 @@ class PendingChunk:
     chunk_id: str
     chunk_index: int
     text: str
+    # ``text`` is the selectively unresolved evidence sent to the LLM.
+    # ``source_text`` keeps the complete canonical chunk for provenance.
+    source_text: str | None = None
+
+
+@dataclass(frozen=True)
+class ChunkWrite:
+    """One canonical chunk plus its deterministic-pass disposition."""
+
+    chunk_id: str
+    chunk_index: int
+    text: str
+    status: SemanticStatus | str = SemanticStatus.PENDING
+    llm_text: str | None = None
+    resolution_status: str = "unresolved"
+    resolution_reason: str | None = None
+
+
+def normalize_chunk_write(value: ChunkWrite | tuple) -> ChunkWrite:
+    """Keep the long-standing 3-tuple ledger API backward compatible."""
+    if isinstance(value, ChunkWrite):
+        return value
+    if len(value) == 3:
+        chunk_id, chunk_index, text = value
+        return ChunkWrite(chunk_id, chunk_index, text, llm_text=text)
+    raise ValueError("chunks must be ChunkWrite instances or (id, index, text) tuples")
 
 
 class ConnectorLedger:
@@ -159,6 +185,14 @@ class ConnectorLedger:
                 # extracted from, and deleting it makes that fact
                 # unexplainable rather than merely stale.
                 connection.execute("ALTER TABLE source_chunks ADD COLUMN superseded_at TEXT")
+            if "llm_text" not in chunk_columns:
+                connection.execute("ALTER TABLE source_chunks ADD COLUMN llm_text TEXT")
+            if "resolution_status" not in chunk_columns:
+                connection.execute(
+                    "ALTER TABLE source_chunks ADD COLUMN resolution_status TEXT NOT NULL DEFAULT 'unresolved'"
+                )
+            if "resolution_reason" not in chunk_columns:
+                connection.execute("ALTER TABLE source_chunks ADD COLUMN resolution_reason TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_source_chunks_status "
                 "ON source_chunks(status, committed_at)"
@@ -368,7 +402,7 @@ class ConnectorLedger:
         return str(row["status"]) if row else None
 
     def save_chunks(
-        self, record_key: str, chunks: list[tuple[str, int, str]],
+        self, record_key: str, chunks: list[tuple[str, int, str] | ChunkWrite],
         adopt_from: str | None = None,
     ) -> ChunkDiff:
         """Persist this version's chunks, reusing every chunk whose text did
@@ -397,7 +431,8 @@ class ConnectorLedger:
         already-extracted chunk there are inserted as 'done'.
         """
         now = datetime.now(UTC).isoformat()
-        incoming = {chunk_id: (index, text) for chunk_id, index, text in chunks}
+        writes = [normalize_chunk_write(item) for item in chunks]
+        incoming = {item.chunk_id: item for item in writes}
         with self._connect() as connection:
             existing = {
                 str(row["chunk_id"]): str(row["status"])
@@ -425,14 +460,30 @@ class ConnectorLedger:
             # above it), and `chunk_index` only drives ordering, never identity.
             connection.executemany(
                 "UPDATE source_chunks SET chunk_index = ? WHERE record_key = ? AND chunk_id = ?",
-                [(incoming[chunk_id][0], record_key, chunk_id) for chunk_id in kept],
+                [(incoming[chunk_id].chunk_index, record_key, chunk_id) for chunk_id in kept],
             )
             connection.executemany(
-                "INSERT INTO source_chunks(record_key, chunk_id, chunk_index, text, status, committed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "UPDATE source_chunks SET status = ?, llm_text = ?, resolution_status = ?, resolution_reason = ? "
+                "WHERE record_key = ? AND chunk_id = ?",
+                [(
+                    str(SemanticStatus.DONE) if (
+                        existing[chunk_id] == str(SemanticStatus.DONE)
+                        or str(incoming[chunk_id].status) == str(SemanticStatus.DONE)
+                    ) else str(SemanticStatus.PENDING),
+                    incoming[chunk_id].llm_text,
+                    incoming[chunk_id].resolution_status,
+                    incoming[chunk_id].resolution_reason,
+                    record_key, chunk_id,
+                ) for chunk_id in kept],
+            )
+            connection.executemany(
+                "INSERT INTO source_chunks(record_key, chunk_id, chunk_index, text, status, llm_text, "
+                "resolution_status, resolution_reason, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (record_key, chunk_id, incoming[chunk_id][0], incoming[chunk_id][1],
-                     adopted_by_text.get(incoming[chunk_id][1], "pending"), now)
+                    (record_key, chunk_id, incoming[chunk_id].chunk_index, incoming[chunk_id].text,
+                     adopted_by_text.get(incoming[chunk_id].text, str(incoming[chunk_id].status)),
+                     incoming[chunk_id].llm_text, incoming[chunk_id].resolution_status,
+                     incoming[chunk_id].resolution_reason, now)
                     for chunk_id in added
                 ],
             )
@@ -444,7 +495,7 @@ class ConnectorLedger:
             kept=len(kept), added=len(added), superseded=len(superseded),
             reused_done=(
                 sum(1 for chunk_id in kept if existing[chunk_id] == str(SemanticStatus.DONE))
-                + sum(1 for chunk_id in added if incoming[chunk_id][1] in adopted_by_text)
+                + sum(1 for chunk_id in added if incoming[chunk_id].text in adopted_by_text)
             ),
         )
 
@@ -511,7 +562,7 @@ class ConnectorLedger:
             if record_prefix:
                 escaped = record_prefix.replace("%", "\\%").replace("_", "\\_") + "%"
                 rows = connection.execute(
-                    "SELECT c.record_key, c.chunk_id, c.chunk_index, c.text "
+                    "SELECT c.record_key, c.chunk_id, c.chunk_index, coalesce(c.llm_text, c.text), c.text "
                     "FROM source_chunks c JOIN source_records s ON s.record_key = c.record_key "
                     "WHERE c.status = 'pending' AND c.superseded_at IS NULL AND c.record_key LIKE ? ESCAPE '\\' "
                     "ORDER BY s.semantic_priority DESC, c.committed_at ASC, c.chunk_index ASC LIMIT ?",
@@ -519,13 +570,13 @@ class ConnectorLedger:
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT c.record_key, c.chunk_id, c.chunk_index, c.text "
+                    "SELECT c.record_key, c.chunk_id, c.chunk_index, coalesce(c.llm_text, c.text), c.text "
                     "FROM source_chunks c JOIN source_records s ON s.record_key = c.record_key "
                     "WHERE c.status = 'pending' AND c.superseded_at IS NULL "
                     "ORDER BY s.semantic_priority DESC, c.committed_at ASC, c.chunk_index ASC LIMIT ?",
                     (limit,),
                 ).fetchall()
-        return [PendingChunk(row["record_key"], row["chunk_id"], row["chunk_index"], row["text"]) for row in rows]
+        return [PendingChunk(row[0], row[1], row[2], row[3], row[4]) for row in rows]
 
     def commit_chunk(self, record_key: str, chunk_id: str, status: SemanticStatus | str = SemanticStatus.DONE) -> None:
         with self._connect() as connection:

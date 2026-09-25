@@ -1,0 +1,78 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-bitbucket-connection",
+  "workspace": {
+    "uuid": "{00000000-0000-4000-8000-000000000001}",
+    "slug": "story-labs",
+    "name": "Story Labs"
+  },
+  "repository": {
+    "uuid": "{10000000-0000-4000-8000-000000000001}",
+    "workspace": "story-labs",
+    "slug": "mcp-gateway",
+    "name": "MCP Gateway",
+    "full_name": "story-labs/mcp-gateway",
+    "main_branch": "main",
+    "html_url": "https://bitbucket.story.test/story-labs/mcp-gateway",
+    "private": true,
+    "description": "Gateway providing model-context tools to internal applications."
+  },
+  "files": [
+    {
+      "path": "src/auth_client.py",
+      "commit_hash": "e150e150e150e150e150e150e150e150e150e150",
+      "size": 499,
+      "content": "\"\"\"Authentication client used by MCP Gateway.\"\"\"\n\nAUTH_SERVICE = \"https://auth.internal\"\nAUTH_API_VERSION = \"v2\"\nAUTH_ENDPOINT = f\"/{AUTH_API_VERSION}/auth\"\n\n\ndef open_authenticated_session(client_id: str, credential: str) -> dict:\n    \"\"\"Call POST /v2/auth before opening an MCP tool session.\"\"\"\n    request = {\n        \"method\": \"POST\",\n        \"url\": AUTH_SERVICE + AUTH_ENDPOINT,\n        \"json\": {\"client_id\": client_id, \"credential\": credential},\n        \"retries\": 2,\n    }\n    return request\n",
+      "language": "python"
+    },
+    {
+      "path": "README.md",
+      "commit_hash": "e150e150e150e150e150e150e150e150e150e150",
+      "size": 239,
+      "content": "# MCP Gateway\n\nMCP Gateway consumes Auth API v2 from Auth Service. `src/auth_client.py` sends `POST /v2/auth` before opening a tool session.\n\nMCP-150 migrated the production client from v1 to v2. The repository no longer calls `/v1/auth`.\n",
+      "language": "markdown"
+    }
+  ],
+  "commits": [
+    {
+      "commit_hash": "e150e150e150e150e150e150e150e150e150e150",
+      "message": "MCP-150 migrate authentication client from v1 to v2",
+      "author_name": "Mira Sen",
+      "author_email": "mira.sen@story.test",
+      "date": "2026-09-15T13:30:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/mcp-gateway/commits/e150e150e150",
+      "files": [
+        {
+          "path": "src/auth_client.py",
+          "old_path": "src/auth_client.py",
+          "status": "modified",
+          "lines_added": 2,
+          "lines_removed": 2
+        },
+        {
+          "path": "README.md",
+          "old_path": "README.md",
+          "status": "modified",
+          "lines_added": 3,
+          "lines_removed": 4
+        }
+      ]
+    }
+  ],
+  "pull_requests": [
+    {
+      "id": 15,
+      "title": "MCP-150 Move production authentication to v2",
+      "description": "Replaces the MCP client's /v1/auth call with /v2/auth. This code change supplies the repository evidence required to close the Auth API v1 dependency and resolve the migration mismatch.",
+      "state": "MERGED",
+      "author_name": "Mira Sen",
+      "author_uuid": "{20000000-0000-4000-8000-000000000001}",
+      "source_branch": "feature/MCP-150-auth-v2",
+      "destination_branch": "main",
+      "created_on": "2026-09-13T08:00:00Z",
+      "updated_on": "2026-09-15T13:30:00Z",
+      "html_url": "https://bitbucket.story.test/story-labs/mcp-gateway/pull-requests/15"
+    }
+  ]
+}

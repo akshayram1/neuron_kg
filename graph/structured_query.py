@@ -67,6 +67,20 @@ _SHA = re.compile(r"\b([0-9a-f]{7,40})\b", re.I)
 # and every DATAOS ticket ties; the named ticket often never makes top-k
 # (verified: "what has been done for DATAOS-4346" → 0 sources).
 _ISSUE_KEY = re.compile(r"\b([A-Za-z][A-Za-z0-9]+-\d+)\b")
+_CURRENT_API_USAGE = re.compile(
+    r"(?=.*\b(?:current|currently|actual|actually|now|still)\b)"
+    r"(?=.*\b(?:consume|consumes|using|uses|call|calls|depend|depends)\b)"
+    r"(?=.*\b(?:api|endpoint)\b)|"
+    r"\b(?:which|what)\s+projects?\b.*\b(?:consume|consumes|call|calls|use|uses)\b.*"
+    r"\b(?:api|endpoint)\b",
+    re.I,
+)
+_CURRENT_REMOVAL_IMPACT = re.compile(
+    r"(?=.*\b(?:current|currently|now|still)\b)"
+    r"(?=.*\b(?:affect|affected|impact|impacted|broken|failing)\w*\b)"
+    r"(?=.*\b(?:remove|removed|removal|sunset|deprecated?)\w*\b)",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -79,6 +93,10 @@ class StructuredHits:
 def resolve_structured(
     graph: Graph, question: str, scope: AccessScope, providers: list[str] | None,
 ) -> StructuredHits | None:
+    if _CURRENT_REMOVAL_IMPACT.search(question):
+        return _current_removal_findings(graph, scope, providers)
+    if _CURRENT_API_USAGE.search(question):
+        return _current_api_consumers(graph, scope, providers)
     if _UNASSIGNED.search(question):
         return _unassigned_work_items(graph, scope, providers)
     assigned = _ASSIGNED_TO.search(question)
@@ -95,6 +113,92 @@ def resolve_structured(
     if keys:
         return _work_items_by_key(graph, keys, scope, providers)
     return None
+
+
+def _current_removal_findings(
+    graph: Graph, scope: AccessScope, providers: list[str] | None,
+) -> StructuredHits:
+    """Complete set of open, materialised removed-dependency Findings."""
+    acl, provider_filter, params = _acl_bits(scope, providers, "removal_impact_acl")
+    rows = graph.query(
+        f"""
+        MATCH (finding:Finding)-[:MENTIONED_IN]->(sr:SourceRecord)
+        WHERE finding.status = 'open'
+          AND finding.kind = 'removed_dependency_still_called'
+          AND sr.deleted_at IS NULL AND {acl} {provider_filter}
+        RETURN DISTINCT finding.uid, finding.name, finding.search_text,
+               finding.severity
+        ORDER BY finding.name
+        """,
+        params=params,
+    ).result_set
+    hits = [
+        SearchHit(
+            uid, "Finding", name, search_text or "",
+            1.0, ["structured", "current-finding"],
+        )
+        for uid, name, search_text, _severity in rows
+    ]
+    names = "; ".join(row[1] for row in rows) or "none"
+    preamble = (
+        "STRUCTURED RESULT — complete list of open materialised removal-impact "
+        f"Findings: {names}. Report only these projects as currently affected. "
+        "A stale Finding is historical and must not be reported as current."
+    )
+    return StructuredHits("current_removal_findings", hits, preamble)
+
+
+def _current_api_consumers(
+    graph: Graph, scope: AccessScope, providers: list[str] | None,
+) -> StructuredHits:
+    """Complete current implementation view from live repository calls.
+
+    Jira/Notion may claim a migration, and historical CONSUMES_API edges may
+    explain what used to be true. Neither is authoritative for the endpoint
+    current production code actually calls.
+    """
+    acl, provider_filter, params = _acl_bits(scope, providers, "api_usage_acl")
+    rows = graph.query(
+        f"""
+        MATCH (project:Project)-[:HAS_REPOSITORY]->(:Repository)-[:CONTAINS]->
+              (file:SourceFile)-[call:CALLS_ENDPOINT]->(endpoint:Endpoint)
+        WHERE call.invalid_at IS NULL AND endpoint.path IS NOT NULL
+        UNWIND coalesce(call.source_record_keys, []) AS source_key
+        MATCH (sr:SourceRecord {{record_key: source_key}})
+        WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
+        RETURN DISTINCT file.uid, file.name, file.search_text, project.name,
+               endpoint.name, endpoint.path
+        ORDER BY project.name, endpoint.path, file.name
+        """,
+        params=params,
+    ).result_set
+    hits = [
+        SearchHit(
+            uid, "SourceFile", name,
+            f"CURRENT IMPLEMENTATION: {project} calls {endpoint_name or path}. "
+            "This is a live Bitbucket/GitHub CALLS_ENDPOINT fact.",
+            1.0, ["structured", "code-authority"],
+        )
+        for uid, name, search_text, project, endpoint_name, path in rows
+    ]
+    usage = []
+    seen: set[tuple[str, str]] = set()
+    for _uid, _name, _text, project, endpoint_name, path in rows:
+        key = (project, path)
+        if key in seen:
+            continue
+        seen.add(key)
+        version = re.search(r"/v(\d+)/", path or "")
+        api_name = f"Auth API v{version.group(1)}" if version else "the API"
+        usage.append(f"{project} currently calls {endpoint_name or path} ({api_name})")
+    complete = "; ".join(usage) or "no live repository CALLS_ENDPOINT facts were found"
+    preamble = (
+        "STRUCTURED RESULT — complete current implementation view from live "
+        "Bitbucket/GitHub SourceFile CALLS_ENDPOINT facts. " + complete + ". "
+        "Current code is authoritative. Jira/Notion text is a claim, not proof "
+        "of implementation, and historical calls must not be reported as current."
+    )
+    return StructuredHits("current_api_consumers", hits, preamble)
 
 
 def find_named_persons(

@@ -1,0 +1,44 @@
+{
+  "fixture_version": 1,
+  "mode": "upsert",
+  "connection_id": "story-jira-connection",
+  "site": {
+    "cloud_id": "story-cloud-001",
+    "name": "Story Engineering Jira",
+    "url": "https://story.atlassian.test"
+  },
+  "project": {
+    "project_id": "10002",
+    "key": "ARGO",
+    "name": "Argo Orchestrator",
+    "description": "Workflow orchestration service for internal jobs."
+  },
+  "issues": [
+    {
+      "issue_id": "21501",
+      "key": "ARGO-501",
+      "summary": "Workflows blocked after Auth API v1 removal",
+      "content": "Issue: ARGO-501\nSummary: Workflows blocked after Auth API v1 removal\nType: Incident\nStatus: Investigating\nAssignee: Ravi Kulkarni\nReporter: Tara Bose\nLabels: incident, authentication, breaking-change\n\nDescription:\nOn 2026-10-01 new Argo workflows began failing before task execution. Current production code in src/token_client.py still calls POST /v1/auth, which now returns 404 after Auth Service removed the v1 route. The readiness review had incorrectly stated that Argo had migrated to v2.",
+      "description": "On 2026-10-01 new Argo workflows began failing before task execution. Current production code in src/token_client.py still calls POST /v1/auth, which now returns 404 after Auth Service removed the v1 route. The readiness review had incorrectly stated that Argo had migrated to v2.",
+      "status": "Investigating",
+      "issue_type": "Incident",
+      "assignee": {
+        "account_id": "jira-ravi-kulkarni",
+        "display_name": "Ravi Kulkarni",
+        "email": "ravi.kulkarni@story.test"
+      },
+      "reporter": {
+        "account_id": "jira-tara-bose",
+        "display_name": "Tara Bose",
+        "email": "tara.bose@story.test"
+      },
+      "labels": ["incident", "authentication", "breaking-change"],
+      "blocks": [],
+      "created_at": "2026-10-01T09:12:00Z",
+      "updated_at": "2026-10-01T09:25:00Z",
+      "parent_id": null,
+      "parent_key": null,
+      "changes": []
+    }
+  ]
+}

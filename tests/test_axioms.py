@@ -17,12 +17,15 @@ from graph.ontology import RELATION_TYPE_MAP, is_relation_allowed
 _KINDS = sorted(
     {kind for pair in RELATION_TYPE_MAP for kind in pair}
     | {"Person", "WorkItem", "Project", "Repository", "SourceFile", "Commit",
-       "PullRequest", "Document", "Workspace", "Decision", "Term", "System"}
+       "PullRequest", "Document", "Workspace", "Decision", "Term", "System",
+       "Api", "Endpoint"}
 )
 _RELATIONS = sorted(
     {relation for relations in RELATION_TYPE_MAP.values() for relation in relations}
     | {"ASSIGNED_TO", "PARENT_OF", "CONTAINS", "MODIFIES", "SAME_AS",
-       "AUTHORED_BY", "IMPLEMENTS", "BELONGS_TO", "REPORTED_BY", "BLOCKS", "DOCUMENTS"}
+       "AUTHORED_BY", "IMPLEMENTS", "BELONGS_TO", "REPORTED_BY", "BLOCKS", "DOCUMENTS",
+       "PROVIDES_API", "CONSUMES_API", "EXPOSES_ENDPOINT", "CALLS_ENDPOINT",
+       "CHANGES", "DEPRECATES", "MIGRATES_TO"}
 )
 
 
@@ -42,6 +45,13 @@ def test_structural_relations_are_known_but_not_extractable():
     assert any(
         a.relation == "ASSIGNED_TO" and a.functional for a in DEFAULT_AXIOMS.axioms
     )
+
+
+def test_api_relations_have_strict_endpoint_shapes():
+    assert DEFAULT_AXIOMS.is_allowed("Project", "CONSUMES_API", "Api")
+    assert DEFAULT_AXIOMS.is_allowed("Api", "EXPOSES_ENDPOINT", "Endpoint")
+    assert DEFAULT_AXIOMS.is_allowed("SourceFile", "CALLS_ENDPOINT", "Endpoint")
+    assert not DEFAULT_AXIOMS.is_allowed("SourceFile", "CALLS_ENDPOINT", "Api")
 
 
 def test_axioms_the_old_dict_could_not_express():

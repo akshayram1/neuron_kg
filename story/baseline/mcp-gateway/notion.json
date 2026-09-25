@@ -1,0 +1,23 @@
+{
+  "fixture_version": 1,
+  "workspace_id": "story-notion-workspace",
+  "workspace_name": "Story Architecture",
+  "pages": [
+    {
+      "page_id": "notion-mcp-architecture-001",
+      "title": "MCP Gateway Architecture",
+      "url": "https://notion.story.test/mcp-gateway-architecture",
+      "content": "# MCP Gateway\n\nMCP Gateway exposes model-context tools to internal applications. Before a tool session is opened, the gateway authenticates the caller through Auth Service.\n\n## Dependency\n\nMCP Gateway consumes Auth API v1 and calls POST /v1/auth. This is a synchronous production dependency. The implementation lives in story-labs/mcp-gateway under src/auth_client.py.\n\nMCP-101 introduced the integration. MCP-102 added the retry policy. No migration to Auth API v2 has been completed.",
+      "last_edited_time": "2026-09-02T09:00:00Z",
+      "parent_page_id": null
+    },
+    {
+      "page_id": "notion-mcp-auth-runbook-001",
+      "title": "MCP Authentication Runbook",
+      "url": "https://notion.story.test/mcp-authentication-runbook",
+      "content": "# MCP authentication failures\n\nThe MCP Gateway client sends requests to POST /v1/auth. Retry transport failures twice. Do not retry rejected credentials.\n\nIf Auth API v1 is removed or becomes incompatible, MCP Gateway cannot start authenticated tool sessions. Check MCP-101 and the current src/auth_client.py before declaring a migration complete.",
+      "last_edited_time": "2026-09-02T09:15:00Z",
+      "parent_page_id": "notion-mcp-architecture-001"
+    }
+  ]
+}

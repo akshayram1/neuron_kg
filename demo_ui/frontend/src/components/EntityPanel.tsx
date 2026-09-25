@@ -82,11 +82,14 @@ export default function EntityPanel({ node, providers, graphName, onClose, onNav
   const fields = detail?.entity.fields ?? {};
   const fieldEntries = Object.entries(fields);
   const sourceUrl = detail?.entity.url;
+  const wisdomType = detail?.entity.wisdomType ?? node.wisdomType;
 
   return (
     <aside className={`selection-card entity-dock${tab === "view" ? " is-wide" : ""}`}>
       <button className="selection-close" onClick={onClose} aria-label="Close details">×</button>
-      <span className="selection-kind">{node.type}</span>
+      <span className="selection-kind">
+        {node.type}{wisdomType ? ` · ${wisdomType.replace("AntiPattern", "Anti-pattern")}` : ""}
+      </span>
       <h3>{node.label}</h3>
       {tab !== "view" && (
         <p>{detail?.entity.summary || node.summary || "This item is connected to the surrounding facts."}</p>

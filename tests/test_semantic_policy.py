@@ -1,4 +1,5 @@
-from graph.semantic_pass import evidence_in_chunk
+from connectors.core.ledger import PendingChunk
+from graph.semantic_pass import _call_llm, _candidate_identity_matches, evidence_in_chunk
 
 
 def test_verbatim_span_matches_after_whitespace_normalize():
@@ -19,3 +20,31 @@ def test_empty_evidence_is_rejected():
     assert not evidence_in_chunk("", "we decided to use Redis")
     assert not evidence_in_chunk("   ", "we decided to use Redis")
     assert not evidence_in_chunk(None, "we decided to use Redis")
+
+
+def test_related_evidence_is_comparison_context_not_a_fact_source():
+    captured = {}
+
+    class Responses:
+        def parse(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    class Client:
+        responses = Responses()
+
+    chunk = PendingChunk("jira:c:issue:AUTH-1", "chunk-1", 0, "[SOURCE]\nnew claim")
+    _call_llm(Client(), "test-model", chunk, "[notion | old design]\nold fact")
+
+    user_text = captured["input"][1]["content"]
+    assert user_text.startswith(chunk.text)
+    assert "RELATED EXISTING EVIDENCE" in user_text
+    assert "Do not extract a fact unless its verbatim evidence occurs in the NEW SOURCE" in user_text
+    assert "old fact" in user_text
+
+
+def test_endpoint_candidate_must_match_version_and_method():
+    v1 = ["POST /v1/auth", "/v1/auth", "POST", None, None, None, None]
+    assert not _candidate_identity_matches("Endpoint", "POST /v2/auth", v1)
+    assert _candidate_identity_matches("Endpoint", "POST /v1/auth", v1)
+    assert not _candidate_identity_matches("Endpoint", "GET /v1/auth", v1)

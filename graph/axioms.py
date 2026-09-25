@@ -159,6 +159,9 @@ _STRUCTURAL: list[RelationAxiom] = [
     RelationAxiom("IMPLEMENTS", "PullRequest", "WorkItem", temporal="event"),
     RelationAxiom("BLOCKS", "WorkItem", "WorkItem", is_asymmetric=True),
     RelationAxiom("DOCUMENTS", "Document", "WorkItem"),
+    RelationAxiom("HAS_REPOSITORY", "Project", "Repository"),
+    RelationAxiom("HAS_DOCUMENT", "Project", "Document"),
+    RelationAxiom("MAY_IMPACT", "WorkItem", "Project"),
 ]
 
 # Axioms for the extractable (LLM-asserted) relations. The allow-list itself
@@ -170,6 +173,13 @@ _SEMANTIC_AXIOMS = {
     "APPLIES_TO": {},
     "CAVEAT_OF": {},
     "OWNS": {},
+    "PROVIDES_API": {},
+    "CONSUMES_API": {},
+    "EXPOSES_ENDPOINT": {},
+    "CALLS_ENDPOINT": {},
+    "CHANGES": {},
+    "DEPRECATES": {"is_asymmetric": True},
+    "MIGRATES_TO": {},
 }
 
 

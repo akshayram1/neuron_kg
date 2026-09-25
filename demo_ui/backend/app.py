@@ -38,6 +38,7 @@ from demo_ui.backend.bitbucket_routes import router as bitbucket_router
 from demo_ui.backend.github_routes import router as github_router
 from demo_ui.backend.jira_routes import router as jira_router
 from demo_ui.backend.notion_routes import router as notion_router
+from demo_ui.backend.story_routes import router as story_router
 from demo_ui.backend.access import access_scope_for_request
 from demo_ui.backend.job_worker import run_worker
 from graph import multigraph
@@ -105,6 +106,7 @@ app.include_router(jira_router)
 app.include_router(github_router)
 app.include_router(bitbucket_router)
 app.include_router(notion_router)
+app.include_router(story_router)
 
 
 @app.middleware("http")
@@ -386,8 +388,8 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
             get_graph(name=target.falkor_name),
             OpenAI(api_key=os.environ.get("OPENAI_API_KEY")),
             payload.message.strip(),
-            # Not $LLM_MODEL — that's extraction's model, chat wants its own
-            # faster default. See graph/chat.py's run_chat_turn docstring.
+            # Not $LLM_MODEL — chat has a dedicated Sol default/override.
+            # See graph/chat.py's run_chat_turn implementation.
             model=os.getenv("CHAT_MODEL"),
             providers=payload.providers,
             scope=access_scope_for_request(request),
@@ -403,6 +405,14 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
         "citations": [
             {"recordKey": item.record_key, "name": item.name, "url": item.url}
             for item in result.citations
+        ],
+        "knowledgeCitations": [
+            {
+                "uid": item.uid, "type": item.label, "name": item.name,
+                "status": item.status, "severity": item.severity,
+                "createdAt": item.created_at, "staleAt": item.stale_at,
+            }
+            for item in result.knowledge_citations
         ],
         "highlight": {
             "nodes": sorted(set(result.highlighted_nodes)),

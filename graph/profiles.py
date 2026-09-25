@@ -17,7 +17,9 @@ from connectors.core.chunking.models import ChunkPolicy
 from connectors.core.models import SourceRecord
 from graph.ontology import (
     EXTRACTION_INSTRUCTIONS,
+    Api,
     Decision,
+    Endpoint,
     RelationName,
     System,
     Term,
@@ -31,7 +33,7 @@ StructuralKind = Literal[
     "WorkItem", "Person", "Project", "Repository", "SourceFile", "Commit",
     "PullRequest", "Document", "Workspace",
 ]
-SemanticKind = Literal["Decision", "Term", "System"]
+SemanticKind = Literal["Decision", "Term", "System", "Api", "Endpoint"]
 
 
 class ExtractedFact(BaseModel):
@@ -46,11 +48,36 @@ class ExtractedFact(BaseModel):
     relation: RelationName
     object_name: str
     object_kind: StructuralKind | SemanticKind
+    subject_candidate_uid: str | None = Field(
+        None, description="Retrieved candidate UID when attaching the subject to an existing node."
+    )
+    object_candidate_uid: str | None = Field(
+        None, description="Retrieved candidate UID when attaching the object to an existing node."
+    )
     evidence: str = Field(description="Verbatim span from the text supporting this fact.")
     severity: Literal["info", "warning", "blocker"] | None = None
     when: str | None = None
     reason: str | None = None
     scope: str | None = None
+
+
+class IngestionAssessment(BaseModel):
+    """A user-visible judgement made only from new evidence versus retrieved history."""
+
+    action: Literal[
+        "addition", "update", "contradiction", "architecture_change", "review"
+    ]
+    topic_key: str = Field(
+        description="Stable kebab-case subject key, e.g. auth-api-v2-migration. Use the same key across sources describing the same change."
+    )
+    should_flag: bool = False
+    severity: Literal["info", "warning", "high", "critical"] = "info"
+    title: str
+    summary: str
+    reasoning: str
+    evidence: str = Field(description="Verbatim span from the NEW SOURCE only.")
+    related_candidate_uids: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class WorkManagementExtraction(BaseModel):
@@ -60,7 +87,10 @@ class WorkManagementExtraction(BaseModel):
     terms: list[Term] = Field(default_factory=list)
     decisions: list[Decision] = Field(default_factory=list)
     systems: list[System] = Field(default_factory=list)
+    apis: list[Api] = Field(default_factory=list)
+    endpoints: list[Endpoint] = Field(default_factory=list)
     facts: list[ExtractedFact] = Field(default_factory=list)
+    assessments: list[IngestionAssessment] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -90,10 +120,26 @@ the extraction. If you cannot state a real relationship for something, do
 not list it as an entity at all.
 """
 
+_ADJUDICATION_ADDENDUM = """\
+This call receives ONLY evidence that deterministic Pass 1 could not fully
+connect. A bounded [RELATED EXISTING EVIDENCE + CANDIDATE NODES] section may follow it.
+Candidate UIDs are untrusted references, not evidence. You may use a candidate
+UID on a fact only when it is explicitly listed and its kind matches.
+
+Also classify material implications in `assessments`: addition, update,
+contradiction, architecture_change, or review. Set `should_flag=true` only for
+a contradiction, a broad architecture/dependency change, or genuinely
+ambiguous evidence needing a human. Ordinary additions and updates normally
+remain unflagged. Every assessment must quote verbatim evidence from NEW
+SOURCE; never quote retrieved history as new evidence.
+Use one stable `topic_key` for the same real-world change across Jira, Notion,
+commit, pull-request, and source-file evidence so their findings consolidate.
+"""
+
 WORK_MANAGEMENT = ExtractionProfile(
     name="work_management",
     schema=WorkManagementExtraction,
-    instructions=EXTRACTION_INSTRUCTIONS + "\n" + _WORK_MANAGEMENT_ADDENDUM,
+    instructions=EXTRACTION_INSTRUCTIONS + "\n" + _WORK_MANAGEMENT_ADDENDUM + "\n" + _ADJUDICATION_ADDENDUM,
     chunk_policy=ChunkPolicy(target_tokens=1500, hard_max_tokens=3500, overlap_tokens=0),
 )
 
@@ -116,7 +162,7 @@ discarded.
 SOFTWARE_KNOWLEDGE = ExtractionProfile(
     name="software_knowledge",
     schema=WorkManagementExtraction,
-    instructions=EXTRACTION_INSTRUCTIONS + "\n" + _SOFTWARE_KNOWLEDGE_ADDENDUM,
+    instructions=EXTRACTION_INSTRUCTIONS + "\n" + _SOFTWARE_KNOWLEDGE_ADDENDUM + "\n" + _ADJUDICATION_ADDENDUM,
     chunk_policy=ChunkPolicy(target_tokens=1700, hard_max_tokens=3500, overlap_tokens=0),
 )
 
@@ -133,7 +179,7 @@ fact; disconnected entities are discarded.
 BUSINESS_DOCUMENT = ExtractionProfile(
     name="business_document",
     schema=WorkManagementExtraction,
-    instructions=EXTRACTION_INSTRUCTIONS + "\n" + _BUSINESS_DOCUMENT_ADDENDUM,
+    instructions=EXTRACTION_INSTRUCTIONS + "\n" + _BUSINESS_DOCUMENT_ADDENDUM + "\n" + _ADJUDICATION_ADDENDUM,
     chunk_policy=ChunkPolicy(target_tokens=1800, hard_max_tokens=3800, overlap_tokens=0),
 )
 
