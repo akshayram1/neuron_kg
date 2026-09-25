@@ -36,6 +36,7 @@ from typing import Any
 
 from falkordb import Graph
 
+from connectors.core.ledger import ReviewState
 from graph import writer as w
 from graph.axioms import DEFAULT_AXIOMS, AxiomSet
 from graph.time_axis import parse_iso
@@ -641,3 +642,187 @@ def resolve_text_fact(
     )
     fact_uid = _write_incoming_fact(graph, new)
     return {"action": "ended_unknown", "old_fact_uid": old.fact_uid, "new_fact_uid": fact_uid}
+
+
+# ---------------------------------------------------------------------------
+# 25-plan.md §6.5 "Review queue UI" -- apply-on-approval for a `fact_update`
+# review already sitting in the generic `reviews` table (`connectors.core.
+# ledger`). Additive: everything above this point is §5.2's original,
+# unmodified surface. `demo_ui/backend/review_routes.py`'s approve endpoint
+# is the one real caller -- see that module for the "approve = one atomic
+# action" dispatch this function slots into.
+# ---------------------------------------------------------------------------
+
+
+def _node_label(graph: Graph, uid: str) -> str:
+    """The one label a node was created with (every node in this codebase
+    has exactly one -- see `graph/writer.py::upsert_entities`). Needed here
+    only for the `contradicts` action, to rebuild the `OldFact`/`NewFact`
+    shape `link_disputed` expects (it dispatches on `from_label`/`to_label`
+    to find the Decision endpoint) -- `_resolve_conflict`'s stored payload
+    does not carry labels, only uids (see `apply_approved_fact_update`'s
+    docstring for why that is recoverable rather than a real gap).
+
+    Raises `ValueError` if `uid` matches no node -- same fail-loud
+    convention as `graph/writer.py::_find_live_fact` for a missing
+    precondition; a `contradicts` review whose endpoint has since been
+    deleted/merged away should not silently no-op.
+    """
+    rows = graph.query(
+        "MATCH (n {uid: $uid}) RETURN labels(n)[0]", params={"uid": uid},
+    ).result_set
+    if not rows or not rows[0][0]:
+        raise ValueError(f"_node_label: no node found for uid={uid!r}")
+    return rows[0][0]
+
+
+def apply_approved_fact_update(graph: Graph, ledger: Any, review_id: int) -> dict:
+    """25-plan.md §6.5 review-queue table: for a `fact_update` review,
+    "Approve does: apply proposed close / dispute."
+
+    Reads the APPROVED review's payload (exact shape built by
+    `_resolve_conflict`'s `suggest` branch -- `action`, `old_fact_uid`,
+    `old_from_uid`, `old_to_uid`, `old_rel_type`, `old_valid_at`,
+    `new_from_uid`, `new_to_uid`, `new_rel_type`, `new_valid_at`,
+    `new_source_time`, `new_evidence`, `new_source_record_key`) and
+    dispatches on `payload["action"]` to the same primitive
+    `_resolve_conflict`'s own `auto` branch would have called directly:
+
+      - `newer_state_close` -> `writer.close_fact(old_fact_uid,
+        valid_to=new_valid_at, reason="superseded")`
+      - `corrects`          -> `writer.correct_fact(old_fact_uid,
+        corrected_by=new_fact_uid, observed_to=new_source_time)`
+      - `contradicts`       -> `link_disputed(old, new)`
+
+    then promotes the already-written-but-`pending_review` incoming fact to
+    `live` via `writer.set_projection_status` -- deliberately AFTER the old
+    fact's mutation, mirroring `_resolve_conflict`'s own compensating-state
+    ordering (see that function's docstring): a crash between the two steps
+    leaves `old` mutated and `new` merely pending, never two contradictory
+    facts both live at once.
+
+    The incoming fact's `fact_uid` is not stored in the payload -- at
+    proposal time `_write_incoming_fact` computed it as `writer.make_uid(
+    "Fact", new.from_uid, new.rel_type, new.to_uid)` and wrote the edge
+    under that uid with `projection_status="pending_review"` before the
+    review was ever created (verified by reading `_write_incoming_fact` and
+    `_resolve_conflict`'s `suggest` branch above). Recomputing the same
+    deterministic uid here from the payload's `new_from_uid`/`new_rel_type`/
+    `new_to_uid` recovers it exactly, no new field needed.
+
+    Raises `ValueError` if the review does not exist, is not a
+    `fact_update` review, is not (yet) `approved`, or `payload["action"]`
+    is not one of the three destructive actions `_resolve_conflict` ever
+    writes -- same fail-loud-never-silent-no-op convention
+    `graph/duplicate_collector.py::apply_approved_duplicate_merge` already
+    establishes for this exact shape of precondition guard.
+    """
+    review = ledger.get_review(review_id)
+    if review is None:
+        raise ValueError(f"apply_approved_fact_update: no review with id={review_id!r}")
+    if review.type != "fact_update":
+        raise ValueError(
+            f"apply_approved_fact_update: review {review_id} has type={review.type!r}, "
+            "expected 'fact_update'"
+        )
+    if review.state != ReviewState.APPROVED:
+        raise ValueError(
+            f"apply_approved_fact_update: review {review_id} has state={review.state!r}, "
+            "expected 'approved'"
+        )
+
+    payload = review.payload
+    action = payload["action"]
+    new_fact_uid = w.make_uid(
+        "Fact", payload["new_from_uid"], payload["new_rel_type"], payload["new_to_uid"],
+    )
+
+    if action == "newer_state_close":
+        w.close_fact(
+            graph, payload["old_fact_uid"], valid_to=payload["new_valid_at"], reason="superseded",
+        )
+    elif action == "corrects":
+        w.correct_fact(
+            graph, payload["old_fact_uid"], corrected_by=new_fact_uid,
+            observed_to=payload["new_source_time"],
+        )
+    elif action == "contradicts":
+        old = OldFact(
+            fact_uid=payload["old_fact_uid"], from_uid=payload["old_from_uid"],
+            from_label=_node_label(graph, payload["old_from_uid"]),
+            to_uid=payload["old_to_uid"], to_label=_node_label(graph, payload["old_to_uid"]),
+            rel_type=payload["old_rel_type"], valid_at=payload["old_valid_at"],
+        )
+        new = NewFact(
+            from_uid=payload["new_from_uid"],
+            from_label=_node_label(graph, payload["new_from_uid"]),
+            to_uid=payload["new_to_uid"],
+            to_label=_node_label(graph, payload["new_to_uid"]),
+            rel_type=payload["new_rel_type"], source_time=payload["new_source_time"],
+            source_record_key=payload["new_source_record_key"],
+            valid_at=payload["new_valid_at"], evidence=payload["new_evidence"],
+            fact_uid=new_fact_uid,
+        )
+        link_disputed(graph, old, new)
+    else:
+        raise ValueError(
+            f"apply_approved_fact_update: review {review_id} has payload['action']="
+            f"{action!r}, expected one of 'newer_state_close', 'corrects', 'contradicts'"
+        )
+
+    w.set_projection_status(graph, new_fact_uid, "live")
+    return {
+        "review_id": review_id, "action": action,
+        "old_fact_uid": payload["old_fact_uid"], "new_fact_uid": new_fact_uid,
+    }
+
+
+def apply_approved_possibly_same_as(graph: Graph, ledger: Any, review_id: int) -> dict:
+    """25-plan.md §6.5 review-queue table: for a `possibly_same_as` review,
+    "Approve does: merge + namespace-aware alias; Decision requires explicit
+    review."
+
+    PLACEHOLDER, not implemented -- same posture as `classify_fact_update`
+    above (see that function's docstring for the general shape of this
+    choice). Verified against the real resolution ladder before writing
+    this, not assumed: `graph/semantic_pass.py::_rung6_laya_same_entity`
+    (rung 6 of §4.2's scoped entity-resolution ladder) is the ONLY place in
+    this codebase that could ever propose a `possibly_same_as` review, and
+    it is a documented placeholder that always returns `(None, 0.0)` --
+    "no candidate reached top p >= 0.85 and top - second >= 0.15" -- so the
+    ladder always falls through to minting a new node instead. Grepped the
+    whole tree for `create_review("possibly_same_as"`: the only hits are
+    this docstring and `tests/test_reviews.py`'s own synthetic fixture
+    rows, never a real proposer. There is therefore no real
+    `possibly_same_as` review payload shape to apply yet -- no agreed
+    merge-vs-alias write path, nothing to build against without guessing.
+
+    This function exists anyway so `demo_ui/backend/review_routes.py`'s
+    approve dispatcher has a complete, honest mapping for all four §6.5
+    review types rather than silently doing nothing for this one: calling
+    it on a real review raises loudly instead of a caller wrongly believing
+    the merge/alias step happened.
+
+    A real implementation needs:
+      1. Rung 6 (`_rung6_laya_same_entity`) wired to a real Laya
+         `same_entity` call, so a `possibly_same_as` review can actually be
+         proposed with a `subject_uid`/`object_uid` payload (see that
+         function's own docstring, and `_propose_polarity_conflict_review`
+         in `graph/semantic_pass.py` for the closest existing "propose a
+         review from this ladder" precedent).
+      2. An explicit merge + namespace-aware-alias write path: §6.5's table
+         is specific that Decision requires explicit review (i.e. never
+         auto-applied even once rung 6 is real) -- reusing
+         `graph/duplicate_collector.py`'s merge primitives
+         (`_choose_survivor`/`_absorb_fact_edges`/`_absorb_mentions`) plus
+         `ConnectorLedger.add_entity_alias` for the alias half is the
+         closest existing precedent, but nothing wires them together for
+         this review type today.
+    """
+    raise NotImplementedError(
+        "apply_approved_possibly_same_as: no real 'possibly_same_as' review is ever "
+        "proposed today -- graph/semantic_pass.py's rung 6 (_rung6_laya_same_entity) "
+        "is a verified placeholder that always returns (None, 0.0), so this review "
+        "type has no real payload shape or merge/alias write path to apply yet. See "
+        "this function's docstring for exactly what a real implementation needs."
+    )

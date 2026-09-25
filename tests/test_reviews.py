@@ -1,23 +1,47 @@
 """Phase 3 §3.0 "Minimal review queue": `ConnectorLedger`'s `reviews` /
 `review_rejections` tables and the `demo_ui/backend/review_routes.py`
-endpoints built on top of them.
+endpoints built on top of them. Extended for Phase 6 §6.5's "approve = one
+atomic action" dispatch (`review_routes._APPLY_FUNCTIONS`).
 
 Ledger-level tests exercise a real temp-file `ConnectorLedger`, the same
 convention as `tests/test_sync_coverage.py` and `tests/test_ledger_priority.py`
--- no mocking. The route-level test builds a small standalone FastAPI app
+-- no mocking. The route-level tests build a small standalone FastAPI app
 around just `review_routes.router` (not the full `demo_ui.backend.app`,
-whose startup event needs a live FalkorDB) and drives it with a real
+whose startup event needs a live FalkorDB) and drive it with a real
 `TestClient`, pointed at a temp data directory so it never touches real
 ledger files.
+
+The §6.5 dispatch tests below additionally need a real FalkorDB (approving a
+`fact_update`/`duplicate_pair`/`possibly_same_as` review now calls
+`review_routes._graph`, which opens a real connection even when the apply
+function itself never queries it -- verified directly: constructing
+`falkordb.FalkorDB(...)` eagerly pings the server) -- gated behind
+`NEURON_INTEGRATION=1`, same convention as `tests/test_resolve_text_fact.py`.
+They run against their own uniquely-named graph (`graph_name` fixture below),
+never the shared "default" graph every other test in this file's route-level
+section implicitly targets (those never reach `_graph`, since none of their
+review types have an apply function).
 """
 
 from __future__ import annotations
 
+import os
+import uuid
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from connectors.core.ledger import ConnectorLedger, ReviewState
 from demo_ui.backend import review_routes
+from graph import writer as w
+from graph.falkor_client import build_client
+from graph.resolve_text_fact import NewFact, OldFact, resolve_text_fact
+
+integration = pytest.mark.skipif(
+    os.getenv("NEURON_INTEGRATION") != "1",
+    reason="set NEURON_INTEGRATION=1 to use local FalkorDB",
+)
 
 # --------------------------------------------------------------- ledger-level
 
@@ -214,12 +238,22 @@ def test_api_list_rejects_invalid_state(tmp_path, monkeypatch):
 
 
 def test_api_approve_and_reject_end_to_end(tmp_path, monkeypatch):
+    """Generic queue plumbing (list/approve/reject/rejection-cache), for a
+    review `type` that has no Phase 6.5 apply-on-approval step --
+    `polarity_conflict_candidate` (§4.1, real type, never wired to an apply
+    function) rather than `possibly_same_as`, since approving a
+    `possibly_same_as` review now dispatches to
+    `apply_approved_possibly_same_as`, which always raises (see
+    `test_approve_possibly_same_as_is_approved_but_apply_fails` below) --
+    this test is specifically about the "no apply step" no-regression case."""
     client = _client(tmp_path, monkeypatch)
     ledger = review_routes._ledger("default")
-    approve_id = ledger.create_review("possibly_same_as", {"subject_uid": "a", "object_uid": "b"})
+    approve_id = ledger.create_review(
+        "polarity_conflict_candidate", {"subject_uid": "a", "object_uid": "b"},
+    )
     reject_id = ledger.create_review(
-        "possibly_same_as", {"subject_uid": "c", "object_uid": "d"},
-        identity="possibly_same_as:c:d",
+        "polarity_conflict_candidate", {"subject_uid": "c", "object_uid": "d"},
+        identity="polarity_conflict_candidate:c:d",
     )
 
     listed = client.get("/api/reviews").json()["reviews"]
@@ -242,13 +276,13 @@ def test_api_approve_and_reject_end_to_end(tmp_path, monkeypatch):
     assert rejected["state"] == "rejected"
 
     # The rejection identity is now cached at the ledger level.
-    assert ledger.is_identity_rejected("possibly_same_as:c:d") is True
+    assert ledger.is_identity_rejected("polarity_conflict_candidate:c:d") is True
 
     pending_after = client.get("/api/reviews", params={"state": "pending"}).json()["reviews"]
     assert pending_after == []
 
     approved_after = client.get(
-        "/api/reviews", params={"state": "approved", "type": "possibly_same_as"},
+        "/api/reviews", params={"state": "approved", "type": "polarity_conflict_candidate"},
     ).json()["reviews"]
     assert [row["id"] for row in approved_after] == [approve_id]
 
@@ -269,3 +303,165 @@ def test_api_reject_already_decided_review_is_404(tmp_path, monkeypatch):
         f"/api/reviews/{review_id}/reject", params={"decided_by": "second-reviewer"},
     )
     assert response.status_code == 404
+
+
+# ----------------------------------------------- §6.5 apply-on-approval dispatch
+
+
+@pytest.fixture
+def graph_name():
+    """A throwaway, uniquely-named graph slug -- `multigraph.resolve` maps a
+    non-`"default"` slug to its own isolated FalkorDB graph
+    (`<FALKOR_GRAPH>__<slug>`) and ledger file (Phase 0's multigraph work),
+    so these dispatch tests' real graph writes never touch the shared
+    "default" graph every other test in this file implicitly targets."""
+    name = f"testdispatch{uuid.uuid4().hex[:12]}"
+    yield name
+    falkor_name = f"{os.getenv('FALKOR_GRAPH', 'neuron')}__{name}"
+    try:
+        build_client().select_graph(falkor_name).delete()
+    except Exception:
+        # A test that never wrote to this graph (e.g. the `possibly_same_as`
+        # dispatch test, which fails before any graph write) leaves no real
+        # key behind -- FalkorDB errors on deleting one that was never
+        # created ("Invalid graph operation on empty key"). Nothing to clean
+        # up in that case.
+        pass
+
+
+def _falkor_graph(graph_name: str):
+    falkor_name = f"{os.getenv('FALKOR_GRAPH', 'neuron')}__{graph_name}"
+    return build_client().select_graph(falkor_name)
+
+
+@integration
+def test_api_approve_fact_update_triggers_real_apply(tmp_path, monkeypatch, graph_name):
+    """End-to-end: HTTP approve -> ledger state flip -> real graph mutation,
+    for the review shape `resolve_text_fact`'s own `suggest` branch produces
+    (§6.5's "fact_update -> apply proposed close / dispute")."""
+    client = _client(tmp_path, monkeypatch)
+    g = _falkor_graph(graph_name)
+    w.upsert_entities(g, "Person", [{"uid": "p1", "props": {"name": "Alice"}}])
+    w.upsert_entities(g, "Term", [{"uid": "t1", "props": {"name": "Rate Limit"}}])
+    w.upsert_entities(g, "Term", [{"uid": "t2", "props": {"name": "Retry Policy"}}])
+    w.upsert_fact_edges(g, "OWNS", "Person", "Term", [{
+        "from_uid": "p1", "to_uid": "t1", "source_record_keys": ["rec-old"],
+        "evidence": "old evidence", "extraction_method": "llm", "confidence": 0.9,
+        "valid_at": "2026-01-01T00:00:00Z",
+    }])
+    old_fact_uid = g.query(
+        "MATCH (:Person {uid:'p1'})-[r:OWNS]->(:Term {uid:'t1'}) RETURN r.fact_uid"
+    ).result_set[0][0]
+    old = OldFact(
+        fact_uid=old_fact_uid, from_uid="p1", from_label="Person",
+        to_uid="t1", to_label="Term", rel_type="OWNS", valid_at="2026-01-01T00:00:00Z",
+    )
+    new = NewFact(
+        from_uid="p1", from_label="Person", to_uid="t2", to_label="Term",
+        rel_type="OWNS", source_time="2026-06-01T00:00:00Z", source_record_key="rec-new",
+        valid_at="2026-06-01T00:00:00Z", evidence="new evidence", confidence=0.8,
+    )
+    ledger = review_routes._ledger(graph_name)
+    suggested = resolve_text_fact(g, ledger, new, old, "newer_state", mode="suggest")
+    review_id = ledger.list_reviews(type="fact_update")[0].id
+
+    response = client.post(
+        f"/api/reviews/{review_id}/approve",
+        params={"decided_by": "tester", "graph_name": graph_name},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review"]["state"] == "approved"
+    assert body["applied"]["action"] == "newer_state_close"
+    assert body["applied"]["new_fact_uid"] == suggested["new_fact_uid"]
+
+    old_row = g.query(
+        "MATCH ()-[r]->() WHERE r.fact_uid = $fu RETURN r.invalid_at",
+        params={"fu": old_fact_uid},
+    ).result_set[0]
+    assert old_row[0] == "2026-06-01T00:00:00Z"
+    new_row = g.query(
+        "MATCH ()-[r]->() WHERE r.fact_uid = $fu RETURN r.projection_status",
+        params={"fu": suggested["new_fact_uid"]},
+    ).result_set[0]
+    assert (new_row[0] or "live") == "live"
+
+
+@integration
+def test_api_approve_duplicate_pair_triggers_real_apply(tmp_path, monkeypatch, graph_name):
+    """End-to-end for §6.5's "duplicate_pair -> merge that approved pair" --
+    same fixture shape as
+    `tests/test_duplicate_collector.py::TestApplyApprovedDuplicateMerge`,
+    driven through the real HTTP endpoint instead of calling
+    `apply_approved_duplicate_merge` directly."""
+    client = _client(tmp_path, monkeypatch)
+    g = _falkor_graph(graph_name)
+    w.upsert_entities(g, "Term", [{"uid": "term-a", "props": {"name": "Redis rate limiter"}}])
+    w.upsert_entities(g, "Term", [{"uid": "term-b", "props": {"name": "Redis limiter"}}])
+    w.upsert_entities(g, "System", [{"uid": "sys-1", "props": {"name": "Redis"}}])
+    w.upsert_fact_edges(g, "APPLIES_TO", "Term", "System", [{
+        "from_uid": "term-a", "to_uid": "sys-1", "source_record_keys": ["r1", "r2"],
+        "evidence": "e", "extraction_method": "llm", "confidence": 0.9,
+    }])
+    w.upsert_fact_edges(g, "APPLIES_TO", "Term", "System", [{
+        "from_uid": "term-b", "to_uid": "sys-1", "source_record_keys": ["r3"],
+        "evidence": "e", "extraction_method": "llm", "confidence": 0.9,
+    }])
+
+    ledger = review_routes._ledger(graph_name)
+    review_id = ledger.create_review(
+        "duplicate_pair",
+        {"label": "Term", "uid_a": "term-a", "uid_b": "term-b", "score": 0.8, "signals": {}},
+        identity="duplicate_pair:Term:term-a:term-b",
+    )
+
+    response = client.post(
+        f"/api/reviews/{review_id}/approve",
+        params={"decided_by": "tester", "graph_name": graph_name},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review"]["state"] == "approved"
+    # term-a has 2 reinforcing source records vs term-b's 1 -- more
+    # reinforced, so it survives (`_choose_survivor`'s own tiebreak rule).
+    assert body["applied"]["survivor_uid"] == "term-a"
+    assert body["applied"]["absorbed_uid"] == "term-b"
+
+    redirected = g.query(
+        "MATCH (a {uid:'term-a'})-[r:APPLIES_TO]->(s {uid:'sys-1'}) "
+        "RETURN r.invalid_at, r.source_record_keys",
+    ).result_set
+    assert redirected and redirected[0][0] is None
+    assert set(redirected[0][1]) == {"r1", "r2", "r3"}
+
+
+@integration
+def test_api_approve_possibly_same_as_is_approved_but_apply_fails(tmp_path, monkeypatch, graph_name):
+    """No real `possibly_same_as` review is ever proposed today
+    (`apply_approved_possibly_same_as` always raises `NotImplementedError` --
+    see `graph/resolve_text_fact.py`), so approving one through the unified
+    endpoint must surface that failure loudly (500, `review_routes.py`'s
+    documented approved-but-apply-failed edge case) rather than silently
+    reporting success -- and the ledger's state flip, which already
+    committed before the apply step ran, must not be hidden or rolled back."""
+    client = _client(tmp_path, monkeypatch)
+    ledger = review_routes._ledger(graph_name)
+    review_id = ledger.create_review(
+        "possibly_same_as", {"subject_uid": "a", "object_uid": "b"},
+    )
+
+    response = client.post(
+        f"/api/reviews/{review_id}/approve",
+        params={"decided_by": "tester", "graph_name": graph_name},
+    )
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert str(review_id) in detail
+    assert "approved" in detail
+
+    row = ledger.get_review(review_id)
+    assert row.state == ReviewState.APPROVED
+    assert row.decided_by == "tester"

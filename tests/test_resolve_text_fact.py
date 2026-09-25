@@ -29,6 +29,8 @@ from graph.resolve_text_fact import (
     OldFact,
     UnsupportedDisputeError,
     _map_laya_kind_to_resolve_kind,
+    apply_approved_fact_update,
+    apply_approved_possibly_same_as,
     classify_fact_update,
     find_conflict_candidates,
     link_disputed,
@@ -575,3 +577,149 @@ def test_find_conflict_candidates_no_duplicates_across_branches(graph):
     candidates = find_conflict_candidates(graph, "d2", "t1", "APPLIES_TO", "new-fact-uid")
     matches = [c for c in candidates if c.from_uid == "d1" and c.to_uid == "t1"]
     assert len(matches) == 1
+
+
+# =========================================================================
+# `apply_approved_fact_update` / `apply_approved_possibly_same_as` --
+# 25-plan.md §6.5 apply-on-approval for a `fact_update` review already
+# sitting in the generic `reviews` table (mirrors `resolve_text_fact`'s own
+# `suggest`-mode output exactly, since that's the only real producer of a
+# `fact_update` review today).
+# =========================================================================
+
+
+# ------------------------------------------------------- guard behavior (pure)
+#
+# All three guards fire before `apply_approved_fact_update` ever touches
+# `graph`, so a real FalkorDB handle is unnecessary here -- `graph=None`
+# proves that (a real connection would raise a different, confusing error
+# if these guards were reordered to run after a graph read).
+
+
+def test_apply_approved_fact_update_missing_review_raises(ledger):
+    with pytest.raises(ValueError, match="no review with id"):
+        apply_approved_fact_update(None, ledger, 9999)
+
+
+def test_apply_approved_fact_update_wrong_type_raises(ledger):
+    review_id = ledger.create_review("duplicate_pair", {"label": "Term", "uid_a": "a", "uid_b": "b"})
+    ledger.approve_review(review_id, "tester")
+    with pytest.raises(ValueError, match="expected 'fact_update'"):
+        apply_approved_fact_update(None, ledger, review_id)
+
+
+def test_apply_approved_fact_update_wrong_state_raises(ledger):
+    review_id = ledger.create_review("fact_update", {"action": "newer_state_close"})
+    # Still pending -- never approved.
+    with pytest.raises(ValueError, match="expected 'approved'"):
+        apply_approved_fact_update(None, ledger, review_id)
+
+
+def test_apply_approved_possibly_same_as_raises_not_implemented():
+    """Rung 6 of the §4.2 resolution ladder (`_rung6_laya_same_entity`) is a
+    verified placeholder that never proposes a real `possibly_same_as`
+    review (see that function's own docstring) -- this stub matches
+    `classify_fact_update`'s established "raise loud, document what's
+    missing" posture rather than guessing at a merge/alias implementation.
+    Raises unconditionally, with no graph/ledger access needed to prove it."""
+    with pytest.raises(NotImplementedError, match="possibly_same_as"):
+        apply_approved_possibly_same_as(None, None, 1)
+
+
+# --------------------------------------------------- end-to-end (integration)
+#
+# Each exercises `resolve_text_fact(..., mode="suggest")` first (the real
+# producer of a `fact_update` review's exact payload shape -- see
+# `_resolve_conflict`), then approves that review and applies it, verifying
+# the SAME real effects the `mode="auto"` tests above already assert for
+# the corresponding action -- proving `apply_approved_fact_update` reaches
+# an identical end state to what `_resolve_conflict`'s own auto branch would
+# have done directly.
+
+
+@integration
+def test_apply_approved_fact_update_newer_state_close_end_to_end(graph, ledger):
+    old, new = _old_and_new(
+        graph, rel_type="OWNS", from_label="Person", to_label="Term",
+        old_to="t1", new_to="t2",
+        old_valid_at="2026-01-01T00:00:00Z", new_valid_at="2026-06-01T00:00:00Z",
+    )
+    suggested = resolve_text_fact(graph, ledger, new, old, "newer_state", mode="suggest")
+    review_id = ledger.list_reviews(type="fact_update")[0].id
+    ledger.approve_review(review_id, "tester")
+
+    result = apply_approved_fact_update(graph, ledger, review_id)
+
+    assert result["action"] == "newer_state_close"
+    assert result["new_fact_uid"] == suggested["new_fact_uid"]
+    old_row = _edge_row(graph, old.fact_uid)
+    assert old_row[0] == "2026-06-01T00:00:00Z"  # invalid_at == new.valid_at
+    new_row = _edge_row(graph, suggested["new_fact_uid"])
+    assert (new_row[2] or "live") == "live"  # promoted after approval
+
+
+@integration
+def test_apply_approved_fact_update_corrects_end_to_end(graph, ledger):
+    old, new = _old_and_new(
+        graph, rel_type="OWNS", from_label="Person", to_label="Term",
+        old_to="t1", new_to="t2", old_valid_at="2026-01-01T00:00:00Z",
+        new_valid_at="2026-06-01T00:00:00Z",
+    )
+    suggested = resolve_text_fact(graph, ledger, new, old, "corrects", mode="suggest")
+    review_id = ledger.list_reviews(type="fact_update")[0].id
+    ledger.approve_review(review_id, "tester")
+
+    result = apply_approved_fact_update(graph, ledger, review_id)
+
+    assert result["action"] == "corrects"
+    old_row = _edge_row(graph, old.fact_uid)
+    assert old_row[1] == "corrected"
+    assert old_row[6] == result["new_fact_uid"]  # corrected_by
+    assert old_row[7] == new.source_time  # correction_observed_at
+    new_row = _edge_row(graph, result["new_fact_uid"])
+    assert (new_row[2] or "live") == "live"
+
+
+@integration
+def test_apply_approved_fact_update_contradicts_end_to_end(graph, ledger):
+    old, new = _old_and_new(
+        graph, rel_type="APPLIES_TO", from_label="Decision", to_label="Term",
+        from_uid="d1", old_to="t1", new_to="t1",
+    )
+    new.from_uid = "d2"
+    suggested = resolve_text_fact(graph, ledger, new, old, "contradicts", mode="suggest")
+    review_id = ledger.list_reviews(type="fact_update")[0].id
+    ledger.approve_review(review_id, "tester")
+
+    result = apply_approved_fact_update(graph, ledger, review_id)
+
+    assert result["action"] == "contradicts"
+    disputed = graph.query(
+        "MATCH (a {uid:'d1'})-[r:DISPUTED_WITH]->(b {uid:'d2'}) RETURN r"
+    ).result_set
+    assert len(disputed) == 1
+    old_row = _edge_row(graph, old.fact_uid)
+    assert old_row[0] is None  # both remain live
+    new_row = _edge_row(graph, result["new_fact_uid"])
+    assert (new_row[2] or "live") == "live"
+    assert result["new_fact_uid"] == suggested["new_fact_uid"]
+
+
+@integration
+def test_apply_approved_fact_update_still_pending_raises(graph, ledger):
+    """The ledger-level `approved`-state guard, proven against a real
+    `fact_update` review this time (not a synthetic pending row) -- applying
+    before approval must not silently activate the incoming fact."""
+    old, new = _old_and_new(
+        graph, rel_type="OWNS", from_label="Person", to_label="Term",
+        old_to="t1", new_to="t2",
+        old_valid_at="2026-01-01T00:00:00Z", new_valid_at="2026-06-01T00:00:00Z",
+    )
+    resolve_text_fact(graph, ledger, new, old, "newer_state", mode="suggest")
+    review_id = ledger.list_reviews(type="fact_update")[0].id
+
+    with pytest.raises(ValueError, match="expected 'approved'"):
+        apply_approved_fact_update(graph, ledger, review_id)
+    # Untouched: old still live, new still pending_review.
+    old_row = _edge_row(graph, old.fact_uid)
+    assert old_row[0] is None
