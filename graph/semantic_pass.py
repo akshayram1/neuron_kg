@@ -26,6 +26,7 @@ import logging
 import os
 import hashlib
 import re
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
@@ -45,7 +46,6 @@ from graph import vector_store
 from graph import writer as w
 from graph.axioms import SWAPPED, AxiomSet, DEFAULT_AXIOMS, load_axioms
 from graph.profiles import WorkManagementExtraction, profile_for_record_key
-from graph.search import find_similar_uid
 from graph.token_usage import TokenUsage
 
 logger = logging.getLogger("neuron.semantic_pass")
@@ -222,6 +222,306 @@ def _record_own_kind(record_key: str) -> str | None:
     return _ENTITY_TYPE_TO_LABEL.get(parts[2]) if len(parts) >= 3 else None
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 -- entity resolution ladder (25-plan.md §4.0-§4.8).
+#
+# Everything below replaces the old `find_similar_uid(...) or
+# semantic_uid(...)` two-line identity resolution for the five
+# `_SEMANTIC_LABELS` kinds with the scoped, six-rung ladder the plan
+# specifies. See `_resolve_semantic_entity` for the ladder itself; the
+# smaller pieces above it are its building blocks (§4.0 scoped identity,
+# §4.1 polarity veto, §4.5 mention filter, §4.0's namespace derivation).
+
+
+def _normalize_identity(value: object) -> str:
+    """Casefold, collapse runs of non-alphanumerics to a single space, strip
+    -- the same style as `_candidate_identity_matches`'s local `normalized()`
+    closure below, reused here (not reinvented) for §4.0's scoped identity
+    keys and §4.5's mention filter."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+# §4.1: "Before any merge (vector or Laya), compare negation markers in the
+# two texts. If polarity_conflict, never merge." Verbatim from the plan.
+_NEG = re.compile(
+    r"\b(not|no longer|don't|do not|never|instead of|rejected|avoid|deprecated|stop(ped)? using)\b",
+    re.I,
+)
+
+
+def polarity_conflict(a: str, b: str) -> bool:
+    return bool(_NEG.search(a)) != bool(_NEG.search(b))
+
+
+def _namespace_uid_for_record(
+    graph: Graph, record_own_kind: str | None, record_primary_uid: str,
+) -> str | None:
+    """The structural half of §4.0's namespace derivation: reuses the exact
+    same BELONGS_TO/CONTAINS traversal `_resolve_endpoint`'s Project /
+    Repository / Workspace structural-fallback branches below already use to
+    go from a record to its Project/Repository/Workspace, rather than a
+    second path to the same graph shape. Returns `None` when nothing
+    structural applies -- the caller (`_derive_namespace_uid`) supplies the
+    workspace/connection-level fallback the plan asks for in that case."""
+    if record_own_kind in {"Project", "Workspace", "Repository"}:
+        # The record itself IS the namespace-bearing node.
+        return record_primary_uid
+    if record_own_kind == "WorkItem":
+        rows = graph.query(
+            "MATCH (n {uid: $uid})-[:BELONGS_TO]->(p:Project) RETURN p.uid LIMIT 1",
+            params={"uid": record_primary_uid},
+        ).result_set
+        if rows:
+            return rows[0][0]
+    elif record_own_kind in {"SourceFile", "Commit"}:
+        rows = graph.query(
+            "MATCH (p:Repository)-[:CONTAINS]->(n {uid: $uid}) RETURN p.uid LIMIT 1",
+            params={"uid": record_primary_uid},
+        ).result_set
+        if rows:
+            return rows[0][0]
+    elif record_own_kind == "Document":
+        rows = graph.query(
+            "MATCH (p:Workspace)-[:CONTAINS]->(n {uid: $uid}) RETURN p.uid LIMIT 1",
+            params={"uid": record_primary_uid},
+        ).result_set
+        if rows:
+            return rows[0][0]
+    return None
+
+
+def _derive_namespace_uid(
+    graph: Graph, record_key: str, record_own_kind: str | None, record_primary_uid: str,
+) -> str:
+    """§4.0: "Use project when the source maps unambiguously to one project;
+    otherwise use workspace/connection namespace." Tries the structural path
+    first (the record's own Project/Repository/Workspace); when nothing
+    structural applies, falls back to the connection-level scope
+    (`provider:connection_id`), parsed from `record_key` the same way
+    `_record_own_kind` parses it ("provider:connection_id:entity_type:
+    external_id")."""
+    structural = _namespace_uid_for_record(graph, record_own_kind, record_primary_uid)
+    if structural:
+        return structural
+    parts = record_key.split(":", 3)
+    return ":".join(parts[:2]) if len(parts) >= 2 else record_key
+
+
+def _passes_mention_filter(ledger: ConnectorLedger, label: str, name: str) -> bool:
+    """Rung 1 of the resolution ladder (§4.2, §4.5), `Term`/`System` only: a
+    mention that is just ingestion-machinery vocabulary ("data", "pipeline",
+    ... -- the ledger-backed stoplist), or too short/generic to be a real
+    entity, never mints a node. Every other label always passes -- the
+    mention filter is scoped to exactly these two per §4.5."""
+    if label not in {"Term", "System"}:
+        return True
+    norm = _normalize_identity(name)
+    tokens = norm.split()
+    if len(norm) < 3 or not tokens:
+        return False
+    if ledger.is_stoplisted(norm, label=label):
+        return False
+    # "at least one non-generic token": a multi-word mention where EVERY
+    # token is itself stoplisted ("data pipeline") is exactly as generic as
+    # a bare stoplisted word, even though the full phrase isn't itself a
+    # literal stoplist entry.
+    if all(ledger.is_stoplisted(tok, label=label) for tok in tokens):
+        return False
+    return True
+
+
+def _candidate_text(graph: Graph, uid: str) -> str:
+    """The text a vector candidate is represented by, for the §4.1 polarity
+    check -- same `search_text` (falling back to `name`) that
+    `_write_extraction` stores on every semantic node, see its comment
+    there for why `search_text` is the field to read."""
+    rows = graph.query(
+        "MATCH (n {uid: $uid}) RETURN n.search_text, n.name", params={"uid": uid},
+    ).result_set
+    if not rows:
+        return ""
+    search_text, name = rows[0]
+    return str(search_text or name or "")
+
+
+def _propose_polarity_conflict_review(
+    ledger: ConnectorLedger, subject_uid: str, object_uid: str,
+    mention_text: str, candidate_text: str,
+) -> None:
+    """§4.1: a polarity-vetoed Decision merge candidate is "handed to Phase 5
+    as a conflict candidate." Phase 5 (temporal facts, `resolve_text_fact`)
+    does not exist in this codebase yet -- nothing consumes this today, same
+    "no consumer yet, but an auditable trail exists" shape as
+    `_gate_conflict_classification`'s placeholder above -- but the
+    already-merged §3.0 review queue means the pair is not silently lost.
+    `subject_uid` is the new node about to be minted; `object_uid` is the
+    existing node it was vetoed against, matching the `possibly_same_as`
+    review payload convention (`subject_uid`/`object_uid`) already used
+    elsewhere in this codebase.
+    """
+    ledger.create_review(
+        "polarity_conflict_candidate",
+        {
+            "label": "Decision", "subject_uid": subject_uid, "object_uid": object_uid,
+            "mention_text": mention_text[:500], "candidate_text": candidate_text[:500],
+        },
+        identity=f"polarity_conflict_candidate:{subject_uid}:{object_uid}",
+    )
+
+
+def _rung6_laya_same_entity(
+    label: str, item: object, candidates: list[tuple[str, float]],
+) -> tuple[str | None, float]:
+    """Rung 6 (§4.2): Laya `same_entity`, scored against every candidate
+    rungs 4/5 gathered (blocked by label + namespace). BLOCKED (placeholder):
+    no real Laya call exists in this codebase yet -- the same unresolved
+    Laya-packaging decision as `_gate_laya_triage`'s docstring above and the
+    `LayaReranker` stub in `graph/rerank.py` (see QUERIES.md, "Phase 3.1/3.2
+    skipped this wave").
+
+    Always returns `(None, 0.0)` -- "no candidate reached top p >= 0.85 and
+    top - second >= 0.15" -- so the ladder always falls through to a new
+    node, `resolved_by="new"`. This is not just a stand-in for a missing
+    call: it is also exactly what §4.3's "under-merge by default" policy
+    wants even once Laya is real ("Thresholds are set so that doubt produces
+    a new node"), so shipping the placeholder this way is never wrong, only
+    incomplete.
+
+    The `NEURON_RESOLVE_MODE=suggest/auto` branches and the
+    `POSSIBLY_SAME_AS` review-proposal path §4.2 describes for a REAL Laya
+    score are deliberately NOT scaffolded here as dead if/else branches --
+    there is no score yet to gate them on, and an unreachable branch is
+    untested noise, not readiness. When real Laya scoring lands, this
+    function is the one place to fill in.
+    """
+    return None, 0.0
+
+
+def _resolve_semantic_entity(
+    graph: Graph,
+    ledger: ConnectorLedger,
+    label: str,
+    item: object,
+    vector: list[float] | None,
+    *,
+    namespace_uid: str,
+    record_key: str,
+    semantic_uids: dict[tuple[str, str, str], str],
+    decision_name_index: dict[str, str],
+    collection: str,
+) -> tuple[str, str, bool]:
+    """Rungs 2-6 of the Phase 4 scoped entity-resolution ladder (§4.2) for
+    one Term/Decision/System/Api/Endpoint mention already past the rung-1
+    mention filter (§4.5, applied by the caller -- a dropped mention never
+    reaches this function).
+
+    Returns `(uid, resolved_by, is_new)`. `resolved_by` is one of
+    `scoped_exact` / `alias` / `vector` / `new` (§4.2's vocabulary --
+    `laya`/`laya_suggest`/`review_required` never fire today, see
+    `_rung6_laya_same_entity`). `is_new` is True exactly when `uid` was just
+    minted rather than reused from an existing node.
+
+    Every outcome is written into `semantic_uids`/`decision_name_index`
+    before returning. Both dicts are owned and threaded through by
+    `run_semantic_pass` (§4.4), not recreated per chunk, so a later mention
+    in the SAME run -- this chunk or a later one -- resolves from memory
+    instead of re-querying the graph/vector store.
+    """
+    name_norm = _normalize_identity(item.name)
+    if label == "Decision":
+        # §4.0: Decision identity is record + statement scoped, not
+        # name-scoped -- a real behavior change from the old global
+        # `semantic_uid("Decision", name)`.
+        identity_norm = _normalize_identity(getattr(item, "statement", None) or item.name)
+        scope = record_key
+    elif label in {"System", "Term"}:
+        # §4.0: namespace + normalized name.
+        identity_norm = name_norm
+        scope = namespace_uid
+    else:
+        # Api, Endpoint: "retain their current deterministic identity until
+        # a type-specific scope is defined" (§4.0) -- unchanged from before.
+        identity_norm = name_norm
+        scope = ""
+    key = (label, scope, identity_norm)
+
+    def _remember(uid: str) -> None:
+        semantic_uids[key] = uid
+        if label == "Decision":
+            # Facts only ever carry a bare name (`ExtractedFact.object_name`
+            # etc, never a statement), so `_resolve_endpoint` cannot
+            # reconstruct `key` (which needs the statement) to look a
+            # Decision endpoint up by name alone. This name-keyed index is
+            # the deliberate, documented fallback that keeps fact-endpoint
+            # resolution for Decision working within a run -- see the
+            # QUERIES note in the report this task produced.
+            decision_name_index[name_norm] = uid
+
+    # Rung 2: scoped identity hit.
+    if key in semantic_uids:
+        return semantic_uids[key], "scoped_exact", False
+    if label in {"System", "Term"}:
+        scoped_uid = w.make_uid(label, scope, identity_norm)
+    elif label == "Decision":
+        scoped_uid = w.make_uid("Decision", scope, identity_norm)
+    else:
+        scoped_uid = semantic_uid(label, item.name)
+    rows = graph.query(
+        "MATCH (n {uid: $uid}) RETURN n.uid LIMIT 1", params={"uid": scoped_uid},
+    ).result_set
+    if rows:
+        _remember(scoped_uid)
+        return scoped_uid, "scoped_exact", False
+
+    # Rung 3: scoped alias table hit.
+    alias_namespace = scope if label in {"System", "Term"} else None
+    alias_uid = ledger.lookup_alias(label, alias_namespace, name_norm)
+    if alias_uid:
+        _remember(alias_uid)
+        return alias_uid, "alias", False
+
+    mention_text = _embedding_text(label, item)
+    candidates: list[tuple[str, float]] = []
+    if vector is not None:
+        # Rung 4: sim >= 0.90.
+        high = vector_store.search_above(
+            vector_store.client(), label, vector, min_similarity=0.90,
+            namespace_uid=namespace_uid, limit=20, collection=collection,
+        )
+        if len(high) == 1:
+            candidate_uid, _score = high[0]
+            candidate_text = _candidate_text(graph, candidate_uid)
+            if not polarity_conflict(mention_text, candidate_text):
+                _remember(candidate_uid)
+                return candidate_uid, "vector", False
+            # §4.1: polarity veto -- never merge; fall through to a new
+            # node, and for a Decision, hand the pair to Phase 5.
+            if label == "Decision":
+                _propose_polarity_conflict_review(
+                    ledger, scoped_uid, candidate_uid, mention_text, candidate_text,
+                )
+        else:
+            # 0 or >1 candidates >= 0.90: rung 4 is not confident either way
+            # -- "more than one" per §4.2 goes to rung 6 with all of them;
+            # 0 falls through the same way. Rung 5's gray zone always goes
+            # to rung 6 regardless, so it is queried here too.
+            candidates.extend(high)
+            candidates.extend(vector_store.search_above(
+                vector_store.client(), label, vector, min_similarity=0.75,
+                max_similarity=0.90, namespace_uid=namespace_uid, limit=20,
+                collection=collection,
+            ))
+
+    # Rung 6: Laya `same_entity` -- placeholder, see its own docstring.
+    top_uid, _confidence = _rung6_laya_same_entity(label, item, candidates)
+    if top_uid is not None:  # pragma: no cover -- placeholder never returns a candidate today
+        _remember(top_uid)
+        return top_uid, "laya", False
+
+    _remember(scoped_uid)
+    return scoped_uid, "new", True
+
+
 @dataclass
 class SemanticPassResult:
     chunks_processed: int = 0
@@ -246,9 +546,12 @@ def _resolve_endpoint(
     name: str,
     record_primary_uid: str,
     record_own_kind: str | None,
-    semantic_uids: dict[tuple[str, str], str],
+    semantic_uids: dict[tuple[str, str, str], str],
     candidate_uid: str | None = None,
     allowed_candidate_uids: frozenset[str] = frozenset(),
+    *,
+    namespace_uid: str = "",
+    decision_name_index: dict[str, str] | None = None,
 ) -> str | None:
     if candidate_uid:
         if candidate_uid not in allowed_candidate_uids:
@@ -262,10 +565,29 @@ def _resolve_endpoint(
             return candidate_uid
         return None
     if kind in _SEMANTIC_LABELS:
-        key = (kind, name.strip().lower())
+        # Mirrors `_resolve_semantic_entity`'s §4.0 scoped identity exactly,
+        # so a fact endpoint resolves to the SAME uid the entity-writing
+        # loop would (or did, earlier in this same run) mint for the same
+        # mention -- see that function's docstring for the key shape.
+        #
+        # Decision is the one exception: `name` here is a fact's bare
+        # `subject_name`/`object_name`, never the full statement §4.0 scopes
+        # Decision identity by, so the scoped key cannot be reconstructed
+        # from a name alone. `decision_name_index` (also run-owned, kept in
+        # sync by `_resolve_semantic_entity._remember`) is the documented,
+        # conservative fallback for exactly that gap -- see the QUERIES note
+        # in this task's report.
+        name_norm = _normalize_identity(name)
+        if kind == "Decision":
+            return (decision_name_index or {}).get(name_norm)
+        scope = namespace_uid if kind in {"System", "Term"} else ""
+        key = (kind, scope, name_norm)
         if key in semantic_uids:
             return semantic_uids[key]
-        uid = semantic_uid(kind, name)
+        uid = (
+            w.make_uid(kind, scope, name_norm) if kind in {"System", "Term"}
+            else semantic_uid(kind, name)
+        )
         rows = graph.query(
             "MATCH (n {uid: $uid}) RETURN n.uid LIMIT 1", params={"uid": uid}
         ).result_set
@@ -375,7 +697,24 @@ def _write_extraction(
     collection: str = vector_store.COLLECTION,
     axioms: AxiomSet = DEFAULT_AXIOMS,
     allowed_candidate_uids: frozenset[str] = frozenset(),
+    *,
+    run_id: str | None = None,
+    semantic_uids: dict[tuple[str, str, str], str] | None = None,
+    decision_name_index: dict[str, str] | None = None,
 ) -> tuple[int, int, int]:
+    # §4.4/§4.6: `run_id`, `semantic_uids` and `decision_name_index` are
+    # normally owned by `run_semantic_pass` and threaded through every chunk
+    # of a run (so dedup memory spans the run, not just this chunk). The
+    # `None` defaults exist only so direct callers (tests) don't have to
+    # construct a run context -- each such call gets a fresh, run-of-one
+    # scope, matching this function's behavior before Phase 4.
+    if run_id is None:
+        run_id = str(uuid.uuid4())
+    if semantic_uids is None:
+        semantic_uids = {}
+    if decision_name_index is None:
+        decision_name_index = {}
+    namespace_uid = _derive_namespace_uid(graph, chunk.record_key, record_own_kind, primary_uid)
     source_rows = graph.query(
         "MATCH (sr:SourceRecord {record_key: $record_key}) RETURN sr.source_time LIMIT 1",
         params={"record_key": chunk.record_key},
@@ -406,7 +745,6 @@ def _write_extraction(
             referenced.add((fact.object_kind, fact.object_name.strip().lower()))
 
     entities_written = 0
-    semantic_uids: dict[tuple[str, str], str] = {}
     edges_supported: list[RecordEdgeRef] = []
     for label, all_items in (
         ("Term", extraction.terms), ("Decision", extraction.decisions),
@@ -415,6 +753,17 @@ def _write_extraction(
     ):
         items = []
         for item in all_items:
+            # Rung 1 of the resolution ladder (§4.2, §4.5): Term/System only,
+            # applied before the connecting-fact check below -- a generic
+            # mention is rejected on its own terms, not because it happens
+            # to lack a fact too.
+            if not _passes_mention_filter(ledger, label, item.name):
+                logger.info("  dropped %s (generic mention): %r", label, item.name)
+                drops.append(ExtractionDrop(
+                    reason=DropReason.GENERIC_MENTION,
+                    subject_kind=label, subject_name=item.name,
+                ))
+                continue
             if (label, item.name.strip().lower()) in referenced:
                 items.append(item)
             else:
@@ -438,13 +787,28 @@ def _write_extraction(
                 client, embedding_model,
                 [_embedding_text(label, item) for item in items], token_usage,
             )
-            uids = [
-                find_similar_uid(graph, label, vector, collection=collection) or semantic_uid(label, item.name)
-                for item, vector in zip(items, vectors)
-            ]
         else:
             vectors = [None] * len(items)
-            uids = [semantic_uid(label, item.name) for item in items]
+
+        # Rungs 2-6 of the resolution ladder (§4.2), one call per mention --
+        # see `_resolve_semantic_entity`'s docstring for the full ladder.
+        resolved = [
+            _resolve_semantic_entity(
+                graph, ledger, label, item, vector,
+                namespace_uid=namespace_uid, record_key=chunk.record_key,
+                semantic_uids=semantic_uids, decision_name_index=decision_name_index,
+                collection=collection,
+            )
+            for item, vector in zip(items, vectors)
+        ]
+        uids = [uid for uid, _resolved_by, _is_new in resolved]
+        for _uid, resolved_by, _is_new in resolved:
+            # §4.6: diagnostics -- how this run's entities resolved, by
+            # label x resolved_by. Rung-1 (GENERIC_MENTION) drops above are
+            # deliberately not counted here: `resolution_stats` is about
+            # outcomes for entities that WERE resolved, and a dropped
+            # mention was never one of those.
+            ledger.record_resolution(run_id, label, resolved_by)
 
         # `search_text` is the text this node is *represented by*, and two
         # separate things depend on it existing:
@@ -464,6 +828,11 @@ def _write_extraction(
                     **item.model_dump(exclude={"name"}),
                     "name": item.name,
                     "search_text": _embedding_text(label, item),
+                    # §4.0: namespace_uid is stored explicitly on System/Term
+                    # nodes -- their identity is scoped by it. Decision/Api/
+                    # Endpoint are not namespace-scoped, so it's omitted for
+                    # them rather than written as a misleading property.
+                    **({"namespace_uid": namespace_uid} if label in {"System", "Term"} else {}),
                 },
             }
             for uid, item in zip(uids, items)
@@ -471,9 +840,8 @@ def _write_extraction(
         w.upsert_entities(graph, label, rows)
         w.link_mentioned_in(graph, label, [{"uid": row["uid"], "record_key": chunk.record_key} for row in rows])
         entities_written += len(rows)
-        for uid, item in zip(uids, items):
-            semantic_uids[(label, item.name.strip().lower())] = uid
-            merged_note = " (merged into existing node)" if uid != semantic_uid(label, item.name) else ""
+        for (uid, _resolved_by, is_new), item in zip(resolved, items):
+            merged_note = "" if is_new else " (merged into existing node)"
             logger.info("  extracted %s: %r%s", label, item.name, merged_note)
 
         # SourceRecord nodes are hidden from the product canvas. This visible
@@ -584,11 +952,13 @@ def _write_extraction(
             graph, subject_kind, subject_name,
             primary_uid, record_own_kind, semantic_uids,
             subject_candidate_uid, allowed_candidate_uids,
+            namespace_uid=namespace_uid, decision_name_index=decision_name_index,
         )
         object_uid = _resolve_endpoint(
             graph, object_kind, object_name,
             primary_uid, record_own_kind, semantic_uids,
             object_candidate_uid, allowed_candidate_uids,
+            namespace_uid=namespace_uid, decision_name_index=decision_name_index,
         )
         if subject_uid is None or object_uid is None:
             facts_rejected += 1
@@ -743,6 +1113,22 @@ def run_semantic_pass(
     # graphs and can be edited without a redeploy.
     axioms = load_axioms(ledger)
 
+    # §4.4: dedup memory owned by the run, not the chunk. `run_id` (§4.6) is
+    # generated once here -- `run_semantic_pass` had no existing run
+    # identifier to reuse (checked: `SemanticPassResult`/the ledger's chunk
+    # bookkeeping are keyed by record/chunk, not by run) -- and both caches
+    # are threaded into every `_write_extraction` call below so an entity
+    # resolved in an earlier chunk of this run is visible to a later one
+    # without re-querying the graph/vector store. This is safe without
+    # locking only because writes are serial on the main thread (verified
+    # just above in this function's own docstring and in the
+    # `ThreadPoolExecutor`/`as_completed` loop below: `_call_llm` is the only
+    # part that runs concurrently; `_write_extraction` runs one chunk at a
+    # time as futures complete).
+    run_id = str(uuid.uuid4())
+    semantic_uids: dict[tuple[str, str, str], str] = {}
+    decision_name_index: dict[str, str] = {}
+
     result = SemanticPassResult()
     touched_records: set[str] = set()
 
@@ -802,6 +1188,7 @@ def run_semantic_pass(
                     related_context.candidate_uids
                     if isinstance(related_context, SemanticContext) else frozenset()
                 ),
+                run_id=run_id, semantic_uids=semantic_uids, decision_name_index=decision_name_index,
             )
             result.findings_written += sum(
                 1 for item in extraction.assessments
