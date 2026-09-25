@@ -16,6 +16,13 @@ def test_wisdom_question_reserves_wisdom_and_lineage_slots(monkeypatch):
     monkeypatch.setattr(chat, "resolve_structured", lambda *args, **kwargs: None)
     monkeypatch.setattr(chat, "embed_query", lambda *args, **kwargs: shared_embedding)
     monkeypatch.setattr(chat, "find_named_persons", lambda *args, **kwargs: [])
+    # plan.md §1.3/§1.7: `retrieve` now also calls `expand_neighbors` and the
+    # two-entity lane on every non-structured pool. Neither is under test
+    # here (this test only exercises the wisdom/finding reserved-slot
+    # logic), and both would otherwise try real `scope.cypher`/`graph.query`
+    # calls against the `object()` stand-ins this test uses.
+    monkeypatch.setattr(chat, "expand_neighbors", lambda *args, **kwargs: [])
+    monkeypatch.setattr(chat, "_two_entity_lane", lambda *args, **kwargs: [])
 
     def fake_search(*args, labels=None, query_embedding=None, **kwargs):
         calls.append(tuple(labels) if labels else None)

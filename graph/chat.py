@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,13 +20,16 @@ from pydantic import BaseModel, Field
 
 from graph import vector_store
 from graph.access import AccessScope
+from graph.bridge.anchors import commit_shas, jira_keys, pull_request_refs, repository_names
 from graph.entity import fetch_entity_detail
+from graph.expand import MAX_SEEDS, TIER_ORDER, expand_neighbors, tier_for_extraction_method
 from graph.search import SearchHit, embed_query, hybrid_search
 from graph.structured_query import (
     find_named_persons,
     find_window_activity,
     resolve_structured,
 )
+from graph.text_window import best_window
 from graph.time_axis import infer_query_window
 from graph.token_usage import TokenUsage
 
@@ -36,6 +40,36 @@ logger = logging.getLogger("neuron.chat")
 # existed the only way to tell an empty window from an empty graph was to
 # re-run the query by hand in a REPL.
 _HIT_PREVIEW = 8
+
+# plan.md §1.1/§1.2/§1.3 knobs. Every one is read once at import time (same
+# convention as `graph/search.py`'s RRF_K/VECTOR_LEG_WEIGHT) and overridable
+# via env var for tuning without a code change.
+#
+# Wide candidate pool (§1.1): `retrieve`'s no-knowledge-layer branch fetches
+# this many hits so expansion (§1.3) has real seeds and the harness can
+# measure candidate recall@40 -- the OLD `search_limit` cut still happens,
+# just later (see `run_chat_turn`), so default chat behaviour is unchanged
+# until a caller asks for more than `search_limit` or NEURON_RERANK exists
+# (plan.md §1.1: "the final cut is candidates[:search_limit] as today").
+POOL_SIZE = int(os.getenv("NEURON_POOL_SIZE", "40"))
+# Per-block context window (§1.2): `best_window` is asked for at most this
+# many tokens of a hit's summary.
+NEURON_BLOCK_TOKENS = int(os.getenv("NEURON_BLOCK_TOKENS", "500"))
+# Facts shown per block (§1.2), asserted before derived.
+NEURON_FACTS_PER_BLOCK = int(os.getenv("NEURON_FACTS_PER_BLOCK", "25"))
+# Total evidence budget (§1.2) -- real token count via the same cl100k_base
+# encoder `graph/text_window.py` uses (`graph.vector_store._encoding`), not
+# chars/4. Reserves room for the system prompt, the question, and the
+# answer itself; see NEURON_ANSWER_RESERVE_TOKENS.
+NEURON_CONTEXT_TOKENS = int(os.getenv("NEURON_CONTEXT_TOKENS", "10000"))
+# Headroom left in NEURON_CONTEXT_TOKENS for the model's own answer. Not
+# named in the plan text verbatim, but the plan explicitly requires "leaving
+# explicit room for ... answer" -- this is that room, made an explicit,
+# tunable constant rather than an unstated fudge factor.
+NEURON_ANSWER_RESERVE_TOKENS = int(os.getenv("NEURON_ANSWER_RESERVE_TOKENS", "2000"))
+# Below this many tokens, shrinking a block's text window further stops
+# being useful evidence -- squeeze facts instead (see `_pack_context`).
+_MIN_WINDOW_TOKENS = 40
 
 SYSTEM_PROMPT = """\
 You answer questions about a company's Jira/GitHub/Bitbucket/Notion
@@ -57,6 +91,13 @@ as still holding.
 Facts marked [inferred] were derived (parent lift, shared term, verified
 email). Say they are inferred and name the premise. An asserted Jira/GitHub
 fact always beats an inferred one if they disagree.
+
+A block whose header carries "GRAPH EXPANSION TIER" was not directly matched
+by search — it was pulled in because it is graph-adjacent to a matched node.
+`primary` is as trustworthy as directly matched evidence; `secondary` came
+from an LLM extraction; `derived` and `unknown` are weaker and should be
+treated with more caution, especially if they conflict with a block that has
+no such tier line (which was matched directly).
 
 Source authority for implementation state: current Bitbucket/GitHub source
 code is authoritative for what production code calls. Jira and Notion may
@@ -129,6 +170,35 @@ class KnowledgeCitation:
 
 
 @dataclass
+class PackedBlockInfo:
+    """Per-block packing honesty (plan.md §1.2). Always populated -- there is
+    no established "eval mode" signal into `run_chat_turn` today (see the
+    module docstring note above `_pack_context`), so rather than gate this
+    behind a new parameter, it always rides on `ChatResult` where
+    `scripts/evaluate_retrieval.py` (or any other caller) can read it without
+    the harness needing a new argument threaded through.
+
+    `gold_support_preserved` is NOT computed against any golden/expected-uid
+    data -- `run_chat_turn` has no access to a question's gold chain. It is a
+    conservative proxy: True only when nothing about this block's evidence
+    was cut (neither the summary text nor its facts). A caller that DOES have
+    gold data (the eval harness) can combine this with its own gold_uids to
+    get a true "was the gold support preserved" signal; this field alone only
+    promises "this block's evidence reached the prompt intact or it didn't."
+    """
+
+    uid: str
+    label: str
+    name: str
+    window_tokens: int
+    packed_tokens: int
+    truncated: bool
+    gold_support_preserved: bool
+    facts_included: int
+    facts_dropped: int
+
+
+@dataclass
 class ChatResult:
     answer: str
     citations: list[Citation]
@@ -136,6 +206,8 @@ class ChatResult:
     highlighted_nodes: list[str] = field(default_factory=list)
     highlighted_edges: list[str] = field(default_factory=list)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
+    packed_blocks: list[PackedBlockInfo] = field(default_factory=list)
+    dropped_evidence_uids: list[str] = field(default_factory=list)
 
 
 def _log_hits(stage: str, hits: list[SearchHit]) -> None:
@@ -309,6 +381,42 @@ def _entity_evidence(
     return facts, edge_ids, record_keys
 
 
+def _count_tokens(text: str, encoder=None) -> int:
+    """Real token count, `graph/text_window.py`'s cl100k_base convention
+    (`graph.vector_store._encoding`) -- not chars/4. There is no registered
+    tiktoken encoding for this repo's own chat model ids (`gpt-5.6-sol` /
+    `gpt-5.6-luna` are not real OpenAI models), so this is the same stand-in
+    `best_window` itself already uses as "the answer model's tokenizer"."""
+    if not text:
+        return 0
+    encoder = encoder or vector_store._encoding
+    return len(encoder.encode(text))
+
+
+def _cap_facts(facts: list[dict], max_facts: int) -> tuple[list[dict], int]:
+    """Asserted facts before derived (plan.md §1.2), capped to `max_facts`.
+    Same `derived` bool convention `graph/expand.py` uses per fact/edge."""
+    asserted = [fact for fact in facts if not fact.get("derived")]
+    derived = [fact for fact in facts if fact.get("derived")]
+    ordered = asserted + derived
+    capped = ordered[:max_facts]
+    return capped, len(ordered) - len(capped)
+
+
+def _fact_edge_ids(facts: list[dict]) -> list[str]:
+    return [
+        f"{fact['fromUid']}:{fact['relation']}:{fact['toUid']}"
+        for fact in facts if fact.get("fromUid") and fact.get("toUid")
+    ]
+
+
+def _fact_record_keys(facts: list[dict]) -> set[str]:
+    keys: set[str] = set()
+    for fact in facts:
+        keys.update(fact.get("recordKeys") or [])
+    return keys
+
+
 def _live_facts(
     graph: Graph, uid: str, scope: AccessScope, providers: list[str] | None,
 ) -> tuple[list[dict], list[str]]:
@@ -470,12 +578,396 @@ def _resolve_records(
     return {row[0]: Citation(row[0], row[1], row[2]) for row in rows}
 
 
+# --------------------------------------------------------------------------
+# 1.7 — two-entity lane
+# --------------------------------------------------------------------------
+
+# File-path anchor, alongside `graph/bridge/anchors.py`'s jira_keys/
+# commit_shas/pull_request_refs/repository_names regexes (that module has no
+# file-path pattern of its own). Extension allowlist rather than a bare
+# "contains a dot" match -- a bare dot-match also fires on "e.g.", "v1.0",
+# etc. Matches `SourceFile.name`, which the Bitbucket/GitHub pipelines set
+# to the file's repo-relative path verbatim (`graph/bitbucket_pipeline.py`,
+# `graph/github_pipeline.py`: `Name: {file.path}`).
+_FILE_PATH_RE = re.compile(
+    r"\b[\w][\w./-]*\.(?:py|js|jsx|ts|tsx|go|rs|java|kt|rb|php|c|cpp|h|hpp|cs|"
+    r"md|mdx|json|ya?ml|sql|sh|css|scss|html|txt|toml|ini|cfg)\b",
+    re.IGNORECASE,
+)
+
+
+def _file_path_candidates(text: str) -> list[str]:
+    return list(dict.fromkeys(match.group(0) for match in _FILE_PATH_RE.finditer(text)))
+
+
+def _pair_anchor_candidates(
+    graph: Graph, question: str, scope: AccessScope, providers: list[str] | None,
+) -> list[tuple[str, str, str]]:
+    """Resolve named anchors in `question` to real graph node uids, for the
+    two-entity lane (plan.md §1.7: "two ticket keys, a key and a person, a
+    key and a file path"). Read-time resolution of the identical identifier
+    shapes `graph/resolver.py`'s write-time `_targets` links exact-anchor
+    edges from -- reuses the same `graph/bridge/anchors.py` regexes rather
+    than inventing new detection.
+
+    Returns (uid, label, name) tuples, ordered by anchor kind (Jira key >
+    commit sha > PR ref > repository name > file path > fuzzy person name,
+    the last being the least precise) and deduplicated by uid. The caller
+    uses the first two distinct anchors found.
+    """
+    keys = sorted(jira_keys(question))
+    shas = sorted(commit_shas(question))
+    refs = sorted(pull_request_refs(question))
+    names = sorted(repository_names(question))
+    paths = _file_path_candidates(question)
+
+    found: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    # Deferred until at least one text-level anchor is actually present, so
+    # a question with none of these shapes (the common case) never touches
+    # the graph at all here -- only the `find_named_persons` fallback below
+    # does, and only that scope/provider path needs to be live in that case.
+    # `acl`/`provider_filter`/`base_params`/`_add` are only ever referenced
+    # below inside an `if keys/shas/refs/names/paths:` block, each of which
+    # can only be true when this same guard was also true.
+    if keys or shas or refs or names or paths:
+        acl, acl_params = scope.cypher("sr", "pair_anchor_acl")
+        provider_filter = "AND sr.provider IN $providers" if providers else ""
+        base_params = {**acl_params, **({"providers": providers} if providers else {})}
+
+        def _add(rows: list, label: str) -> None:
+            for uid, name in rows:
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                found.append((uid, label, name or uid))
+
+    if keys:
+        rows = graph.query(
+            f"""MATCH (n:WorkItem)-[:MENTIONED_IN]->(sr:SourceRecord)
+                WHERE n.issue_key IN $keys AND sr.deleted_at IS NULL AND {acl} {provider_filter}
+                RETURN DISTINCT n.uid, n.name""",
+            params={**base_params, "keys": keys},
+        ).result_set
+        _add(rows, "WorkItem")
+
+    if shas:
+        rows = graph.query(
+            f"""MATCH (n:Commit)-[:MENTIONED_IN]->(sr:SourceRecord)
+                WHERE any(v IN $shas WHERE toLower(n.sha) STARTS WITH v)
+                  AND sr.deleted_at IS NULL AND {acl} {provider_filter}
+                RETURN DISTINCT n.uid, n.name""",
+            params={**base_params, "shas": shas},
+        ).result_set
+        _add(rows, "Commit")
+
+    if refs:
+        qualified = [ref for ref in refs if not ref.startswith("#")]
+        bare = [ref for ref in refs if ref.startswith("#")]
+        if qualified:
+            rows = graph.query(
+                f"""MATCH (n:PullRequest)-[:MENTIONED_IN]->(sr:SourceRecord)
+                    WHERE toLower(n.pr_ref) IN $refs AND sr.deleted_at IS NULL AND {acl} {provider_filter}
+                    RETURN DISTINCT n.uid, n.name""",
+                params={**base_params, "refs": qualified},
+            ).result_set
+            _add(rows, "PullRequest")
+        if bare:
+            rows = graph.query(
+                f"""MATCH (n:PullRequest)-[:MENTIONED_IN]->(sr:SourceRecord)
+                    WHERE any(v IN $refs WHERE toLower(n.pr_ref) ENDS WITH v)
+                      AND sr.deleted_at IS NULL AND {acl} {provider_filter}
+                    RETURN DISTINCT n.uid, n.name""",
+                params={**base_params, "refs": bare},
+            ).result_set
+            _add(rows, "PullRequest")
+
+    if names:
+        rows = graph.query(
+            f"""MATCH (n:Repository)-[:MENTIONED_IN]->(sr:SourceRecord)
+                WHERE toLower(n.name) IN $names AND sr.deleted_at IS NULL AND {acl} {provider_filter}
+                RETURN DISTINCT n.uid, n.name""",
+            params={**base_params, "names": names},
+        ).result_set
+        _add(rows, "Repository")
+
+    if paths:
+        lowered = [path.lower() for path in paths]
+        rows = graph.query(
+            f"""MATCH (n:SourceFile)-[:MENTIONED_IN]->(sr:SourceRecord)
+                WHERE any(v IN $paths WHERE toLower(n.name) = v OR toLower(n.name) ENDS WITH '/' + v)
+                  AND sr.deleted_at IS NULL AND {acl} {provider_filter}
+                RETURN DISTINCT n.uid, n.name""",
+            params={**base_params, "paths": lowered},
+        ).result_set
+        _add(rows, "SourceFile")
+
+    if len(found) < 2:
+        for hit in find_named_persons(graph, question, scope, providers):
+            if hit.uid in seen:
+                continue
+            seen.add(hit.uid)
+            found.append((hit.uid, "Person", hit.name))
+
+    return found
+
+
+def _two_entity_lane(
+    graph: Graph, question: str, scope: AccessScope, providers: list[str] | None,
+) -> list[SearchHit]:
+    """plan.md §1.7: when the question names two resolvable anchors, the
+    claims *about the pair* are what both nodes are jointly `MENTIONED_IN`,
+    plus any direct edge between them.
+
+    `SourceRecord` nodes carry no raw content and no `uid` (they're keyed by
+    `record_key` -- see `graph/writer.py`'s `upsert_source_records`), so they
+    cannot themselves become uid-keyed `SearchHit` candidates the rest of
+    this module's block-building pipeline (`_entity_evidence`,
+    `_mentioned_record_keys`) expects. Candidates are therefore the two
+    anchor NODES, tagged `methods=["pair"]`: building their evidence blocks
+    via `_entity_evidence` already surfaces any direct edge between them (it
+    walks every live in/out edge of the node), and each block's own summary
+    is prefixed with the names of the SourceRecords that mention both, as
+    the closest available stand-in for "the claims about the pair" text.
+    """
+    anchors = _pair_anchor_candidates(graph, question, scope, providers)
+    if len(anchors) < 2:
+        return []
+    (uid_a, label_a, name_a), (uid_b, label_b, name_b) = anchors[0], anchors[1]
+
+    acl, acl_params = scope.cypher("sr", "pair_lane_acl")
+    provider_filter = "AND sr.provider IN $providers" if providers else ""
+    shared_rows = graph.query(
+        f"""
+        MATCH (a {{uid: $a}})-[:MENTIONED_IN]->(sr:SourceRecord)<-[:MENTIONED_IN]-(b {{uid: $b}})
+        WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
+        RETURN DISTINCT sr.name
+        """,
+        params={"a": uid_a, "b": uid_b, **acl_params, **({"providers": providers} if providers else {})},
+    ).result_set
+    shared_names = sorted({row[0] for row in shared_rows if row[0]})
+    shared_note = "; ".join(shared_names) if shared_names else "(no shared SourceRecord)"
+
+    text_rows = graph.query(
+        "MATCH (n) WHERE n.uid IN $uids RETURN n.uid, n.search_text",
+        params={"uids": [uid_a, uid_b]},
+    ).result_set
+    text_by_uid = {row[0]: (row[1] or "") for row in text_rows}
+
+    def _summary(own_uid: str, other_label: str, other_name: str) -> str:
+        note = f"PAIR EVIDENCE: co-mentioned with [{other_label}] {other_name} in: {shared_note}"
+        body = text_by_uid.get(own_uid, "")
+        return f"{note}\n\n{body}" if body else note
+
+    return [
+        SearchHit(uid_a, label_a, name_a, _summary(uid_a, label_b, name_b), 0.0, ["pair"]),
+        SearchHit(uid_b, label_b, name_b, _summary(uid_b, label_a, name_a), 0.0, ["pair"]),
+    ]
+
+
+# --------------------------------------------------------------------------
+# 1.2 — context windowing and budget
+# --------------------------------------------------------------------------
+
+@dataclass
+class _PackedContext:
+    blocks: list[str]
+    all_facts: list[dict]
+    all_edge_ids: list[str]
+    record_keys_by_source: dict[str, set[str]]
+    packed_blocks: list[PackedBlockInfo]
+    dropped_uids: list[str]
+
+
+def _render_block(hit: SearchHit, text: str, metadata_section: str, facts: list[dict]) -> str:
+    fact_lines = "\n".join(_format_fact(fact) for fact in facts) or "  (no recorded facts)"
+    return f"[{hit.label}] {hit.name}\n{text}{metadata_section}\n{fact_lines}"
+
+
+def _expansion_tier(graph: Graph, hit: SearchHit) -> str | None:
+    """Best-effort read-time authority tier (plan.md §1.4) for a hit that
+    came from `graph/expand.py`'s one-hop expansion, so the answer model
+    sees how trustworthy that evidence is -- not just that it exists.
+
+    `expand_neighbors`'s `SearchHit` carries `methods=["graph:<REL>"]` but
+    not which seed or edge produced it (that association is not part of its
+    public return shape, and `graph/expand.py` is not this task's file to
+    change), so this is an approximation: the best (highest) tier among ANY
+    live edge of that relation type touching the node, not a replay of
+    `expand_neighbors`'s exact per-seed match. It is built entirely from
+    `graph/expand.py`'s own public `tier_for_extraction_method` lookup and
+    `TIER_ORDER`, not a re-implementation of tier semantics.
+    """
+    graph_methods = [method for method in hit.methods if method.startswith("graph:")]
+    if not graph_methods:
+        return None
+    rel = graph_methods[0].split(":", 1)[1]
+    rows = graph.query(
+        "MATCH (n {uid: $uid})-[r]-(m) WHERE type(r) = $rel AND r.invalid_at IS NULL "
+        "RETURN r.extraction_method",
+        params={"uid": hit.uid, "rel": rel},
+    ).result_set
+    tiers = [tier_for_extraction_method(row[0]) for row in rows]
+    if not tiers:
+        return None
+    return max(tiers, key=TIER_ORDER.index)
+
+
+def _pack_context(
+    graph: Graph,
+    hits: list[SearchHit],
+    question: str,
+    *,
+    structured: Any,
+    scope: AccessScope,
+    providers: list[str] | None,
+    at: str | None,
+    at_end: str | None,
+    as_of: str | None,
+    evidence_budget: int,
+    encoder=None,
+) -> _PackedContext:
+    """Build evidence blocks within `evidence_budget` real tokens (plan.md
+    §1.2), packing spans/facts rather than accepting or dropping only whole
+    blocks.
+
+    For each hit, in the given (already-priority-ordered) order: fetch facts,
+    cap them (asserted before derived) at `NEURON_FACTS_PER_BLOCK`, and window
+    the summary text to `NEURON_BLOCK_TOKENS` via `best_window`. If the
+    resulting block does not fit in what is left of `evidence_budget`, the
+    text is windowed down further (still via `best_window`, now against the
+    remaining space) before any fact is dropped for space; if even a minimal
+    window plus zero facts does not fit, the whole block is dropped and
+    logged -- this is the last resort, not the first one.
+
+    Deterministic: a fixed input order and a single greedy left-to-right pass
+    with no randomness or unordered-collection iteration.
+    """
+    encoder = encoder or vector_store._encoding
+    remaining = max(0, evidence_budget)
+    blocks: list[str] = []
+    all_facts: list[dict] = []
+    all_edge_ids: list[str] = []
+    record_keys_by_source: dict[str, set[str]] = {}
+    packed_blocks: list[PackedBlockInfo] = []
+    dropped_uids: list[str] = []
+
+    for hit in hits:
+        facts, _edge_ids, record_keys = _entity_evidence(
+            graph, hit.uid, scope, providers, at=at, at_end=at_end, as_of=as_of,
+        )
+        if structured is not None and structured.kind in {"unassigned", "assigned_to"}:
+            facts, _edge_ids = _assignment_facts(facts)
+            record_keys = _mentioned_record_keys(graph, hit.uid, scope, providers)
+        elif structured is not None:
+            record_keys = _mentioned_record_keys(graph, hit.uid, scope, providers)
+
+        facts_capped, facts_dropped = _cap_facts(facts, NEURON_FACTS_PER_BLOCK)
+        # `record_keys` for the structured branches is deterministic
+        # (`_mentioned_record_keys`, unaffected by fact capping); for the
+        # ordinary path it is recomputed from whatever facts actually end up
+        # packed (below, after any further budget-driven squeeze) so a
+        # citation can never point at a fact that was cut for space.
+        structured_record_keys = record_keys if structured is not None else None
+
+        full_tokens = _count_tokens(hit.summary, encoder)
+        window_text = best_window(question, hit.summary, NEURON_BLOCK_TOKENS, encoder)
+        window_tokens = _count_tokens(window_text, encoder)
+
+        metadata = _knowledge_metadata(graph, hit)
+        tier = _expansion_tier(graph, hit)
+        if tier:
+            metadata = f"{metadata}\nGRAPH EXPANSION TIER: {tier}" if metadata else f"GRAPH EXPANSION TIER: {tier}"
+        metadata_section = f"\n{metadata}" if metadata else ""
+
+        packed_text = window_text
+        packed_facts = facts_capped
+        block_text = _render_block(hit, packed_text, metadata_section, packed_facts)
+        block_tokens = _count_tokens(block_text, encoder)
+        squeezed = False
+
+        if block_tokens > remaining:
+            # Fixed overhead (header + metadata + current facts) is roughly
+            # constant regardless of how much of the summary text survives,
+            # so back it out to size the text-only squeeze.
+            overhead = block_tokens - window_tokens
+            available_for_text = remaining - overhead
+            fit = False
+            if available_for_text >= _MIN_WINDOW_TOKENS:
+                candidate_text = best_window(question, window_text, available_for_text, encoder)
+                candidate_block = _render_block(hit, candidate_text, metadata_section, packed_facts)
+                candidate_tokens = _count_tokens(candidate_block, encoder)
+                if candidate_tokens <= remaining:
+                    packed_text, block_text, block_tokens = candidate_text, candidate_block, candidate_tokens
+                    squeezed = True
+                    fit = True
+
+            if not fit:
+                # Text alone can't be squeezed enough (or is already at the
+                # floor) -- drop the lowest-value tail facts next. Facts are
+                # already asserted-before-derived, so trimming from the end
+                # drops derived facts first.
+                trimmed = list(packed_facts)
+                while trimmed:
+                    trimmed = trimmed[:-1]
+                    candidate_block = _render_block(hit, packed_text, metadata_section, trimmed)
+                    candidate_tokens = _count_tokens(candidate_block, encoder)
+                    if candidate_tokens <= remaining:
+                        facts_dropped += len(packed_facts) - len(trimmed)
+                        packed_facts, block_text, block_tokens = trimmed, candidate_block, candidate_tokens
+                        squeezed = True
+                        fit = True
+                        break
+
+            if not fit:
+                dropped_uids.append(hit.uid)
+                logger.info(
+                    "  evidence       [%s] %s DROPPED (evidence budget exhausted, remaining=%d tokens)",
+                    hit.label, hit.name[:48], remaining,
+                )
+                continue
+
+        remaining -= block_tokens
+        blocks.append(block_text)
+        all_facts.extend(packed_facts)
+        all_edge_ids.extend(_fact_edge_ids(packed_facts))
+        source_keys = record_keys_by_source.setdefault(hit.name.strip(), set())
+        source_keys.update(
+            structured_record_keys if structured_record_keys is not None else _fact_record_keys(packed_facts)
+        )
+
+        truncated = squeezed or (window_tokens < full_tokens) or facts_dropped > 0
+        info = PackedBlockInfo(
+            uid=hit.uid, label=hit.label, name=hit.name,
+            window_tokens=window_tokens, packed_tokens=_count_tokens(packed_text, encoder),
+            truncated=truncated, gold_support_preserved=not truncated,
+            facts_included=len(packed_facts), facts_dropped=facts_dropped,
+        )
+        packed_blocks.append(info)
+        # Per block, because one block routinely dominates: a merge commit
+        # touching 400 files contributed 46% of a 54k-token context while
+        # twelve blocks looked evenly sized from the outside. window_tokens/
+        # packed_tokens/truncated/gold_support_preserved are always attached
+        # (see PackedBlockInfo's docstring for why -- no eval-mode signal
+        # exists to gate on, and these are cheap to compute).
+        logger.info(
+            "  evidence       [%s] %s facts=%d records=%d chars=%d "
+            "window_tokens=%d packed_tokens=%d truncated=%s gold_support_preserved=%s",
+            hit.label, hit.name[:48], len(packed_facts), len(source_keys), len(block_text),
+            info.window_tokens, info.packed_tokens, truncated, info.gold_support_preserved,
+        )
+
+    return _PackedContext(blocks, all_facts, all_edge_ids, record_keys_by_source, packed_blocks, dropped_uids)
+
+
 def retrieve(
     graph: Graph, client: OpenAI, question: str, *,
     limit: int, providers: list[str] | None, scope: AccessScope,
     token_usage: TokenUsage | None = None,
     collection: str = vector_store.COLLECTION,
     at: str | None = None, at_end: str | None = None,
+    exclude_edges: frozenset[tuple[str, str, str]] = frozenset(),
 ) -> tuple[Any, list[SearchHit]]:
     """Everything the product does to turn a question into candidate hits.
 
@@ -488,7 +980,15 @@ def retrieve(
     miss ones that are.
 
     Returns `(structured_result_or_None, hits)` — the caller needs the first to
-    know whether the hit list is already the complete answer.
+    know whether the hit list is already the complete answer. When the second
+    element is a candidate pool rather than a complete structured answer
+    (i.e. the first element is `None`), it is NOT yet cut to `limit` (plan.md
+    §1.1) — the caller (`run_chat_turn`) applies `candidates[:search_limit]`
+    itself, after this function's own pool-widening (§1.1) and one-hop
+    expansion (§1.3) have both had a chance to add candidates. This mirrors
+    plan.md §1.1's own phrasing verbatim: "the final cut is
+    candidates[:search_limit] as today, so behaviour does not change unless
+    NEURON_RERANK is set."
     """
     structured = resolve_structured(graph, question, scope, providers)
     if structured is not None:
@@ -499,7 +999,9 @@ def retrieve(
     if wants_wisdom or wants_findings:
         # One query embedding feeds every retrieval lane. Wisdom and Findings
         # get reserved slots so a dense graph of ordinary entities cannot
-        # crowd them out of the final top-K.
+        # crowd them out of the final top-K. NOT widened to POOL_SIZE (§1.1
+        # only names "the else branch, no knowledge-layer intent") -- the
+        # reserved-slot budget above is already sized against `limit`.
         query_embedding = embed_query(client, question, token_usage=token_usage)
         general_hits = hybrid_search(
             graph, client, question, limit=limit, providers=providers, scope=scope,
@@ -533,11 +1035,55 @@ def retrieve(
         general_budget = max(2, limit - len(layer_hits))
         hits = layer_hits + [hit for hit in general_hits if hit.uid not in seen][:general_budget]
     else:
+        # plan.md §1.1: widen the candidate POOL, not the final answer -- the
+        # caller still cuts to `limit`/`search_limit` after expansion below.
+        # `search.py` needs no change; `hybrid_search` already returns
+        # `ranked[:limit]`, so asking for POOL_SIZE just asks it for more.
         hits = hybrid_search(
-            graph, client, question, limit=limit, providers=providers, scope=scope,
+            graph, client, question, limit=POOL_SIZE, providers=providers, scope=scope,
             token_usage=token_usage, collection=collection,
         )
     _log_hits("hybrid", hits)
+    pool_before_expansion = len(hits)
+
+    # plan.md §1.7: two-entity lane. Alongside the wide-pool/expansion logic
+    # (prepended, same pattern as the named-person `extras` injection below)
+    # so a pair anchor can also seed expansion just below.
+    seen = {hit.uid for hit in hits}
+    pair_hits = [hit for hit in _two_entity_lane(graph, question, scope, providers) if hit.uid not in seen]
+    if pair_hits:
+        _log_hits("pair-lane", pair_hits)
+        hits = pair_hits + hits
+
+    # plan.md §1.3/§1.4: one-hop expansion around the pool's own seeds.
+    # `min_tier`: "primary for lookup questions (structured-ish, named key),
+    # derived otherwise." `structured` is always `None` at this point in the
+    # function -- a non-`None` `resolve_structured` result already returned
+    # above, before any of this runs -- so the "primary for lookup" branch
+    # can never actually trigger in this control flow today. Kept as an
+    # explicit conditional (not a bare "derived" constant) so it activates
+    # correctly if a future non-structured lookup signal is ever added,
+    # rather than silently staying "derived" forever with no visible reason
+    # why. Flagged in the task report as a QUERY for the repo owner to
+    # confirm this reading is intended.
+    min_tier = "primary" if structured is not None else "derived"
+    seed_uids = [hit.uid for hit in hits][:MAX_SEEDS]
+    neighbor_hits = expand_neighbors(
+        graph, seed_uids, scope, providers, min_tier=min_tier, exclude_edges=exclude_edges,
+    )
+    seen = {hit.uid for hit in hits}
+    new_neighbors = [hit for hit in neighbor_hits if hit.uid not in seen]
+    if new_neighbors:
+        _log_hits("expansion", new_neighbors)
+        hits = hits + new_neighbors
+    if len(hits) != pool_before_expansion:
+        # Router honesty (DICE): a wrong answer is almost never "the LLM
+        # hallucinated" -- log when the pool actually changed shape, not just
+        # that expansion ran.
+        logger.info(
+            "  pool           %d -> %d candidates after pair-lane/expansion",
+            pool_before_expansion, len(hits),
+        )
 
     # Inject the whole SAME_AS cluster, not the first equal-ratio name.
     # Bitbucket Aashish and Jira Aashish score the same; first-wins hid
@@ -571,6 +1117,7 @@ def run_chat_turn(
     search_limit: int = 6, providers: list[str] | None = None,
     scope: AccessScope, at: str | None = None, as_of: str | None = None,
     at_end: str | None = None, collection: str = vector_store.COLLECTION,
+    exclude_edges: frozenset[tuple[str, str, str]] = frozenset(),
 ) -> ChatResult:
     # Chat uses sol by default for stronger evidence reconciliation. Keep a
     # dedicated CHAT_MODEL override so deployments may tune chat separately
@@ -592,54 +1139,31 @@ def run_chat_turn(
     structured, hits = retrieve(
         graph, client, question, limit=search_limit, providers=providers, scope=scope,
         token_usage=token_usage, collection=collection, at=at, at_end=at_end,
+        exclude_edges=exclude_edges,
     )
+
+    # plan.md §1.1's pool-then-cut boundary: `retrieve`'s non-structured path
+    # now returns a WIDE pool (POOL_SIZE, plus §1.3 expansion candidates) so
+    # expansion has real seeds and the harness can measure candidate
+    # recall@40. The final cut to the caller's own `search_limit` -- "the
+    # final cut is candidates[:search_limit] as today" -- happens HERE,
+    # after expansion has already had its chance to add candidates, not
+    # inside `retrieve` itself. A structured result is already the complete,
+    # non-sampled answer ("STRUCTURED RESULT — complete list, not a sample")
+    # and must never be cut.
+    pool_size = len(hits)
+    if structured is None:
+        hits = hits[:search_limit]
+        if pool_size > len(hits):
+            logger.info(
+                "  cut            pool=%d -> search_limit=%d", pool_size, len(hits),
+            )
 
     if not hits and structured is None:
         return ChatResult(
             answer="I don't have any information about that in the graph yet.",
             citations=[],
             token_usage=token_usage,
-        )
-
-    all_facts: list[dict] = []
-    all_edge_ids: list[str] = []
-    # Record keys grouped per evidence block, keyed by a whitespace-normalized
-    # name so the model's citation ("used_sources") reliably matches even when
-    # the underlying node name carries incidental whitespace -- verified on
-    # real data: a Jira summary stored with a trailing space ("...for Argus ")
-    # made the model's (correctly trimmed) echo of that name silently fail an
-    # exact-string lookup, dropping a citation the model had explicitly named.
-    # This is ONLY for matching the model's response back to a block; the
-    # `Citation.name` shown to the user still comes from `_resolve_records`,
-    # which reads the untouched `SourceRecord.name` from the graph.
-    record_keys_by_source: dict[str, set[str]] = {}
-    highlighted_nodes = [hit.uid for hit in hits]
-
-    context_blocks = []
-    for hit in hits:
-        facts, edge_ids, record_keys = _entity_evidence(
-            graph, hit.uid, scope, providers, at=at, at_end=at_end, as_of=as_of,
-        )
-        if structured is not None and structured.kind in {"unassigned", "assigned_to"}:
-            facts, edge_ids = _assignment_facts(facts)
-            record_keys = _mentioned_record_keys(graph, hit.uid, scope, providers)
-        elif structured is not None:
-            record_keys = _mentioned_record_keys(graph, hit.uid, scope, providers)
-        all_facts.extend(facts)
-        all_edge_ids.extend(edge_ids)
-        source_keys = record_keys_by_source.setdefault(hit.name.strip(), set())
-        source_keys.update(record_keys)
-        fact_lines = "\n".join(_format_fact(fact) for fact in facts) or "  (no recorded facts)"
-        metadata = _knowledge_metadata(graph, hit)
-        metadata_section = f"\n{metadata}" if metadata else ""
-        block = f"[{hit.label}] {hit.name}\n{hit.summary}{metadata_section}\n{fact_lines}"
-        context_blocks.append(block)
-        # Per block, because one block routinely dominates: a merge commit
-        # touching 400 files contributed 46% of a 54k-token context while
-        # twelve blocks looked evenly sized from the outside.
-        logger.info(
-            "  evidence       [%s] %s facts=%d records=%d chars=%d",
-            hit.label, hit.name[:48], len(facts), len(record_keys), len(block),
         )
 
     clock = []
@@ -655,14 +1179,45 @@ def run_chat_turn(
     header = ("CLOCKS: " + "; ".join(clock) + "\n\n") if clock else ""
     if structured is not None:
         header += structured.preamble + "\n\n"
-    context = header + "\n\n".join(context_blocks)
+
+    # plan.md §1.2: real token budget, not chars/4. Reserves room for the
+    # system prompt, the question itself, and the header above the evidence
+    # budget so `NEURON_CONTEXT_TOKENS` bounds the WHOLE prompt, not just the
+    # evidence blocks in isolation.
+    reserved_tokens = (
+        _count_tokens(SYSTEM_PROMPT) + _count_tokens(question)
+        + _count_tokens(header) + NEURON_ANSWER_RESERVE_TOKENS
+    )
+    evidence_budget = max(0, NEURON_CONTEXT_TOKENS - reserved_tokens)
+    packed = _pack_context(
+        graph, hits, question, structured=structured, scope=scope, providers=providers,
+        at=at, at_end=at_end, as_of=as_of, evidence_budget=evidence_budget,
+    )
+    context = header + "\n\n".join(packed.blocks)
     # Chars, not an estimated token count: chars/4 read 40k against a real
     # 54,835 here. The exact figure arrives on the `answer` line a few
     # seconds later, so a wrong guess would only be something to unlearn.
+    # Kept as-is (plan.md §1.2 says so explicitly) alongside a real count --
+    # the packing decisions above already used real tokens throughout, this
+    # line is only a post-hoc sanity check against the budget.
     logger.info(
         "  context        blocks=%d facts=%d chars=%d",
-        len(context_blocks), len(all_facts), len(context),
+        len(packed.blocks), len(packed.all_facts), len(context),
     )
+    logger.info(
+        "  packing        evidence_budget=%d context_tokens=%d blocks_kept=%d blocks_dropped=%d",
+        evidence_budget, _count_tokens(context), len(packed.blocks), len(packed.dropped_uids),
+    )
+
+    # Highlighted nodes now reflect what actually survived packing, not the
+    # full pre-packing candidate list -- once budget-driven drops exist, a
+    # dropped candidate's evidence never reached the model, so it should not
+    # be reported as part of the answer's evidence either. (Matches
+    # `scripts/evaluate_retrieval.py`'s own `stage_case_metrics` docstring,
+    # which already anticipated this: "today packed_uids equals the chat
+    # turn's highlighted_nodes. It will start differing once budget-driven
+    # drops exist.")
+    highlighted_nodes = [info.uid for info in packed.packed_blocks]
 
     response = client.responses.parse(
         model=model,
@@ -680,10 +1235,10 @@ def run_chat_turn(
         # still be wrong if a block's neighborhood keys leaked assigned
         # children (DATAOS-3833 PARENT_OF → 3839 / 4151). Own records only.
         used_record_keys = set()
-        for keys in record_keys_by_source.values():
+        for keys in packed.record_keys_by_source.values():
             used_record_keys.update(keys)
     else:
-        used_record_keys = _used_record_keys(parsed.used_sources, record_keys_by_source)
+        used_record_keys = _used_record_keys(parsed.used_sources, packed.record_keys_by_source)
     citations_by_key = _resolve_records(graph, used_record_keys, scope)
     wants_wisdom, wants_findings = _requested_knowledge_layers(question)
     include_labels = set()
@@ -709,6 +1264,8 @@ def run_chat_turn(
         citations=list(citations_by_key.values()),
         knowledge_citations=knowledge_citations,
         highlighted_nodes=highlighted_nodes,
-        highlighted_edges=all_edge_ids,
+        highlighted_edges=packed.all_edge_ids,
         token_usage=token_usage,
+        packed_blocks=packed.packed_blocks,
+        dropped_evidence_uids=packed.dropped_uids,
     )
