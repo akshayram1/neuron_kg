@@ -51,11 +51,10 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 
 ---
 
-## 2.1 — New heavy dependency: sentence-transformers/torch (~1.5GB) for the cross-encoder
-**Raised:** 25 Sep 2026
-**Blocks:** nothing merged is broken (254 passed/12 skipped, 23/23 pass with the real model downloaded and scored) — flagging for visibility since it's a meaningful environment change, not a code correctness question.
-**Question:** `graph/rerank.py` (Phase 2.1) added `sentence-transformers>=6.1.0` via `uv add`, pulling in `torch==2.14.0` and `transformers==5.17.0` as transitive deps — a large addition to this repo's dependency footprint (previously zero ML-framework deps). It pins `cross-encoder/ms-marco-MiniLM-L6-v2` at a specific HF revision (Apache-2.0, ~22M params, ~20ms/pair CPU inference after a ~17s one-time model download). Is this the dependency/model choice you want for the real bake-off (vs. e.g. a smaller ONNX-exported model to avoid the torch dependency entirely, or deferring the pin until Phase 2.3's real latency benchmarking), or should this be revisited before Phase 2.2 wires it into `chat.py`'s live retrieval path?
-**Assumption made for now:** shipped as-is; nothing wired into the live retrieval path yet (that's Phase 2.2, not started) so this is inert until then.
+## 2.1 — RESOLVED: generic cross-encoder removed, no sentence-transformers/torch dependency
+**Raised:** 25 Sep 2026 · **Resolved:** 25 Sep 2026 (same day, explicit instruction from Akshay: "we dont want ms-marco-MiniLM-L6-v2 pinned, batched, scoring correctly this please remove it")
+**What changed:** `CrossEncoderReranker`, its pinned model/revision constants, and every test exercising it were removed from `graph/rerank.py`/`tests/test_rerank.py`. `sentence-transformers` (and its transitive `torch`/`transformers` deps, ~1.5GB) was removed via `uv remove sentence-transformers`. `graph/rerank.py`'s common interface (`Reranker` protocol, `RerankCandidate`, `RerankScore`, `select_final`) and the `LayaReranker` stub are unaffected and stay merged. 274 passed/12 skipped after removal (down from 277/15 — exactly the 3 non-gated + 3 integration-gated cross-encoder tests).
+**Still open:** Phase 2's variant C ("B + a generic pretrained cross-encoder") now has no implementation to bake off at all. If/when a generic cross-encoder is wanted again, it needs a fresh decision on approach (e.g. a lighter ONNX Runtime path instead of `sentence-transformers`/torch) — not a resumption of the removed one.
 
 ## 2.1 — Laya reranker is a stub; real integration needs package + checkpoint decisions
 **Raised:** 25 Sep 2026

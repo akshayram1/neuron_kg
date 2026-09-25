@@ -1,13 +1,18 @@
 """Reranker bake-off (25-plan.md §2 "Phase 2 — Reranker bake-off: generic
-cross-encoder vs Laya") — the common scorer interface (§2.1) plus a real,
-working generic cross-encoder implementation and a shape-compatible Laya
-adapter stub.
+cross-encoder vs Laya") — the common scorer interface (§2.1) plus a
+shape-compatible Laya adapter stub.
 
-Only §2.1 is built here: the `Reranker` interface, `CrossEncoderReranker`,
-a best-effort `LayaReranker` stub (see its docstring), and `select_final`'s
-selection *mechanism*. Wiring this into `graph/chat.py` (§2.2), CPU/GPU
-serving benchmarks (§2.3), threshold tuning (§2.4) and the query-type router
-(§2.5) are separate, later tasks and are deliberately NOT done here.
+Only §2.1's interface is built here: the `Reranker` protocol, a best-effort
+`LayaReranker` stub (see its docstring), and `select_final`'s selection
+*mechanism*. There is deliberately no cross-encoder implementation in this
+module — the repo owner does not want the `sentence-transformers`/`torch`
+dependency footprint that a generic pretrained cross-encoder would bring in
+(removed 25 Sep 2026; see QUERIES.md for the earlier pinned-model note this
+superseded). A scorer satisfying `Reranker` can be added back here, or
+provided by a caller, whenever a concrete choice is made. Wiring a scorer
+into `graph/chat.py` (§2.2), CPU/GPU serving benchmarks (§2.3), threshold
+tuning (§2.4) and the query-type router (§2.5) are separate, later tasks and
+are deliberately NOT done here.
 
 Both scorer implementations accept the same `(question, candidate_window)`
 shape (`RerankCandidate`) and return the same score/metadata shape
@@ -96,8 +101,8 @@ class RerankScore:
 
 @runtime_checkable
 class Reranker(Protocol):
-    """Common interface both `CrossEncoderReranker` and `LayaReranker`
-    satisfy — 25-plan.md §2.1.
+    """Common interface any scorer implementation (e.g. `LayaReranker`, or a
+    future generic cross-encoder) satisfies — 25-plan.md §2.1.
 
     `typing.Protocol` rather than an ABC: this codebase has no existing
     precedent for swappable-backend classes at all (checked `graph/
@@ -108,10 +113,10 @@ class Reranker(Protocol):
     classes satisfy this interface structurally (matching method signature
     is enough), with no shared base class, no `__init__` coupling, and no
     import-time dependency from one scorer implementation on another --
-    which matters concretely here since `CrossEncoderReranker` needs
-    `sentence-transformers`/`torch` importable and `LayaReranker` would need
-    the separate `laya` package, and neither should have to import a base
-    class module that drags in the other's dependencies.
+    matters concretely here since a future cross-encoder implementation
+    would need `sentence-transformers`/`torch` importable and `LayaReranker`
+    would need the separate `laya` package, and neither should have to
+    import a base class module that drags in the other's dependencies.
 
     Batched, not one-at-a-time, per 25-plan.md §2.1's batching requirement
     for both implementations: a single `score()` call takes the *entire*
@@ -183,118 +188,16 @@ def _log_scores(scores: list[RerankScore]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Generic pretrained cross-encoder
-# ---------------------------------------------------------------------------
-
-# cross-encoder/ms-marco-MiniLM-L6-v2 (note: the "MiniLM-L6" naming, not the
-# older "MiniLM-L-6" alias) — chosen because:
-#   - Small and CPU-viable: 6-layer MiniLM, ~22M parameters, well under
-#     everything else in this repo's dependency footprint; predict() for a
-#     couple of pairs measured well under 50ms on CPU with the model already
-#     loaded (verified locally as part of this task).
-#   - Permissively licensed: Apache-2.0 (HF model card `license:apache-2.0`),
-#     no usage restriction, consistent with every other pinned dependency in
-#     pyproject.toml.
-#   - Purpose-built for exactly this job: trained on the MS MARCO passage
-#     ranking dataset specifically to score (query, passage) relevance pairs
-#     -- the same shape as (question, candidate_window) here -- rather than
-#     being a general sentence-embedding model repurposed as a reranker.
-#   - Well-known / widely used (88M+ downloads on the Hugging Face Hub at
-#     time of writing), so its behavior and failure modes are well
-#     documented elsewhere, which matters for a Phase-2 bake-off baseline.
-#   - The `-L6-` size is the middle of the same family's L2/L4/L6/L12
-#     ladder: L2/L4 trade too much quality for CPU speed this model already
-#     has to spare at this repo's candidate-pool sizes (tens, not thousands,
-#     of candidates per question -- 25-plan.md §1.1's "pool of 40"); L12
-#     roughly doubles latency for a smaller quality gain than L2->L6 gave.
-#     Re-benchmark against L12 in §2.3 if L6's quality margin over Laya
-#     turns out to be thin.
-CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
-# Pinned Hugging Face Hub commit SHA for the above model (verified against
-# https://huggingface.co/api/models/cross-encoder/ms-marco-MiniLM-L6-v2 as
-# part of this task) -- 25-plan.md §2.1: "pin the model and tokenizer
-# version". Passed as `revision=` to `CrossEncoder(...)` below so a future
-# upstream change to the `main` branch can never silently change which
-# weights this code loads.
-CROSS_ENCODER_REVISION = "233902d25c440f23af6f7d6e94d2946bac0bee0a"
-DEFAULT_CROSS_ENCODER_BATCH_SIZE = 32
-
-
-class CrossEncoderReranker:
-    """Generic pretrained cross-encoder reranker (25-plan.md §2.1/§2 variant
-    C). Satisfies the `Reranker` protocol.
-
-    The underlying `sentence_transformers.CrossEncoder` is loaded lazily on
-    first `score()` call and cached on the instance -- "load one process-
-    level agent" (§2.1's phrasing for Laya) applies just as well here: model
-    load measured ~17s cold (first-time Hugging Face Hub download; cached
-    locally after) vs ~20ms to score a handful of pairs once loaded, so
-    reloading per call would dominate latency. Construct one
-    `CrossEncoderReranker` per process and reuse it.
-    """
-
-    def __init__(
-        self,
-        model_name: str = CROSS_ENCODER_MODEL,
-        revision: str = CROSS_ENCODER_REVISION,
-        device: str = "cpu",
-        batch_size: int = DEFAULT_CROSS_ENCODER_BATCH_SIZE,
-    ) -> None:
-        self.model_name = model_name
-        self.revision = revision
-        self.device = device
-        self.batch_size = batch_size
-        self._model = None
-
-    def _load(self):
-        if self._model is None:
-            # Imported lazily so importing graph.rerank (e.g. for
-            # RerankCandidate/RerankScore/select_final in a context that
-            # never touches the cross-encoder) never pays sentence-
-            # transformers/torch's import cost, and so LayaReranker-only
-            # callers never need torch importable at all.
-            from sentence_transformers import CrossEncoder
-
-            self._model = CrossEncoder(
-                self.model_name, revision=self.revision, device=self.device,
-            )
-        return self._model
-
-    def score(self, question: str, candidates: list[RerankCandidate]) -> list[RerankScore]:
-        if not candidates:
-            return []
-        try:
-            model = self._load()
-            pairs = [(question, candidate.window) for candidate in candidates]
-            # Real batched inference (not a Python loop over predict() calls
-            # one at a time): CrossEncoder.predict batches internally per
-            # `batch_size`, verified in this task by timing a two-pair batch
-            # end-to-end against a real downloaded model.
-            raw_scores = model.predict(pairs, batch_size=self.batch_size)
-        except Exception:
-            # Raise, don't swallow -- 25-plan.md §2.3's fallback-to-RRF path
-            # is a caller's job (§2.2, out of scope here); this method must
-            # fail loudly so that caller can catch it and log model/version.
-            logger.exception(
-                "rerank: cross-encoder scoring failed model=%s model_version=%s candidates=%d",
-                self.model_name, self.revision, len(candidates),
-            )
-            raise
-
-        scores = [
-            RerankScore(
-                uid=candidate.uid, score=float(raw_score),
-                model=self.model_name, model_version=self.revision,
-            )
-            for candidate, raw_score in zip(candidates, raw_scores)
-        ]
-        _log_scores(scores)
-        return scores
-
-
-# ---------------------------------------------------------------------------
 # Laya adapter -- best-effort stub, NOT full integration (see class
 # docstring for exactly what was and wasn't discoverable).
+#
+# No generic cross-encoder implementation lives in this module (removed 25
+# Sep 2026, per the repo owner: no `sentence-transformers`/`torch` dependency
+# footprint). Variant C of Phase 2's bake-off ("B + a generic pretrained
+# cross-encoder") therefore has no implementation to run yet -- either a
+# lighter-weight scorer (e.g. an ONNX-exported model, ONNX Runtime only, no
+# torch) or this exact model brought back deliberately would need to be
+# chosen before that variant can be benchmarked. See QUERIES.md.
 # ---------------------------------------------------------------------------
 
 
@@ -307,7 +210,7 @@ class LayaReranker:
     25-plan.md §5.3/§10, a separate, larger task. This class exists only so
     `graph.rerank.Reranker` is verifiably shape-compatible with a Laya
     adapter and 25-plan.md §2.2's future wiring is not blocked by an
-    interface that only fits `CrossEncoderReranker`.
+    interface that only fits one implementation.
 
     What was found in `/Users/akshaychame/personal_exp/laya` (read-only,
     nothing there was modified) and used to write this stub as precisely as

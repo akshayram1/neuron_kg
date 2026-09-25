@@ -1,30 +1,18 @@
-"""Tests for graph/rerank.py (25-plan.md §2.1 common reranker interface +
-generic cross-encoder).
+"""Tests for graph/rerank.py (25-plan.md §2.1 common reranker interface).
 
-Most tests here are pure/offline: they use a `FakeReranker` to exercise the
-`Reranker` protocol shape, `select_final`'s selection mechanism, and
-`LayaReranker`'s stub contract, none of which need a real model.
-
-The real cross-encoder is exercised in two places:
-  - `test_pinned_cross_encoder_model_and_revision_constants` — asserts the
-    pinned name/revision constants themselves haven't silently drifted (no
-    network needed, just checks the constants).
-  - The `NEURON_INTEGRATION=1`-gated tests at the bottom, which actually
-    download/load the real pinned model and score real pairs — same gating
-    convention as tests/test_expand.py (`pytest.mark.skipif(os.getenv(
-    "NEURON_INTEGRATION") != "1", ...)`).
+No generic cross-encoder implementation lives in graph/rerank.py (removed 25
+Sep 2026 -- no `sentence-transformers`/`torch` dependency, per the repo
+owner). All tests here are pure/offline: they use a `FakeReranker` to
+exercise the `Reranker` protocol shape, `select_final`'s selection
+mechanism, and `LayaReranker`'s stub contract, none of which need a real
+model or network access.
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from graph.rerank import (
-    CROSS_ENCODER_MODEL,
-    CROSS_ENCODER_REVISION,
-    CrossEncoderReranker,
     LayaReranker,
     RerankCandidate,
     RerankScore,
@@ -33,11 +21,6 @@ from graph.rerank import (
     select_final,
 )
 from graph.search import SearchHit
-
-INTEGRATION = os.getenv("NEURON_INTEGRATION") == "1"
-integration_only = pytest.mark.skipif(
-    not INTEGRATION, reason="set NEURON_INTEGRATION=1 to download/run the real cross-encoder",
-)
 
 
 def _candidates(n: int) -> list[RerankCandidate]:
@@ -69,10 +52,6 @@ def test_fake_reranker_satisfies_the_reranker_protocol():
     assert isinstance(FakeReranker(), Reranker)
 
 
-def test_cross_encoder_reranker_satisfies_the_reranker_protocol():
-    assert isinstance(CrossEncoderReranker(), Reranker)
-
-
 def test_laya_reranker_satisfies_the_reranker_protocol():
     assert isinstance(LayaReranker(), Reranker)
 
@@ -80,12 +59,12 @@ def test_laya_reranker_satisfies_the_reranker_protocol():
 # --- common input equality across implementations ---------------------------
 
 def test_common_candidate_list_produces_well_formed_output_from_fake_reranker():
-    """Stand-in for "both models produce well-formed, same-shaped output from
-    the same RerankCandidate list" -- CrossEncoderReranker's real-model
-    version of this same assertion lives in the integration section below
-    (network/model-load dependent); LayaReranker's equivalent is that it
-    raises cleanly (test_laya_reranker_raises_not_implemented), not that it
-    scores anything, per this task's explicit instructions."""
+    """Stand-in for "a real scorer produces well-formed, same-shaped output
+    from the same RerankCandidate list" -- there is no cross-encoder
+    implementation in this module to exercise for real (see module
+    docstring); LayaReranker's equivalent is that it raises cleanly
+    (test_laya_reranker_raises_not_implemented), not that it scores
+    anything, per this task's explicit instructions."""
     candidates = _candidates(4)
     scores = FakeReranker().score("some question", candidates)
     assert len(scores) == len(candidates)
@@ -232,66 +211,3 @@ def test_select_final_is_deterministic():
     assert first == second
 
 
-# --- pinned cross-encoder model/version constants ---------------------------
-
-def test_pinned_cross_encoder_model_and_revision_constants():
-    # Guards against silent drift -- if these change, it must be a
-    # deliberate edit to this test, not an accidental import-time change.
-    assert CROSS_ENCODER_MODEL == "cross-encoder/ms-marco-MiniLM-L6-v2"
-    assert CROSS_ENCODER_REVISION == "233902d25c440f23af6f7d6e94d2946bac0bee0a"
-
-
-def test_cross_encoder_reranker_defaults_to_the_pinned_constants():
-    reranker = CrossEncoderReranker()
-    assert reranker.model_name == CROSS_ENCODER_MODEL
-    assert reranker.revision == CROSS_ENCODER_REVISION
-
-
-# --- real, non-mocked cross-encoder end-to-end (network + model load) ------
-
-@integration_only
-def test_real_cross_encoder_scores_are_floats_in_a_sane_range():
-    reranker = CrossEncoderReranker()
-    candidates = [
-        RerankCandidate(uid="relevant", window=(
-            "Neuron stores its knowledge graph in FalkorDB, a Redis-based "
-            "graph database, and uses Qdrant for vector search."
-        )),
-        RerankCandidate(uid="irrelevant", window=(
-            "The office cafeteria menu changes every Tuesday and Friday."
-        )),
-    ]
-    scores = reranker.score("What database does Neuron use for its graph?", candidates)
-    assert len(scores) == 2
-    by_uid = {s.uid: s for s in scores}
-    for s in scores:
-        assert isinstance(s.score, float)
-        assert -50.0 < s.score < 50.0  # sane range for this model's raw logit output
-        assert s.model == CROSS_ENCODER_MODEL
-        assert s.model_version == CROSS_ENCODER_REVISION
-    # The actually-relevant candidate must score higher than the irrelevant
-    # one on this obvious example.
-    assert by_uid["relevant"].score > by_uid["irrelevant"].score
-
-
-@integration_only
-def test_real_cross_encoder_batches_candidates_deterministically_and_preserves_order():
-    reranker = CrossEncoderReranker()
-    candidates = [
-        RerankCandidate(uid="a", window="FalkorDB is the graph database Neuron uses."),
-        RerankCandidate(uid="b", window="Qdrant serves the vector search leg."),
-        RerankCandidate(uid="c", window="The cafeteria menu changes weekly."),
-    ]
-    question = "What database does Neuron use?"
-    first = reranker.score(question, candidates)
-    second = reranker.score(question, candidates)
-    assert [s.uid for s in first] == ["a", "b", "c"]
-    assert [s.uid for s in second] == ["a", "b", "c"]
-    assert [round(s.score, 4) for s in first] == [round(s.score, 4) for s in second]
-
-
-@integration_only
-def test_real_cross_encoder_raises_on_failure_instead_of_swallowing():
-    reranker = CrossEncoderReranker(model_name="this/does-not-exist-on-the-hub", revision="main")
-    with pytest.raises(Exception):
-        reranker.score("q", _candidates(1))
