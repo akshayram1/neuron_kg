@@ -75,6 +75,48 @@ class SyncCoverage:
     created_at: str
 
 
+class ReviewState(StrEnum):
+    """State of one row in `reviews` (plan.md Phase 3 §3.0 "Minimal review
+    queue"). A review starts PENDING and is decided exactly once, into
+    APPROVED or REJECTED — `approve_review`/`reject_review` only act on a
+    row that is still PENDING, so a decided review cannot be re-decided out
+    from under whoever already acted on it."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class Review:
+    """One human-review proposal: `possibly_same_as`, `fact_update`, and
+    later link/duplicate candidates (plan.md Phase 3 §3.0). `type` is
+    deliberately free text, not a StrEnum -- new proposal types will be
+    added by later phases this module does not know about yet.
+
+    `payload` is caller-defined proposal data, returned here already
+    `json.loads`'d (the DB column stores the JSON text; see
+    `axiom_adoptions.shapes` for the same round-trip convention elsewhere in
+    this file). This module never inspects `payload`'s keys.
+
+    `identity` is an optional, caller-supplied stable key for the proposal
+    -- e.g. `f"{type}:{subject_uid}:{object_uid}"` for a merge/update
+    candidate -- used only to dedupe against previously-rejected proposals
+    (see `create_review` and `review_rejections`). It is intentionally
+    opaque to this module: the shape is the caller's choice, not something
+    parsed out of `payload`.
+    """
+
+    id: int
+    type: str
+    payload: dict
+    identity: str | None
+    state: str
+    decided_by: str | None
+    decided_at: str | None
+    created_at: str
+
+
 class DropReason(StrEnum):
     """Why one extracted item did not become a fact. `DIRECTION_CORRECTED` is
     deliberately in this vocabulary while NOT being a loss — the fact was
@@ -352,6 +394,40 @@ class ConnectorLedger:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sync_coverage_run ON sync_coverage(run_id)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    identity TEXT,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    decided_by TEXT,
+                    decided_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reviews_state ON reviews(state, created_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reviews_type ON reviews(type, state)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reviews_identity ON reviews(identity) "
+                "WHERE identity IS NOT NULL"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS review_rejections (
+                    identity TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    review_id INTEGER,
+                    rejected_at TEXT NOT NULL
+                )
+                """
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -1084,3 +1160,123 @@ class ConnectorLedger:
                 (run_id,),
             ).fetchone()
         return self._sync_coverage_row(row) if row else None
+
+    # ------------------------------------------------------------ review queue
+
+    @staticmethod
+    def _review_row(row: sqlite3.Row) -> Review:
+        return Review(
+            id=int(row["id"]), type=str(row["type"]), payload=json.loads(str(row["payload"])),
+            identity=row["identity"], state=str(row["state"]),
+            decided_by=row["decided_by"], decided_at=row["decided_at"],
+            created_at=str(row["created_at"]),
+        )
+
+    def is_identity_rejected(self, identity: str) -> bool:
+        """True if a proposal with this identity was already rejected --
+        the check `create_review` makes before inserting a new pending row,
+        also usable standalone by a caller deciding whether to propose at
+        all (plan.md Phase 3 §3.0 "Cache rejection identities so the same
+        proposal is not recreated")."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM review_rejections WHERE identity = ?", (identity,)
+            ).fetchone()
+        return row is not None
+
+    def create_review(
+        self, review_type: str, payload: dict, *, identity: str | None = None,
+    ) -> int | None:
+        """Create a pending review for `payload` under `review_type`.
+
+        `identity` is the caller's stable key for this proposal (see
+        `Review`'s docstring for the shape convention). When given and a
+        proposal with that identity was already rejected, no new row is
+        created and `None` is returned -- the human already declined this,
+        and re-surfacing it on every run would make the queue impossible to
+        clear. Otherwise inserts a new PENDING row and returns its id.
+        """
+        with self._connect() as connection:
+            if identity is not None:
+                already_rejected = connection.execute(
+                    "SELECT 1 FROM review_rejections WHERE identity = ?", (identity,)
+                ).fetchone()
+                if already_rejected:
+                    return None
+            cursor = connection.execute(
+                "INSERT INTO reviews(type, payload, identity, state, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    review_type, json.dumps(payload), identity, str(ReviewState.PENDING),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def get_review(self, review_id: int) -> Review | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM reviews WHERE id = ?", (review_id,)).fetchone()
+        return self._review_row(row) if row else None
+
+    def list_reviews(
+        self, *, state: ReviewState | str | None = None, type: str | None = None,
+        limit: int = 200,
+    ) -> list[Review]:
+        """Newest first, optionally filtered by `state` and/or `type`."""
+        query = "SELECT * FROM reviews"
+        clauses: list[str] = []
+        params: list = []
+        if state is not None:
+            clauses.append("state = ?")
+            params.append(str(state))
+        if type is not None:
+            clauses.append("type = ?")
+            params.append(type)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._review_row(row) for row in rows]
+
+    def approve_review(self, review_id: int, decided_by: str) -> Review | None:
+        """Approve a PENDING review. Returns the decided row, or `None` if
+        `review_id` does not exist or is no longer PENDING (already decided
+        by someone else -- this never re-decides a review out from under a
+        previous decision)."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE reviews SET state = ?, decided_by = ?, decided_at = ? "
+                "WHERE id = ? AND state = ?",
+                (str(ReviewState.APPROVED), decided_by, now, review_id, str(ReviewState.PENDING)),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute("SELECT * FROM reviews WHERE id = ?", (review_id,)).fetchone()
+        return self._review_row(row) if row else None
+
+    def reject_review(self, review_id: int, decided_by: str) -> Review | None:
+        """Reject a PENDING review and, when it carries an `identity`, cache
+        that identity so the same proposal is not recreated (plan.md Phase 3
+        §3.0). Returns the decided row, or `None` if `review_id` does not
+        exist or is no longer PENDING."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE reviews SET state = ?, decided_by = ?, decided_at = ? "
+                "WHERE id = ? AND state = ?",
+                (str(ReviewState.REJECTED), decided_by, now, review_id, str(ReviewState.PENDING)),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute("SELECT * FROM reviews WHERE id = ?", (review_id,)).fetchone()
+            review = self._review_row(row)
+            if review.identity is not None:
+                connection.execute(
+                    "INSERT OR REPLACE INTO review_rejections(identity, type, review_id, rejected_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (review.identity, review.type, review.id, now),
+                )
+        return review
