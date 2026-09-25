@@ -51,6 +51,123 @@ from graph.token_usage import TokenUsage
 logger = logging.getLogger("neuron.semantic_pass")
 
 
+# ---------------------------------------------------------------------------
+# Admission gates (plan.md §3.4 "Admission gates as an explicit list").
+#
+# Every extracted fact is admitted (written as a live edge) only after
+# passing, in this fixed order, the gates below. Each gate that rejects a
+# fact records an `ExtractionDrop` (a `connectors.core.ledger.DropReason`)
+# via `ledger.record_drops` and logs at INFO which gate number/name rejected
+# it, so "why is this fact missing" always has an answer in the log/ledger
+# (plan.md design principle #9).
+#
+#   1. Selective admission + optional Laya triage -- before `_call_llm`,
+#      in `run_semantic_pass`. The "selective admission" half is real and
+#      existing: a chunk only reaches `_call_llm` if its record already has
+#      a resolved `primary_node_uid`, and only up to the run's
+#      `budget`/`record_prefix` selection (`ledger.pending_chunks`). The
+#      "optional Laya triage" half (skip a chunk by `chunk_type` /
+#      `has_durable_fact`, plan.md §3.1 shadow mode / §3.2 enforce) is
+#      blocked on an unresolved Laya-packaging decision -- see QUERIES.md
+#      ("Phase 3.1/3.2 skipped this wave") and the `LayaReranker` stub in
+#      `graph/rerank.py`. `_gate_laya_triage` below is a documented no-op
+#      placeholder for it, called from the same place a real triage check
+#      would run, but it never skips a chunk today.
+#   2. Evidence verbatim       -- `evidence_in_chunk`, in `_write_extraction`
+#      (exists).
+#   3. Relation allowed / direction -- `axioms.resolve_direction`, in
+#      `_write_extraction` (exists).
+#   4. Merge candidate         -- the entity-resolution ladder (plan.md
+#      Phase 4, §4.1). Not built yet; `_gate_merge_candidate` is a
+#      documented no-op placeholder.
+#   5. Conflict classification -- `resolve_text_fact` (plan.md Phase 5,
+#      §5.2-5.3). Not built yet; `_gate_conflict_classification` is a
+#      documented no-op placeholder.
+#   6. Projection eligibility  -- low-confidence facts written as review
+#      candidates rather than live edges (plan.md Phase 5). Not built yet;
+#      `_gate_projection_eligibility` is a documented no-op placeholder.
+#
+# Gates 2 and 3 run per fact inside `_write_extraction`'s fact loop, in this
+# order, before a fact's endpoints are resolved. Gates 4-6 are called
+# immediately after endpoint resolution succeeds, in the same loop, one call
+# site per gate in order -- the natural point where "is this really a new
+# fact, not a duplicate" (4), "does it conflict with what's already live"
+# (5), and "is it confident enough to write as a live edge rather than a
+# review candidate" (6) belong once their real machinery exists. Wiring them
+# in now, as no-ops, means Phase 4/5 has one obvious place to plug into
+# instead of a second refactor of this admission path.
+#
+# This tuple exists so the order above is asserted by tests, not only
+# described in the comment.
+ADMISSION_GATES: tuple[str, ...] = (
+    "1:selective_admission_and_laya_triage",
+    "2:evidence_verbatim",
+    "3:relation_allowed_direction",
+    "4:merge_candidate",
+    "5:conflict_classification",
+    "6:projection_eligibility",
+)
+
+
+def _gate_laya_triage(chunk: PendingChunk) -> ExtractionDrop | None:
+    """Gate 1 (optional sub-check): Laya `chunk_type` / `has_durable_fact`
+    triage before `_call_llm` (plan.md Phase 3.1 shadow mode, Phase 3.2
+    enforce). Blocked on an unresolved decision about how Laya is packaged
+    for Neuron (vendored dependency vs. sidecar service -- see QUERIES.md,
+    "Phase 3.1/3.2 skipped this wave", and the `LayaReranker` stub in
+    `graph/rerank.py`).
+
+    This is a placeholder, not a shadow-mode call: it always returns None
+    (never skips a chunk) until Phase 3.1/3.2 are actually implemented.
+    """
+    return None
+
+
+def _gate_merge_candidate(
+    fact, subject_uid: str, object_uid: str,
+) -> ExtractionDrop | None:
+    """Gate 4: is this fact a duplicate of an already-live fact, to be
+    reinforced rather than written as a new edge (plan.md Phase 4, the
+    entity-resolution ladder in §4.1)?
+
+    Not implemented: Phase 4's ladder (mention filter, polarity veto,
+    normalized/alias/vector matching, Laya `same_entity`) does not exist in
+    this codebase yet. Always returns None (never rejects a fact) until
+    Phase 4 lands and this is replaced with the real check.
+    """
+    return None
+
+
+def _gate_conflict_classification(
+    fact, subject_uid: str, object_uid: str,
+) -> ExtractionDrop | None:
+    """Gate 5: does this fact conflict with a live fact on the same
+    subject/relation/object (duplicate, extends, newer_state, corrects,
+    contradicts), per `resolve_text_fact` (plan.md Phase 5, §5.2-5.3)?
+
+    Not implemented: Phase 5's temporal-fact machinery (`valid_at_basis`,
+    Laya `fact_update`, the Graphiti-derived date rule) does not exist in
+    this codebase yet. Always returns None (never rejects a fact) until
+    Phase 5 lands and this is replaced with the real check.
+    """
+    return None
+
+
+def _gate_projection_eligibility(
+    fact, subject_uid: str, object_uid: str,
+) -> ExtractionDrop | None:
+    """Gate 6: is this fact confident enough to write as a live edge, or
+    should it be written as a review candidate instead (plan.md Phase 5,
+    the low-confidence-as-candidate rule)?
+
+    Not implemented: the confidence/candidate-projection machinery this
+    depends on is part of Phase 5 and does not exist in this codebase yet.
+    Always returns None (never rejects a fact) until Phase 5 lands and this
+    is replaced with the real check.
+    """
+    return None
+
+
 def evidence_in_chunk(evidence: str | None, chunk_text: str) -> bool:
     """True when the claimed quote actually appears in the source chunk.
 
@@ -400,21 +517,23 @@ def _write_extraction(
     facts_written = 0
     facts_rejected = 0
     for fact in extraction.facts:
+        # Gate 2: evidence verbatim (ADMISSION_GATES[1]).
         if not evidence_in_chunk(fact.evidence, chunk.text):
             facts_rejected += 1
             logger.info(
-                "  rejected fact (evidence not in chunk): (%s) %r -%s-> (%s) %r  evidence=%r",
+                "  gate 2 (evidence_verbatim) rejected fact: (%s) %r -%s-> (%s) %r  evidence=%r",
                 fact.subject_kind, fact.subject_name, fact.relation, fact.object_kind, fact.object_name,
                 fact.evidence,
             )
             drops.append(_drop(DropReason.EVIDENCE_NOT_IN_CHUNK, fact, detail=fact.evidence))
             continue
 
+        # Gate 3: relation allowed / direction (ADMISSION_GATES[2]).
         direction = axioms.resolve_direction(fact.subject_kind, fact.relation, fact.object_kind)
         if direction is None:
             facts_rejected += 1
             logger.info(
-                "  rejected fact (relation not allowed): (%s) %r -%s-> (%s) %r",
+                "  gate 3 (relation_allowed_direction) rejected fact: (%s) %r -%s-> (%s) %r",
                 fact.subject_kind, fact.subject_name, fact.relation, fact.object_kind, fact.object_name,
             )
             # Neither direction is in the ontology. The triple is kept here
@@ -451,7 +570,8 @@ def _write_extraction(
             subject_name, object_name = object_name, subject_name
             subject_candidate_uid, object_candidate_uid = object_candidate_uid, subject_candidate_uid
             logger.info(
-                "  direction corrected: (%s) %r -%s-> (%s) %r  [as extracted: %s -> %s]",
+                "  gate 3 (relation_allowed_direction) corrected direction: "
+                "(%s) %r -%s-> (%s) %r  [as extracted: %s -> %s]",
                 subject_kind, subject_name, fact.relation, object_kind, object_name,
                 fact.subject_kind, fact.object_kind,
             )
@@ -482,6 +602,39 @@ def _write_extraction(
                        ("+object" if object_uid is None else ""),
             ))
             continue
+
+        # Gates 4-6 (ADMISSION_GATES[3:6]): documented no-op placeholders
+        # (see their docstrings above) -- called here, once endpoints are
+        # resolved but before the edge is written, so Phase 4/5 has this
+        # exact call site to fill in rather than needing to find one.
+        merge_drop = _gate_merge_candidate(fact, subject_uid, object_uid)
+        if merge_drop is not None:  # pragma: no cover -- placeholder never rejects today
+            facts_rejected += 1
+            logger.info(
+                "  gate 4 (merge_candidate) rejected fact: (%s) %r -%s-> (%s) %r",
+                subject_kind, subject_name, fact.relation, object_kind, object_name,
+            )
+            drops.append(merge_drop)
+            continue
+        conflict_drop = _gate_conflict_classification(fact, subject_uid, object_uid)
+        if conflict_drop is not None:  # pragma: no cover -- placeholder never rejects today
+            facts_rejected += 1
+            logger.info(
+                "  gate 5 (conflict_classification) rejected fact: (%s) %r -%s-> (%s) %r",
+                subject_kind, subject_name, fact.relation, object_kind, object_name,
+            )
+            drops.append(conflict_drop)
+            continue
+        projection_drop = _gate_projection_eligibility(fact, subject_uid, object_uid)
+        if projection_drop is not None:  # pragma: no cover -- placeholder never rejects today
+            facts_rejected += 1
+            logger.info(
+                "  gate 6 (projection_eligibility) rejected fact: (%s) %r -%s-> (%s) %r",
+                subject_kind, subject_name, fact.relation, object_kind, object_name,
+            )
+            drops.append(projection_drop)
+            continue
+
         w.upsert_fact_edges(graph, fact.relation, subject_kind, object_kind, [{
             "from_uid": subject_uid, "to_uid": object_uid, "source_record_keys": [chunk.record_key],
             "evidence": fact.evidence, "extraction_method": "llm", "confidence": 0.9,
@@ -596,11 +749,28 @@ def run_semantic_pass(
     chunks = ledger.pending_chunks(budget, record_prefix=record_prefix)
     total_chunks = len(chunks)
 
+    # Gate 1: selective admission + optional Laya triage (ADMISSION_GATES[0]),
+    # run once per chunk before it is scheduled for `_call_llm`.
     runnable: list[tuple[PendingChunk, object, str | SemanticContext | None]] = []
     for chunk in chunks:
         entry = ledger.get(chunk.record_key)
         if entry is None or entry.primary_node_uid is None:
-            logger.warning("no primary_node_uid for %s, skipping chunk", chunk.record_key)
+            logger.warning(
+                "gate 1 (selective_admission_and_laya_triage) skipped chunk %s of %s: "
+                "no primary_node_uid",
+                chunk.chunk_id, chunk.record_key,
+            )
+            continue
+        if _gate_laya_triage(chunk) is not None:
+            # Unreachable today -- `_gate_laya_triage` is a documented no-op
+            # placeholder (plan.md Phase 3.1/3.2, blocked on Laya packaging).
+            # This branch exists so a real triage implementation has exactly
+            # one place to plug into.
+            logger.info(
+                "gate 1 (selective_admission_and_laya_triage) skipped chunk %s of %s: "
+                "laya triage",
+                chunk.chunk_id, chunk.record_key,
+            )
             continue
         related_context = context_provider(chunk) if context_provider else None
         runnable.append((chunk, entry, related_context))
