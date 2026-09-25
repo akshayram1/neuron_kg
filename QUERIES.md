@@ -142,6 +142,32 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 **Raised:** 25 Sep 2026 · **Updated:** 25 Sep 2026 (Laya frontend work committed as `e3ad611` — `App.tsx`/`api.ts` no longer off-limits)
 **Not a question anymore** — this wave still builds the backend half of Phase 6 first (§6.1-§6.4: hygiene reporting, candidate generation, duplicate collection) before touching `BridgePanel.tsx`/the dashboard, simply because the UI needs to know the real shape of `link_candidate`/`duplicate_pair` review data before it can render it meaningfully — not because of any file restriction anymore.
 
+---
+
+## 6.2 — `_shared_concept_documents`'s ledger is inert until two callers are updated
+**Raised:** 25 Sep 2026
+**Blocks:** `graph/derived.py::_shared_concept_documents` (now produces `link_candidates` proposals instead of direct edges, per the plan) currently never fires in a real sync, since its two real callers (`graph/jira_pipeline.py`, `graph/resolver.py`) don't pass the new optional `ledger` parameter yet — it silently no-ops (logged) rather than crashing.
+**Question:** small, mechanical follow-up needed: thread a real `ConnectorLedger` through those two call sites so this path actually activates. Worth doing now as a quick fix, or fine to leave dormant until someone next touches those files?
+**Assumption made for now:** left as a documented no-op — safe (never silently reverts to the old direct-edge behavior), just inactive.
+
+## 6.2 — Laya's `relation_type` vocabulary only partially maps onto Neuron's real relations
+**Raised:** 25 Sep 2026
+**Blocks:** nothing broken — real, verified Laya calls (`laya.Agent(...).predict_batch(...)`, confirmed live against the checkpoint) work correctly, but only 4 of Laya's 9 trained non-"none" labels (`owns`, `part_of`, `references`, `blocks`) map to a real Neuron relation; the rest (mostly Person-shaped labels that can't apply here anyway, since `Person` is hub-excluded) always yield "none" → no candidate written.
+**Question:** is this mapping worth revisiting once real candidates are observed from production data, or is the conservative "map only what clearly translates" approach fine long-term?
+**Assumption made for now:** conservative mapping, documented in `graph/link_candidates.py::_RELATION_MAP`, easy one-line change per label.
+
+## 6.2 — Semantic-candidate similarity threshold (0.65) and provenance shape (union vs. shared-only)
+**Raised:** 25 Sep 2026
+**Blocks:** nothing — both are working, reversible defaults.
+**Question:** `find_semantic_candidates` defaults to `similarity_threshold=0.65` (the plan gives exact numbers for the resolution ladder's 0.90/0.75 rungs but not this one) — a real but loose review-queue filter, looser than the merge-adjacent rungs since nothing here auto-merges. Separately, `apply_approved_link_candidate`'s provenance is the **union** of both endpoints' `MENTIONED_IN` records (the plan's "provenance = both nodes' records" is ambiguous between union and shared-only intersection). Are both defaults right, or was shared-only intersection intended for provenance?
+**Assumption made for now:** 0.65 threshold, union provenance — both documented in code, one-line changes if wrong.
+
+## 6.4 — Node-level "reinforced" definition for survivor selection
+**Raised:** 25 Sep 2026
+**Blocks:** nothing — real, tested, working.
+**Question:** the plan says merge survivor = "most reinforced, then oldest" but `reinforce_count` (§5.7) is defined per fact-edge, not per node. The duplicate collector sums `reinforce_count` across every live fact edge touching a node (excluding `MENTIONED_IN`) as the node-level proxy. Reasonable, or was a different aggregation intended (e.g. count of distinct `MENTIONED_IN` source records instead)?
+**Assumption made for now:** sum of live-edge `reinforce_count`, documented in `graph/duplicate_collector.py::_node_reinforcement`.
+
 ## 2.1 — `select_final`'s token-budget cap has no data to work with yet
 **Raised:** 25 Sep 2026
 **Blocks:** nothing yet (Phase 2.4 tuning, not started) — a heads-up for whoever wires Phase 2.2.
