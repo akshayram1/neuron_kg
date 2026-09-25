@@ -37,3 +37,12 @@ Format:
 
 So the `eval/results.md` baseline numbers the harness agent (Phase 0.1) produces against `nilus` and `less_token` right now will be near-meaningless (near-zero recall) — not because of a retrieval bug, but because the expected data isn't loaded in this environment. **What I need from you:** do you have the real `nilus`/`less_token` ingestion source (a sync job to rerun, a different backup file, or a different FalkorDB instance/port this was meant to point at) so we can reload the real data before trusting Phase 0's baseline? Until then I'll record the harness's numbers as "environment data missing" rather than as real regression baselines, and Phase 1+ comparisons will need to be re-run once real data is loaded.
 **Assumption made for now:** none taken beyond recording the discrepancy — no data was modified, no graph was cleared or restored.
+
+**Confirmed independently, and it's wider than nilus/less_token (25 Sep, after merging the harness agent's Phase 0.1/0.5 work):**
+- All three real runs (`nilus`, `less_token`, plus a check of the no-flag default graph that `argus_golden.jsonl` targets) hit live FalkorDB/Qdrant/OpenAI for real and scored **0.0000 on every metric** — the harness itself works correctly (real latency, real token counts, real $ figures logged in `eval/results.md`), the zeros are a data problem, not a code bug.
+- Default graph `neuron`: 0 nodes in FalkorDB; its Qdrant collection `neuron_entities` has only **32 points** vs `cost.md`'s original **1,009**.
+- `neuron__less_token`: 0 nodes in FalkorDB, but Qdrant `neuron_entities__less_token` has **425 points** — vectors exist with no matching graph nodes.
+- `neuron__nilus`: 232 nodes of the foreign `Entity`/`Source`/`Context` schema in FalkorDB, and Qdrant `neuron_entities__nilus` has **1,682 points** — also mismatched with what 232 foreign-schema nodes would produce.
+- There's also a `neuron_entities__prof` Qdrant collection (8 points) not tied to any golden set I can find — unexplained, flagging in case it's meaningful.
+
+This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment across at least three graphs (default, `nilus`, `less_token`), not one bad graph. I have not touched any data — no clear, no restore, no reload — pending your direction, and any fix, once you tell me what the correct source is, should stay scoped to the one graph/collection pair being fixed per [[feedback_scoped_cleanup]], not a blanket reset.
