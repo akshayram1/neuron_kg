@@ -66,6 +66,34 @@ This reads as a shared, partially-corrupted local FalkorDB + Qdrant environment 
 
 ---
 
+## Phase 4 — RESOLUTION LADDER LANDED: real behavior changes to communicate
+**Raised:** 25 Sep 2026
+**Not a question — a heads-up.** The full §4.0–§4.8 entity-resolution ladder is merged (`graph/semantic_pass.py`). Three real, deliberate behavior changes going forward, all plan-mandated, none migrated against existing graph data:
+1. **System/Term/Decision get new uid schemes.** System/Term are now namespace-scoped (`make_uid(label, namespace_uid, normalized_name)`); Decision is now record+statement-scoped (`make_uid("Decision", record_key, normalized_statement)`), not name-scoped. Re-ingesting old content will MERGE onto a *different* uid than before for these three labels — existing nodes minted under the old global-name scheme won't be found by rung 2 and will look "new" until re-ingested or manually aliased. No backfill was attempted.
+2. **Generic Term/System mentions now silently drop** (`DropReason.GENERIC_MENTION`) where they used to mint a node — a ledger-backed stoplist (`data`, `pipeline`, `source`, `table`, `service`, `api`, `system`, `config`, `batch source`, `source_table`, editable via `ledger.add_entity_stoplist_term`/`remove_stoplist_term`), plus a length/genericity floor.
+3. **A cross-run Decision reference by bare name can now fail closed** (`ENDPOINT_UNRESOLVED`) if it wasn't also re-extracted as an entity within the same run — an expected consequence of Decision's identity no longer being name-only (see the "Decision fact-endpoint resolution" query below for the fallback that softens this *within* one run).
+**Also new, currently inert:** a polarity-vetoed Decision merge now creates a `pending` review (`polarity_conflict_candidate`) via the §3.0 queue — auditable, but nothing consumes it yet (Phase 5 doesn't exist).
+
+## 4.2 — Rungs 4/5 (vector candidates) will return nothing against real data until the namespace-payload gap closes
+**Raised:** 25 Sep 2026
+**Blocks:** nothing broken — the ladder still works, just always falls through to `resolved_by="new"` for System/Term/Decision today, which happens to be exactly what §4.3's "under-merge by default" policy wants anyway. Flagging so it's not mistaken for a bug later.
+**Question:** same root cause as the earlier-flagged namespace gap in `vector_store.search_above` — no write path populates `namespace_uid` in the vector payload yet (`graph/jira_pipeline.py`, `graph/semantic_pass.py`'s own embedding writes, `graph/embed_batch.py`, `scripts/rebuild_vectors.py`). Until one of those is updated, rungs 4/5 query correctly but always come back empty on real data. Worth prioritizing that follow-up once Phase 4 is otherwise validated?
+**Assumption made for now:** implemented rungs 4/5 to pass `namespace_uid` anyway (correct, forward-compatible), rather than omitting the filter as a workaround.
+
+## 4.0 — Decision fact-endpoint resolution needs a name-based fallback within a run
+**Raised:** 25 Sep 2026
+**Blocks:** nothing broken — a narrow, documented edge case.
+**Question:** `ExtractedFact` only ever carries a bare `subject_name`/`object_name`, never a Decision's full `statement`, so a fact referencing a Decision by name can't reconstruct the new record+statement-scoped identity key. The merged code adds a supplementary run-owned `decision_name_index: dict[name_norm, uid]` as a fallback, with last-write-wins if two different Decision statements share a name within one run. Is that fallback's behavior (silently picking the most-recently-resolved Decision with that name) acceptable, or should an ambiguous same-name-different-statement case be handled differently (e.g. logged, or left unresolved)?
+**Assumption made for now:** last-write-wins, documented in code.
+
+## 4.8 — Alias table write-side (review approval → alias) not wired
+**Raised:** 25 Sep 2026
+**Blocks:** the alias table (rung 3) is currently read-only in practice — nothing populates it yet except manual entries.
+**Question:** the plan says aliases come from "approved `POSSIBLY_SAME_AS` reviews, approved Phase 6.4 pairwise merges, and manual entries." The natural place for the first ("approving a review calls `ledger.add_entity_alias`") is `demo_ui/backend/review_routes.py`'s approval endpoint — a small, generic addition since it applies across review types, not specific to `graph/semantic_pass.py`. Want this wired now as a quick follow-up, or held until there's a real producer of `possibly_same_as` reviews (which doesn't exist yet either, since that's also blocked on Laya)?
+**Assumption made for now:** left unwired — read-side (rung 3 lookup) works, write-side doesn't yet.
+
+---
+
 ## 3.0 — Review queue: rejection-identity shape is caller-supplied and unverified against a real caller
 **Raised:** 25 Sep 2026
 **Blocks:** nothing merged is broken (290 passed/12 skipped) — a design choice worth a sanity check once real callers exist.
