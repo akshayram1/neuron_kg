@@ -373,6 +373,11 @@ class PostgresStore:
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()",
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS stale_at TIMESTAMPTZ",
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS stale_reason TEXT",
+            # No write path populates this yet (see graph/vector_store.py's
+            # search_above docstring) -- the column exists so the namespace
+            # filter is real once a follow-up wires it into upsert_vectors's
+            # callers, and existing rows read back NULL (no namespace).
+            "ALTER TABLE entity_embeddings ADD COLUMN IF NOT EXISTS namespace_uid TEXT",
         ]
         # A pristine database does not have a ``vector`` type to register yet.
         # Create the extension using a raw psycopg connection, commit it, and
@@ -1058,19 +1063,38 @@ class PostgresStore:
     def vector_search(
         self, collection: str, embedding: list[float], *, label: str | None,
         limit: int, channel: str,
+        min_similarity: float | None = None, max_similarity: float | None = None,
+        namespace_uid: str | None = None,
     ) -> list[tuple[str, float]]:
+        """`min_similarity`/`max_similarity`/`namespace_uid` back
+        `graph.vector_store.search_above` (25-plan.md §4.2's threshold,
+        multi-candidate ladder rungs). All three default to None, which
+        reproduces the exact query `search()`'s plain top-k caller has
+        always run -- this is an additive extension, not a behavior change,
+        for callers that don't pass them."""
         column = "name_embedding" if channel == "name" else "content_embedding"
-        label_clause = "AND label = %s" if label else ""
+        clauses = []
         params: list[Any] = [embedding, collection]
         if label:
+            clauses.append("AND label = %s")
             params.append(label)
+        if namespace_uid is not None:
+            clauses.append("AND namespace_uid = %s")
+            params.append(namespace_uid)
+        if min_similarity is not None:
+            clauses.append(f"AND 1 - ({column} <=> %s::vector) >= %s")
+            params.extend([embedding, min_similarity])
+        if max_similarity is not None:
+            clauses.append(f"AND 1 - ({column} <=> %s::vector) < %s")
+            params.extend([embedding, max_similarity])
+        extra_clause = " ".join(clauses)
         params.extend([embedding, limit])
         with self.connect() as connection:
             rows = connection.execute(
                 f"""
                 SELECT uid, 1 - ({column} <=> %s::vector) AS similarity
                 FROM entity_embeddings
-                WHERE collection = %s {label_clause}
+                WHERE collection = %s {extra_clause}
                 ORDER BY {column} <=> %s::vector
                 LIMIT %s
                 """,
