@@ -1,6 +1,6 @@
-import { AlertTriangle, BookOpenText, BrainCircuit, Database, Download, FileText, FlaskConical, GitBranch, Github, GitFork, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
+import { AlertTriangle, BookOpenText, BrainCircuit, Database, Download, FileText, FlaskConical, GitBranch, Github, GitFork, GitMerge, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat, setReranker } from "./api";
+import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat, setReranker, verifyChatAnswer } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import EntityPanel from "./components/EntityPanel";
 import OntologyPanel from "./components/OntologyPanel";
@@ -11,6 +11,7 @@ import GitHubPanel from "./components/GitHubPanel";
 import JiraPanel from "./components/JiraPanel";
 import NotionPanel from "./components/NotionPanel";
 import StoryDemoPanel from "./components/StoryDemoPanel";
+import BridgePanel from "./components/BridgePanel";
 import type { AppConfig, ConversationMessage, GitHubSource, GraphInfo, GraphPayload, GraphSelection, Highlight, IngestionTokenUsage, NotionConnection, OAuthConnectorSource, TokenUsage } from "./types";
 
 const EMPTY_HIGHLIGHT: Highlight = { nodes: [], edges: [] };
@@ -119,6 +120,7 @@ export default function App() {
   const [bitbucketOpen, setBitbucketOpen] = useState(false);
   const [notionOpen, setNotionOpen] = useState(false);
   const [storyOpen, setStoryOpen] = useState(false);
+  const [bridgeOpen, setBridgeOpen] = useState(false);
   const [jiraSources, setJiraSources] = useState<OAuthConnectorSource[]>([]);
   const [githubSources, setGitHubSources] = useState<GitHubSource[]>([]);
   const [bitbucketSources, setBitbucketSources] = useState<OAuthConnectorSource[]>([]);
@@ -337,6 +339,9 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <button className="notion-trigger" onClick={() => setBridgeOpen(true)}>
+            <GitMerge size={14} /> Review
+          </button>
           <button className={`notion-trigger ${graphName.startsWith("story-") ? "connected" : ""}`} onClick={() => setStoryOpen(true)}>
             <FlaskConical size={14} /> Story demo
           </button>
@@ -368,6 +373,10 @@ export default function App() {
           activeHighlight={highlight}
           onSend={(message) => void askAgent(message)}
           onClear={clearChat}
+          onVerify={async (result) => {
+            const response = await verifyChatAnswer(graphName, result.support?.citedNodeUids ?? []);
+            return response.candidateIds.length;
+          }}
           reranker={config?.reranker ?? null}
           rerankerBusy={rerankerBusy}
           onToggleReranker={(enabled) => void toggleReranker(enabled)}
@@ -533,6 +542,12 @@ export default function App() {
           await refreshGraphs();
           selectGraph("default");
         }}
+      />
+      <BridgePanel
+        open={bridgeOpen}
+        graphName={graphName}
+        onClose={() => setBridgeOpen(false)}
+        onChanged={() => void loadGraph()}
       />
     </main>
   );

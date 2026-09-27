@@ -50,7 +50,7 @@ def rebuild(*, recreate: bool, graph_name: str = multigraph.DEFAULT_GRAPH_NAME) 
     for label in VECTOR_LABELS:
         rows = graph.query(
             f"MATCH (n:{label}) WHERE n.search_text IS NOT NULL AND n.search_text <> '' "
-            "RETURN n.uid, n.search_text, n.name"
+            "RETURN n.uid, n.search_text, n.name, n.namespace_uid"
         ).result_set
         logger.info("%s: %d nodes with text", label, len(rows))
 
@@ -75,6 +75,7 @@ def rebuild(*, recreate: bool, graph_name: str = multigraph.DEFAULT_GRAPH_NAME) 
                         "name_embedding": vectors[len(batch) + index].embedding,
                         "embedded_text": texts[index][:400],
                         "embedded_model": vector_store.EMBEDDING_MODEL,
+                        "namespace_uid": row[3],
                     }
                     for index, row in enumerate(batch)
                 ],

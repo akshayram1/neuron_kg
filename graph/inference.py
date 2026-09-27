@@ -37,6 +37,7 @@ from falkordb import Graph
 
 from graph import writer as w
 from graph.axioms import AxiomSet, DEFAULT_AXIOMS
+from graph.fact_predicates import live_fact_cypher
 
 logger = logging.getLogger("neuron.inference")
 
@@ -239,7 +240,7 @@ def read_asserted(graph: Graph, relation: str) -> list[Edge]:
     a run cannot feed on its own previous output."""
     rows = graph.query(
         f"MATCH (a)-[r:{relation}]->(b) "
-        "WHERE r.invalid_at IS NULL AND coalesce(r.derived, false) = false "
+        f"WHERE {live_fact_cypher('r')} AND coalesce(r.derived, false) = false "
         "RETURN a.uid, b.uid, labels(a)[0], labels(b)[0], r.fact_uid, "
         "       r.valid_at, r.invalid_at, r.confidence, r.source_record_keys"
     ).result_set

@@ -16,7 +16,8 @@ DESIGN RULE — the graph is the single source of truth; this collection is a
 rebuildable projection of it.
 
 That rule is why this module stores the absolute minimum per point:
-`uid`, `label`, and the vector. No ACL, no provider, no `deleted_at`. Every
+`uid`, `label`, the identity `namespace_uid`, and the vector. No ACL, no
+provider, no `deleted_at`. Every
 authorization and lifecycle filter stays in FalkorDB, where the truth lives,
 and is applied to the uids Qdrant returns (callers over-fetch to absorb the
 post-filter recall loss). Keeping metadata out of Qdrant means almost nothing
@@ -154,10 +155,11 @@ def ensure_collection(
             )
         ),
     )
-    # `label` is the only field we ever filter on inside Qdrant; everything
-    # else is filtered in the graph.
     client.create_payload_index(
         collection_name=collection, field_name="label", field_schema="keyword"
+    )
+    client.create_payload_index(
+        collection_name=collection, field_name="namespace_uid", field_schema="keyword"
     )
     logger.info("created Qdrant collection %s (named vectors)", collection)
 
@@ -166,7 +168,7 @@ def upsert_vectors(
     client: QdrantClient | PostgresVectorClient,
     rows: list[dict[str, Any]], collection: str = COLLECTION,
 ) -> None:
-    """rows: {uid, label, embedding, name_embedding, embedded_text?}.
+    """rows: {uid, label, embedding, name_embedding, namespace_uid?, embedded_text?}.
     `uid` is already a uuid5 string, which Qdrant accepts directly as a point
     id — so a re-upsert of the same entity overwrites in place rather than
     duplicating, matching the graph's MERGE semantics.
@@ -196,6 +198,7 @@ def upsert_vectors(
                 },
                 payload={
                     "label": row["label"], "uid": row["uid"],
+                    **({"namespace_uid": row["namespace_uid"]} if row.get("namespace_uid") else {}),
                     **({"embedded_text": row["embedded_text"]} if row.get("embedded_text") else {}),
                     "embedded_model": row.get("embedded_model") or EMBEDDING_MODEL,
                 },
@@ -293,18 +296,10 @@ def search_above(
     explained in `find_similar_uid`'s docstring; this function uses the same
     scale, just without collapsing to top-1.
 
-    NAMESPACE GAP (flagged, not fixed here): `namespace_uid` filters on a
-    Qdrant payload key / Postgres `entity_embeddings.namespace_uid` column
-    that no write path populates yet. `upsert_vectors`'s payload today is
-    only `label`/`uid`/`embedded_text`/`embedded_model` -- see its docstring
-    -- so passing `namespace_uid` here is structurally correct (it narrows
-    results exactly as intended when a payload/row does carry the field, see
-    tests/test_vector_store.py) but will currently match nothing on data
-    written through the real pipelines, since none of them set it. Wiring
-    real values through means touching `upsert_vectors`'s callers
-    (`graph/jira_pipeline.py`, `graph/semantic_pass.py`,
-    `graph/embed_batch.py`, `scripts/rebuild_vectors.py`) -- out of scope
-    here; left as a follow-up.
+    `namespace_uid` is persisted by `upsert_vectors` and the semantic entity
+    write path. Older projections need one rebuild before this filter can see
+    them; missing namespace payloads fail closed rather than risking a
+    cross-namespace merge.
     """
     if isinstance(client, PostgresVectorClient):
         try:

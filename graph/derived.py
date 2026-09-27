@@ -14,6 +14,7 @@ from falkordb import Graph
 
 from connectors.core.ledger import ConnectorLedger
 from graph import writer as w
+from graph.fact_predicates import live_fact_cypher
 
 logger = logging.getLogger("neuron.derived")
 
@@ -30,15 +31,12 @@ def materialize_around(
 ) -> int:
     """Recompute derived edges that touch `seed_uid` (or its parent/children).
 
-    `ledger` is new, optional, and keyword-only -- threaded through to
+    `ledger` is optional and keyword-only -- threaded through to
     `_shared_concept_documents` only (25-plan.md §6.2 moved that one path
     from writing a direct edge to proposing a `link_candidates` row; see
     that function's docstring for the real behavior change). Existing
-    callers (`graph/jira_pipeline.py`, `graph/resolver.py`) do not pass a
-    ledger yet and are out of this task's scope to update -- so they keep
-    calling this exactly as before, and `_shared_concept_documents` simply
-    no-ops (logged, not a crash) until one of those call sites is updated
-    to pass a real `ConnectorLedger`. See QUERIES.md.
+    production callers (`graph/jira_pipeline.py`, `graph/resolver.py`) pass
+    their graph-scoped ledger. It remains optional for focused rule tests.
     """
     written = 0
     written += _lift_through_parent(graph, seed_uid, record_key, "IMPLEMENTS", PARENT_IMPLEMENTS)
@@ -55,9 +53,9 @@ def _lift_through_parent(
     query = f"""
         MATCH (child {{uid: $child}})-[:PARENT_OF]->(parent {{uid: $parent}})
         MATCH (impl)-[r:{relation}]->(child)
-        WHERE r.invalid_at IS NULL AND coalesce(r.derived, false) = false
+        WHERE {live_fact_cypher('r')} AND coalesce(r.derived, false) = false
         OPTIONAL MATCH (impl)-[existing:{relation}]->(parent)
-        WHERE existing.invalid_at IS NULL AND coalesce(existing.derived, false) = false
+        WHERE {live_fact_cypher('existing')} AND coalesce(existing.derived, false) = false
         WITH impl, parent, child, r, existing
         WHERE existing IS NULL
         RETURN impl.uid, labels(impl)[0], parent.uid, labels(parent)[0],
@@ -104,14 +102,8 @@ def _shared_concept_documents(
     `graph/link_candidates.py::find_two_hop_candidates` runs), so it keeps
     its own, more descriptive rule name.
 
-    `ledger` is optional, keyword-only: when `None` (every existing caller
-    today -- see `materialize_around`'s docstring), this is a no-op
-    (logged), not a crash, since this function has no way to construct its
-    own `ConnectorLedger` (every other call site in this codebase
-    constructs one from a graph-specific `ledger_path` the caller owns, not
-    a global default) and updating `graph/jira_pipeline.py`/
-    `graph/resolver.py` to pass one is out of this task's scope (flagged in
-    QUERIES.md).
+    `ledger` is optional, keyword-only: when `None` (mainly focused tests),
+    this is a logged no-op rather than a crash.
 
     Returns the number of candidates created/found this call (idempotent:
     `create_link_candidate` resolves to the same row for the same
@@ -127,15 +119,15 @@ def _shared_concept_documents(
         )
         return 0
     rows = graph.query(
-        """
+        f"""
         MATCH (concept) WHERE concept:Term OR concept:System
         MATCH (doc:Document)-[r1]->(concept)
-        WHERE r1.invalid_at IS NULL AND type(r1) <> 'MENTIONED_IN'
+        WHERE {live_fact_cypher('r1')} AND type(r1) <> 'MENTIONED_IN'
         MATCH (wi:WorkItem)-[r2]->(concept)
-        WHERE r2.invalid_at IS NULL AND type(r2) <> 'MENTIONED_IN'
+        WHERE {live_fact_cypher('r2')} AND type(r2) <> 'MENTIONED_IN'
           AND (doc.uid = $uid OR wi.uid = $uid OR concept.uid = $uid)
         OPTIONAL MATCH (doc)-[existing:DOCUMENTS]->(wi)
-        WHERE existing.invalid_at IS NULL AND coalesce(existing.derived, false) = false
+        WHERE {live_fact_cypher('existing')} AND coalesce(existing.derived, false) = false
         WITH doc, wi, concept, r1, r2, existing
         WHERE existing IS NULL
         RETURN DISTINCT doc.uid, wi.uid
@@ -161,14 +153,14 @@ def _document_via_pr(graph: Graph, seed_uid: str, record_key: str) -> int:
     Document↔ticket edge chat already knows how to cite.
     """
     rows = graph.query(
-        """
+        f"""
         MATCH (doc:Document)-[r1:DOCUMENTS]->(pr:PullRequest)
-        WHERE r1.invalid_at IS NULL AND coalesce(r1.derived, false) = false
+        WHERE {live_fact_cypher('r1')} AND coalesce(r1.derived, false) = false
         MATCH (pr)-[r2:IMPLEMENTS]->(wi:WorkItem)
-        WHERE r2.invalid_at IS NULL AND coalesce(r2.derived, false) = false
+        WHERE {live_fact_cypher('r2')} AND coalesce(r2.derived, false) = false
           AND (doc.uid = $uid OR pr.uid = $uid OR wi.uid = $uid)
         OPTIONAL MATCH (doc)-[existing:DOCUMENTS]->(wi)
-        WHERE existing.invalid_at IS NULL AND coalesce(existing.derived, false) = false
+        WHERE {live_fact_cypher('existing')} AND coalesce(existing.derived, false) = false
         WITH doc, pr, wi, r1, r2, existing
         WHERE existing IS NULL
         RETURN doc.uid, 'Document', wi.uid, 'WorkItem',

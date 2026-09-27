@@ -270,6 +270,7 @@ class DropReason(StrEnum):
     ENTITY_NO_CONNECTING_FACT = "entity_no_connecting_fact"
     DIRECTION_CORRECTED = "direction_corrected"
     GENERIC_MENTION = "generic_mention"
+    LAYA_TRIAGE_SKIP = "laya_triage_skip"
 
 
 @dataclass(frozen=True)
@@ -415,6 +416,16 @@ class ConnectorLedger:
                 )
             if "resolution_reason" not in chunk_columns:
                 connection.execute("ALTER TABLE source_chunks ADD COLUMN resolution_reason TEXT")
+            if "triage_type" not in chunk_columns:
+                connection.execute("ALTER TABLE source_chunks ADD COLUMN triage_type TEXT")
+            if "triage_durable_p" not in chunk_columns:
+                connection.execute("ALTER TABLE source_chunks ADD COLUMN triage_durable_p REAL")
+            if "triage_model" not in chunk_columns:
+                connection.execute("ALTER TABLE source_chunks ADD COLUMN triage_model TEXT")
+            if "triage_facts_written" not in chunk_columns:
+                connection.execute(
+                    "ALTER TABLE source_chunks ADD COLUMN triage_facts_written INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_source_chunks_status "
                 "ON source_chunks(status, committed_at)"
@@ -992,6 +1003,44 @@ class ConnectorLedger:
                 "UPDATE source_chunks SET status = ?, committed_at = ? WHERE record_key = ? AND chunk_id = ?",
                 (str(status), datetime.now(UTC).isoformat(), record_key, chunk_id),
             )
+
+    def record_triage(
+        self, record_key: str, chunk_id: str, chunk_type: str,
+        durable_probability: float, model: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE source_chunks SET triage_type = ?, triage_durable_p = ?, triage_model = ? "
+                "WHERE record_key = ? AND chunk_id = ?",
+                (chunk_type, durable_probability, model, record_key, chunk_id),
+            )
+
+    def record_triage_yield(self, record_key: str, chunk_id: str, facts_written: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE source_chunks SET triage_facts_written = ? "
+                "WHERE record_key = ? AND chunk_id = ?",
+                (facts_written, record_key, chunk_id),
+            )
+
+    def triage_report(self) -> dict[str, int]:
+        """Shadow/enforce summary, including the measured enforcement cost."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS scored, "
+                "SUM(CASE WHEN triage_type IN ('noise','scheduling') "
+                " OR (triage_type = 'discussion' AND triage_durable_p < 0.3) "
+                " OR triage_durable_p < 0.15 THEN 1 ELSE 0 END) AS would_skip, "
+                "SUM(CASE WHEN triage_type IN ('noise','scheduling') "
+                " OR (triage_type = 'discussion' AND triage_durable_p < 0.3) "
+                " OR triage_durable_p < 0.15 THEN triage_facts_written ELSE 0 END) AS lost_facts "
+                "FROM source_chunks WHERE triage_type IS NOT NULL"
+            ).fetchone()
+        return {
+            "scored": int(row["scored"] or 0),
+            "would_skip": int(row["would_skip"] or 0),
+            "lost_facts": int(row["lost_facts"] or 0),
+        }
 
     def record_fully_processed(self, record_key: str) -> bool:
         """True once every chunk saved for this record has status='done' (or
@@ -1716,6 +1765,14 @@ class ConnectorLedger:
             for r in rows
         ]
 
+    def latest_resolution_stats(self) -> list[ResolutionStat]:
+        """All resolution rows from the most recently recorded sync run."""
+        with self._connect() as connection:
+            latest = connection.execute(
+                "SELECT run_id FROM resolution_stats ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+        return self.resolution_stats_for_run(str(latest["run_id"])) if latest else []
+
     # ------------------------------------------------------------ hygiene runs
 
     @staticmethod
@@ -1769,6 +1826,23 @@ class ConnectorLedger:
                 "SELECT * FROM hygiene_runs WHERE graph_name = ? AND label = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (graph_name, label, limit),
+            ).fetchall()
+        return [self._hygiene_run_row(row) for row in rows]
+
+    def latest_hygiene_snapshot(self, *, graph_name: str = "default") -> list[HygieneRun]:
+        """Every label measured in the newest hygiene run for one graph."""
+        with self._connect() as connection:
+            latest = connection.execute(
+                "SELECT run_id FROM hygiene_runs WHERE graph_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (graph_name,),
+            ).fetchone()
+            if latest is None:
+                return []
+            rows = connection.execute(
+                "SELECT * FROM hygiene_runs WHERE graph_name = ? AND run_id = ? "
+                "ORDER BY label",
+                (graph_name, latest["run_id"]),
             ).fetchall()
         return [self._hygiene_run_row(row) for row in rows]
 
@@ -1936,3 +2010,12 @@ class ConnectorLedger:
                 (uid,),
             ).fetchone()
         return str(row["survivor_uid"]) if row else None
+
+    def list_merge_traces(self, *, limit: int = 100) -> list[MergeTrace]:
+        """Newest executed merges for the dashboard and audit UI."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM merge_trace ORDER BY merged_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._merge_trace_row(row) for row in rows]

@@ -14,13 +14,11 @@ new caller of them, never an edit to them.
 Two independent things live here, on purpose kept apart:
 
 1. `classify_fact_update` / `_map_laya_kind_to_resolve_kind` — turning new
-   evidence plus an existing fact into one of six conflict kinds. This is
-   the one part of §5.2 that needs a real Laya call, which this task's
-   sandbox cannot make (see `classify_fact_update`'s docstring).
+   evidence plus an existing fact into one of six conflict kinds through the
+   real trained Laya checkpoint.
 2. `resolve_text_fact` — the state machine that decides what to DO with an
    already-classified `kind`. This needs no Laya dependency at all, which is
-   why it is fully unit-testable (see tests/test_resolve_text_fact.py) even
-   though (1) is not implemented for real yet.
+   why it is fully unit-testable (see tests/test_resolve_text_fact.py).
 
 `find_conflict_candidates` is the third piece: the blocking (not
 graph-wide) Cypher query that finds `old` candidates for `resolve_text_fact`
@@ -39,6 +37,8 @@ from falkordb import Graph
 from connectors.core.ledger import ReviewState
 from graph import writer as w
 from graph.axioms import DEFAULT_AXIOMS, AxiomSet
+from graph.fact_update_classifier import LayaFactUpdateClassifier
+from graph.fact_predicates import live_fact_cypher
 from graph.time_axis import parse_iso
 
 logger = logging.getLogger("neuron.resolve_text_fact")
@@ -132,6 +132,10 @@ class NewFact:
     fact_uid: str | None = None
     pinned: bool = False
     decay_class: str | None = None
+    valid_at_basis: str | None = None
+    ended_unknown: bool = False
+    adopted_batch: str | None = None
+    direction_corrected: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +150,10 @@ def classify_fact_update(
     existing_valid_from: str | None,
     new_evidence: str,
     new_timestamp: str | None,
+    *,
+    classifier: LayaFactUpdateClassifier | None = None,
 ) -> str:
-    """Laya `fact_update` classification -- PLACEHOLDER, not implemented.
+    """Classify new evidence with Laya's trained `fact_update` head.
 
     Same shape as the trained question in the sibling `personal_exp/laya`
     project's checkpoint (`ingest/schema.py`'s `QUESTIONS["fact_update"]`):
@@ -156,48 +162,17 @@ def classify_fact_update(
     new_timestamp}`, answer one of `duplicate` / `updates` / `contradicts`
     / `extends` / `unrelated`.
 
-    Why this raises instead of guessing: the `laya` package is installed in
-    the repo owner's live working environment (via `pyproject.toml`, which
-    this task is not allowed to touch), but this task runs in an isolated
-    worktree that does not have it, and cannot add it. There is no way to
-    make a real Laya call from here. Rather than fabricate a fake "working"
-    classifier (which would either always guess the same label, silently
-    wrong most of the time, or require reverse-engineering behavior no one
-    has verified), this raises `NotImplementedError` with exactly what a
-    real implementation needs -- same choice already made for
-    `graph/rerank.py`'s `LayaReranker.score()` (see QUERIES.md "2.1 — Laya
-    reranker is a stub").
-
-    A real implementation needs:
-      1. The `laya` package importable (a packaging decision -- vendored
-         dependency vs. sidecar service -- still open per QUERIES.md).
-      2. `LAYA_MODEL_DIR` (or equivalent) pointing at the trained
-         `fact_update` checkpoint (`personal_exp/laya/model/laya-ingest/`).
-      3. `laya.Agent(MODEL_DIR, device=...).predict(state)` called with
-         exactly the state dict shape documented above, against the
-         `fact_update` question.
-      4. Its five-way output passed through `_map_laya_kind_to_resolve_kind`
-         before it reaches `resolve_text_fact` (which expects six kinds,
-         one of which -- `corrects` -- Laya's current trained schema cannot
-         produce; see that function's docstring).
-
-    Trade-off, documented per this task's instructions: raising here (rather
-    than a conservative always-`"unrelated"` fallback) means a caller that
-    invokes this today gets a loud, immediate crash instead of a silently
-    wrong classification. A caller that needs to keep running with no real
-    Laya available should catch `NotImplementedError` itself and decide its
-    own fallback (e.g. `"unrelated"`, which never mutates anything) rather
-    than have that choice made invisibly inside this function.
+    The checkpoint's `updates` label maps conservatively to `newer_state`;
+    only an explicit correction review can choose `corrects`, because the
+    trained vocabulary does not distinguish those meanings.
     """
-    raise NotImplementedError(
-        "classify_fact_update: no real Laya `fact_update` integration exists in "
-        "this task's sandbox. See this function's docstring for exactly what a "
-        "real implementation needs (the `laya` package, LAYA_MODEL_DIR, and the "
-        "{'existing_fact', 'existing_valid_from', 'new_evidence', 'new_timestamp'} "
-        "state shape). A caller that must not crash should catch this and choose "
-        "its own conservative fallback (e.g. 'unrelated') rather than rely on a "
-        "guessed-at implementation here."
-    )
+    choice, _confidence = (classifier or LayaFactUpdateClassifier()).classify({
+        "existing_fact": existing_fact,
+        "existing_valid_from": existing_valid_from,
+        "new_evidence": new_evidence,
+        "new_timestamp": new_timestamp,
+    })
+    return _map_laya_kind_to_resolve_kind(choice)
 
 
 # Laya's real trained `fact_update` schema has five options; `resolve_text_fact`
@@ -402,7 +377,7 @@ def find_conflict_candidates(
     _collect(
         f"""
         MATCH (s)-[r:{w._label(rel_type)}]->(o {{uid: $object_uid}})
-        WHERE r.invalid_at IS NULL AND r.fact_uid <> $new_fact_uid
+        WHERE {live_fact_cypher('r')} AND r.fact_uid <> $new_fact_uid
         {return_clause}
         """,
         {"object_uid": object_uid, "new_fact_uid": new_fact_uid},
@@ -413,7 +388,7 @@ def find_conflict_candidates(
         _collect(
             f"""
             MATCH (s {{uid: $subject_uid}})-[r:{w._label(rel_type)}]->(o)
-            WHERE r.invalid_at IS NULL AND r.fact_uid <> $new_fact_uid
+            WHERE {live_fact_cypher('r')} AND r.fact_uid <> $new_fact_uid
             {return_clause}
             """,
             {"subject_uid": subject_uid, "new_fact_uid": new_fact_uid},
@@ -422,7 +397,7 @@ def find_conflict_candidates(
     _collect(
         f"""
         MATCH (s:Decision)-[r:APPLIES_TO]->(o {{uid: $object_uid}})
-        WHERE r.invalid_at IS NULL AND r.fact_uid <> $new_fact_uid
+        WHERE {live_fact_cypher('r')} AND r.fact_uid <> $new_fact_uid
         {return_clause}
         """,
         {"object_uid": object_uid, "new_fact_uid": new_fact_uid},
@@ -456,6 +431,10 @@ def _write_incoming_fact(graph: Graph, new: NewFact, *, projection_status: str =
         "evidence": new.evidence, "extraction_method": new.extraction_method or "llm",
         "confidence": new.confidence, "valid_at": new.valid_at, "fact_uid": fact_uid,
         "pinned": new.pinned, "decay_class": new.decay_class,
+        "valid_at_basis": new.valid_at_basis,
+        "ended_unknown": new.ended_unknown,
+        "adopted_batch": new.adopted_batch,
+        "direction_corrected": new.direction_corrected,
         "projection_status": projection_status,
     }
     w.upsert_fact_edges(graph, new.rel_type, new.from_label, new.to_label, [row], revive=False)
@@ -568,10 +547,8 @@ def resolve_text_fact(
 
     Returns a dict describing what happened: `{"action": ..., "old_fact_uid":
     ..., "new_fact_uid": ...}`, plus `"mode"`/`"review_id"` for the three
-    gated branches. No caller in this codebase consumes this yet (wiring
-    into `_write_extraction` is out of scope -- `graph/semantic_pass.py` is
-    off-limits to this task); the return shape is designed for that future
-    caller to log/assert against.
+    gated branches. `graph.semantic_pass._write_extraction` consumes this
+    after bounded conflict discovery and before any text-fact write.
     """
     mode = mode or os.getenv("NEURON_FACT_UPDATE_MODE", "suggest")
     if mode not in _VALID_MODES:
@@ -581,8 +558,8 @@ def resolve_text_fact(
             "resolve_text_fact: NEURON_FACT_UPDATE_MODE=auto is active. 25-plan.md "
             "§5.2 says auto is allowed only after review precision meets §10.4's bar "
             "(>= 0.95) -- that has not been measured in this codebase, and no real "
-            "fact_update classifier is wired in yet either (classify_fact_update is "
-            "a placeholder). Proceeding because auto was explicitly configured."
+            "fact_update decisions still require the promotion evidence in §10.4. "
+            "Proceeding because auto was explicitly configured."
         )
 
     if kind == "duplicate":
@@ -782,47 +759,58 @@ def apply_approved_possibly_same_as(graph: Graph, ledger: Any, review_id: int) -
     "Approve does: merge + namespace-aware alias; Decision requires explicit
     review."
 
-    PLACEHOLDER, not implemented -- same posture as `classify_fact_update`
-    above (see that function's docstring for the general shape of this
-    choice). Verified against the real resolution ladder before writing
-    this, not assumed: `graph/semantic_pass.py::_rung6_laya_same_entity`
-    (rung 6 of §4.2's scoped entity-resolution ladder) is the ONLY place in
-    this codebase that could ever propose a `possibly_same_as` review, and
-    it is a documented placeholder that always returns `(None, 0.0)` --
-    "no candidate reached top p >= 0.85 and top - second >= 0.15" -- so the
-    ladder always falls through to minting a new node instead. Grepped the
-    whole tree for `create_review("possibly_same_as"`: the only hits are
-    this docstring and `tests/test_reviews.py`'s own synthetic fixture
-    rows, never a real proposer. There is therefore no real
-    `possibly_same_as` review payload shape to apply yet -- no agreed
-    merge-vs-alias write path, nothing to build against without guessing.
-
-    This function exists anyway so `demo_ui/backend/review_routes.py`'s
-    approve dispatcher has a complete, honest mapping for all four §6.5
-    review types rather than silently doing nothing for this one: calling
-    it on a real review raises loudly instead of a caller wrongly believing
-    the merge/alias step happened.
-
-    A real implementation needs:
-      1. Rung 6 (`_rung6_laya_same_entity`) wired to a real Laya
-         `same_entity` call, so a `possibly_same_as` review can actually be
-         proposed with a `subject_uid`/`object_uid` payload (see that
-         function's own docstring, and `_propose_polarity_conflict_review`
-         in `graph/semantic_pass.py` for the closest existing "propose a
-         review from this ladder" precedent).
-      2. An explicit merge + namespace-aware-alias write path: §6.5's table
-         is specific that Decision requires explicit review (i.e. never
-         auto-applied even once rung 6 is real) -- reusing
-         `graph/duplicate_collector.py`'s merge primitives
-         (`_choose_survivor`/`_absorb_fact_edges`/`_absorb_mentions`) plus
-         `ConnectorLedger.add_entity_alias` for the alias half is the
-         closest existing precedent, but nothing wires them together for
-         this review type today.
+    The review payload uses `subject_uid` for the newly minted mention and
+    `object_uid` for the existing candidate. Both nodes must exist and have
+    the same label. System/Term merges must also stay inside one namespace.
+    The pairwise merge primitives are shared with Phase 6's duplicate
+    collector, then the absorbed name is retained as a scoped alias.
     """
-    raise NotImplementedError(
-        "apply_approved_possibly_same_as: no real 'possibly_same_as' review is ever "
-        "proposed today -- graph/semantic_pass.py's rung 6 (_rung6_laya_same_entity) "
-        "is a verified placeholder that always returns (None, 0.0), so this review "
-        "type has no real payload shape or merge/alias write path to apply yet. See "
-        "this function's docstring for exactly what a real implementation needs."
+    review = ledger.get_review(review_id)
+    if review is None:
+        raise ValueError(f"apply_approved_possibly_same_as: no review with id={review_id!r}")
+    if review.type != "possibly_same_as" or review.state != ReviewState.APPROVED:
+        raise ValueError(
+            f"apply_approved_possibly_same_as: review {review_id} must be an approved "
+            f"possibly_same_as review (got type={review.type!r}, state={review.state!r})"
+        )
+    uid_a = review.payload.get("subject_uid") or review.payload.get("uid_a")
+    uid_b = review.payload.get("object_uid") or review.payload.get("uid_b")
+    if not uid_a or not uid_b or uid_a == uid_b:
+        raise ValueError("possibly_same_as payload must name two different node uids")
+    rows = graph.query(
+        "MATCH (a {uid: $a}), (b {uid: $b}) "
+        "RETURN labels(a)[0], a.name, a.namespace_uid, labels(b)[0], b.name, b.namespace_uid",
+        params={"a": uid_a, "b": uid_b},
+    ).result_set
+    if not rows:
+        raise ValueError("possibly_same_as nodes were not both found")
+    label_a, name_a, namespace_a, label_b, name_b, namespace_b = rows[0]
+    if label_a != label_b:
+        raise ValueError(f"possibly_same_as labels differ: {label_a!r} vs {label_b!r}")
+    if label_a in {"System", "Term"} and namespace_a != namespace_b:
+        raise ValueError("possibly_same_as cannot merge System/Term across namespaces")
+
+    from graph.duplicate_collector import (
+        _absorb_fact_edges, _absorb_mentions, _choose_survivor,
     )
+    survivor_uid, absorbed_uid = _choose_survivor(graph, uid_a, uid_b)
+    _absorb_fact_edges(graph, label_a, survivor_uid, absorbed_uid)
+    _absorb_mentions(graph, label_a, survivor_uid, absorbed_uid)
+    absorbed_name = name_a if absorbed_uid == uid_a else name_b
+    namespace = namespace_a if label_a in {"System", "Term"} else None
+    if absorbed_name:
+        import re
+        alias_norm = re.sub(r"[^a-z0-9]+", " ", str(absorbed_name).casefold()).strip()
+        if alias_norm:
+            ledger.add_entity_alias(
+                label_a, namespace, alias_norm, survivor_uid,
+                source=f"possibly_same_as:{review_id}",
+            )
+    trace_id = ledger.record_merge_trace(
+        survivor_uid, absorbed_uid, label_a, reason="possibly_same_as",
+    )
+    return {
+        "review_id": review_id, "label": label_a,
+        "survivor_uid": survivor_uid, "absorbed_uid": absorbed_uid,
+        "merge_trace_id": trace_id,
+    }

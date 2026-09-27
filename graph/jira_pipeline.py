@@ -316,7 +316,7 @@ def write_issue(
     edges_supported.extend(
         resolve_exact_anchors(graph, ledger, record, wi_uid, "WorkItem")
     )
-    materialize_around(graph, wi_uid, record.record_key)
+    materialize_around(graph, wi_uid, record.record_key, ledger=ledger)
     ledger.record_edges_batch(record.record_key, edges_supported)
     logger.info(
         "wrote %s: WorkItem node + %d structural edge(s) -> %s",

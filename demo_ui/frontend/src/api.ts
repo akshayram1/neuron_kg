@@ -27,6 +27,9 @@ import type {
   StoryState,
   StoryWisdomProposal,
   RerankerStatus,
+  ReviewItem,
+  LinkCandidateItem,
+  DashboardData,
 } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -48,6 +51,34 @@ export function setReranker(enabled: boolean): Promise<{ reranker: RerankerStatu
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
   });
+}
+
+export function getReviews(graphName: string, state = "pending"): Promise<{ reviews: ReviewItem[] }> {
+  return request(`/api/reviews?${new URLSearchParams({ graph_name: graphName, state })}`);
+}
+
+export function decideReview(
+  graphName: string, reviewId: number, decision: "approve" | "reject",
+): Promise<{ review: ReviewItem; applied?: unknown }> {
+  const query = new URLSearchParams({ graph_name: graphName, decided_by: "neuron-ui" });
+  return request(`/api/reviews/${reviewId}/${decision}?${query}`, { method: "POST" });
+}
+
+export function getLinkCandidates(
+  graphName: string, state = "pending",
+): Promise<{ candidates: LinkCandidateItem[] }> {
+  return request(`/api/link-candidates?${new URLSearchParams({ graph_name: graphName, state })}`);
+}
+
+export function decideLinkCandidate(
+  graphName: string, candidateId: number, decision: "approve" | "reject",
+): Promise<{ candidate: LinkCandidateItem; applied?: boolean }> {
+  const query = new URLSearchParams({ graph_name: graphName });
+  return request(`/api/link-candidates/${candidateId}/${decision}?${query}`, { method: "POST" });
+}
+
+export function getDashboard(graphName: string): Promise<DashboardData> {
+  return request(`/api/dashboard?${new URLSearchParams({ graph_name: graphName })}`);
 }
 
 export function getGraphs(): Promise<{ graphs: GraphInfo[] }> {
@@ -72,6 +103,16 @@ export function sendChat(message: string, providers: string[], graphName: string
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, providers, graph_name: graphName }),
+  });
+}
+
+export function verifyChatAnswer(
+  graphName: string, nodeUids: string[], helpful = true,
+): Promise<{ candidateIds: number[] }> {
+  return request("/api/chat/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ graph_name: graphName, node_uids: nodeUids, helpful }),
   });
 }
 

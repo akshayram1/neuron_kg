@@ -386,10 +386,26 @@ def test_polarity_conflict_is_not_vetoed_for_non_decision_labels(tmp_path, monke
     assert ledger.list_reviews(type="polarity_conflict_candidate") == []
 
 
-def test_rung6_placeholder_always_falls_through_to_new():
-    # Documented placeholder (§4.2 rung 6, blocked on Laya packaging): never
-    # returns a candidate today, regardless of how strong the input looks.
-    assert _rung6_laya_same_entity("Decision", object(), [("a", 0.99), ("b", 0.70)]) == (None, 0.0)
+def test_rung6_requires_probability_and_margin():
+    class Scorer:
+        def score_batch(self, states):
+            assert len(states) == 2
+            return [0.91, 0.70]
+
+    graph = _FakeGraph(node_text={"a": "Payments API", "b": "Payments worker"})
+    assert _rung6_laya_same_entity(
+        graph, "System", System(name="Payments API", purpose="checkout"),
+        [("a", 0.80), ("b", 0.79)], classifier=Scorer(),
+    ) == ("a", 0.91)
+
+    class NoMargin:
+        def score_batch(self, states):
+            return [0.91, 0.82]
+
+    assert _rung6_laya_same_entity(
+        graph, "System", System(name="Payments API", purpose="checkout"),
+        [("a", 0.80), ("b", 0.79)], classifier=NoMargin(),
+    ) == (None, 0.91)
 
 
 # ------------------------------------------------------------- §4.5 mention filter

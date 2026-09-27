@@ -31,6 +31,7 @@ from graph.access import AccessScope
 from graph.bridge.anchors import commit_shas, jira_keys, pull_request_refs, repository_names
 from graph.entity import fetch_entity_detail
 from graph.expand import MAX_SEEDS, TIER_ORDER, expand_neighbors, tier_for_extraction_method
+from graph.fact_predicates import live_fact_cypher
 from graph.rerank import (
     LayaReranker,
     RerankCandidate,
@@ -39,6 +40,7 @@ from graph.rerank import (
     RetrievalRole,
     assign_roles,
 )
+from graph.path_support import pair_support, path_support
 from graph.search import SearchHit, embed_query, hybrid_search
 from graph.structured_query import (
     find_named_persons,
@@ -98,6 +100,7 @@ NEURON_RERANK_MIN_DIRECT = int(os.getenv("NEURON_RERANK_MIN_DIRECT", "2"))
 NEURON_RERANK_MAX_KEEP = int(os.getenv("NEURON_RERANK_MAX_KEEP", "12"))
 NEURON_RERANK_MAX_ROUNDS = int(os.getenv("NEURON_RERANK_MAX_ROUNDS", "2"))
 NEURON_RERANK_FACTS = int(os.getenv("NEURON_RERANK_FACTS", "6"))
+NEURON_PATH_MIN = float(os.getenv("NEURON_PATH_MIN", "0.4"))
 
 _laya_reranker: LayaReranker | None = None
 _laya_reranker_config: tuple[str | None, str] | None = None
@@ -241,6 +244,9 @@ class ChatResult:
     packed_blocks: list[PackedBlockInfo] = field(default_factory=list)
     dropped_evidence_uids: list[str] = field(default_factory=list)
     retrieval_trace: RetrievalTrace | None = None
+    path_support_score: float = 1.0
+    low_support: bool = False
+    cited_node_uids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -483,7 +489,7 @@ def _live_facts(
     out_rows = graph.query(
         f"""
         MATCH (n {{uid: $uid}})-[r]->(other)
-        WHERE type(r) <> 'MENTIONED_IN' AND r.invalid_at IS NULL
+        WHERE type(r) <> 'MENTIONED_IN' AND {live_fact_cypher('r')}
         UNWIND coalesce(r.source_record_keys, []) AS source_key
         MATCH (sr:SourceRecord {{record_key: source_key}})
         WHERE sr.deleted_at IS NULL AND {out_acl} {provider_filter}
@@ -500,7 +506,7 @@ def _live_facts(
     in_rows = graph.query(
         f"""
         MATCH (other)-[r]->(n {{uid: $uid}})
-        WHERE type(r) <> 'MENTIONED_IN' AND r.invalid_at IS NULL
+        WHERE type(r) <> 'MENTIONED_IN' AND {live_fact_cypher('r')}
         UNWIND coalesce(r.source_record_keys, []) AS source_key
         MATCH (sr:SourceRecord {{record_key: source_key}})
         WHERE sr.deleted_at IS NULL AND {in_acl} {provider_filter}
@@ -851,7 +857,7 @@ def _expansion_tier(graph: Graph, hit: SearchHit) -> str | None:
         return None
     rel = graph_methods[0].split(":", 1)[1]
     rows = graph.query(
-        "MATCH (n {uid: $uid})-[r]-(m) WHERE type(r) = $rel AND r.invalid_at IS NULL "
+        f"MATCH (n {{uid: $uid}})-[r]-(m) WHERE type(r) = $rel AND {live_fact_cypher('r')} "
         "RETURN r.extraction_method",
         params={"uid": hit.uid, "rel": rel},
     ).result_set
@@ -1248,6 +1254,36 @@ def _laya_two_pass_search(
             reranker, graph, question, new_neighbors, scope=scope, providers=providers,
             at=at, at_end=at_end, as_of=as_of,
         )
+        validated_decisions: list[RerankDecision] = []
+        new_hit_by_uid = {hit.uid: hit for hit in new_neighbors}
+        for decision in new_decisions:
+            if decision.role not in {
+                RetrievalRole.DIRECT_EVIDENCE, RetrievalRole.TEMPORAL_CONTEXT,
+            }:
+                validated_decisions.append(decision)
+                continue
+            recovered_hit = new_hit_by_uid.get(decision.uid)
+            # `expand_neighbors` stamps the traversed relation as `graph:X`;
+            # that is direct path support 1.0 without another graph roundtrip.
+            support = 1.0 if recovered_hit and any(
+                method.startswith("graph:") for method in recovered_hit.methods
+            ) else max(
+                (pair_support(graph, seed_uid, decision.uid) for seed_uid in seed_uids),
+                default=0.0,
+            )
+            if support >= NEURON_PATH_MIN:
+                validated_decisions.append(decision)
+            else:
+                logger.info(
+                    "  path-reject    uid=%s recovered_support=%.3f threshold=%.3f",
+                    decision.uid, support, NEURON_PATH_MIN,
+                )
+                validated_decisions.append(RerankDecision(
+                    uid=decision.uid, score=decision.score,
+                    role=RetrievalRole.IRRELEVANT,
+                    model=decision.model, model_version=decision.model_version,
+                ))
+        new_decisions = validated_decisions
         all_hits.extend(new_neighbors)
         if trace is not None:
             trace.expanded_candidate_uids.extend(hit.uid for hit in new_neighbors)
@@ -1658,6 +1694,10 @@ def run_chat_turn(
     knowledge_citations = _resolve_knowledge_citations(
         graph, hits, parsed.used_sources, include_labels=include_labels,
     )
+    cited_node_uids = [
+        hit.uid for hit in hits if _name_was_used(hit.name, parsed.used_sources)
+    ]
+    support = path_support(graph, cited_node_uids, minimum=NEURON_PATH_MIN)
     logger.info(
         "  answer         cited_blocks=%d citations=%d answer_chars=%d "
         "tokens_in=%d tokens_out=%d %.2fs",
@@ -1678,4 +1718,7 @@ def run_chat_turn(
         packed_blocks=packed.packed_blocks,
         dropped_evidence_uids=packed.dropped_uids,
         retrieval_trace=retrieval_trace,
+        path_support_score=support.score,
+        low_support=support.low_support,
+        cited_node_uids=cited_node_uids,
     )

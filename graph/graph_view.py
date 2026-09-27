@@ -19,6 +19,7 @@ from typing import Any
 from falkordb import Graph
 
 from graph.access import AccessScope
+from graph.fact_predicates import live_fact_cypher
 from graph.writer import make_uid
 
 
@@ -70,7 +71,7 @@ def fetch_graph(
     edge_rows = graph.query(
         f"""
         MATCH (a)-[r]->(b)
-        WHERE type(r) <> 'MENTIONED_IN' AND r.invalid_at IS NULL
+        WHERE type(r) <> 'MENTIONED_IN' AND {live_fact_cypher('r')}
         UNWIND coalesce(r.source_record_keys, []) AS support_key
         MATCH (support:SourceRecord {{record_key: support_key}})
         WHERE support.deleted_at IS NULL AND {edge_acl} {edge_provider_filter}

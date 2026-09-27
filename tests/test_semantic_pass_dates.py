@@ -111,11 +111,7 @@ def test_stated_start_date_sets_valid_at_and_basis(tmp_path):
     assert row.get("invalid_at") is None
     assert row["ended_unknown"] is False
 
-    # Stopgap: writer.py doesn't accept valid_at_basis/invalid_at yet (see
-    # QUERIES.md), so `_write_extraction` persists valid_at_basis itself.
-    [(_, stopgap_params)] = graph.stopgap_calls()
-    assert stopgap_params["valid_at_basis"] == "stated"
-    assert "invalid_at" not in stopgap_params  # no end was stated
+    assert graph.stopgap_calls() == []
 
 
 def test_no_stated_date_falls_back_to_source_time_unchanged(tmp_path):
@@ -164,8 +160,7 @@ def test_resolvable_stated_end_sets_invalid_at(tmp_path):
     assert row["valid_at"] == SOURCE_TIME
     assert row["valid_at_basis"] == "record_time"
 
-    [(_, stopgap_params)] = graph.stopgap_calls()
-    assert stopgap_params["invalid_at"] == "2026-08-04"
+    assert graph.stopgap_calls() == []
 
 
 def test_unresolvable_stated_end_sets_ended_unknown_not_invalid_at(tmp_path):

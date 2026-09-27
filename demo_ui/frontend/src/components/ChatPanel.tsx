@@ -6,11 +6,13 @@ import {
   CornerDownLeft,
   DatabaseZap,
   ExternalLink,
+  LoaderCircle,
   Sparkles,
+  ThumbsUp,
   Trash2,
 } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import type { ConversationMessage, Highlight, RerankerStatus } from "../types";
+import type { ChatResponse, ConversationMessage, Highlight, RerankerStatus } from "../types";
 import MarkdownBody from "./MarkdownBody";
 
 const SAMPLE_QUESTIONS = [
@@ -26,6 +28,7 @@ interface ChatPanelProps {
   activeHighlight: Highlight;
   onSend: (message: string) => void;
   onClear: () => void;
+  onVerify: (result: ChatResponse) => Promise<number>;
   reranker: RerankerStatus | null;
   rerankerBusy: boolean;
   onToggleReranker: (enabled: boolean) => void;
@@ -40,6 +43,7 @@ export default function ChatPanel({
   activeHighlight,
   onSend,
   onClear,
+  onVerify,
   reranker,
   rerankerBusy,
   onToggleReranker,
@@ -47,6 +51,8 @@ export default function ChatPanel({
   onOpenKnowledge,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
+  const [verifying, setVerifying] = useState<string | null>(null);
+  const [verified, setVerified] = useState<Record<string, number>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -125,6 +131,34 @@ export default function ChatPanel({
                         ? "RRF fallback"
                         : "RRF"}
                   <span>{message.result.retrieval.finalCandidates} selected</span>
+                </div>
+              )}
+              {message.result?.support && (
+                <div className={`support-row ${message.result.support.lowSupport ? "low" : ""}`}>
+                  <span>
+                    Path support {Math.round(message.result.support.score * 100)}%
+                    {message.result.support.lowSupport && " · low support"}
+                  </span>
+                  {message.result.support.score >= 0.6 && message.result.support.citedNodeUids.length >= 2 && (
+                    <button
+                      type="button"
+                      disabled={verifying !== null || verified[message.id] !== undefined}
+                      onClick={async () => {
+                        setVerifying(message.id);
+                        try {
+                          const count = await onVerify(message.result!);
+                          setVerified((current) => ({ ...current, [message.id]: count }));
+                        } finally {
+                          setVerifying(null);
+                        }
+                      }}
+                    >
+                      {verifying === message.id ? <LoaderCircle className="spin" size={11} /> : <ThumbsUp size={11} />}
+                      {verified[message.id] !== undefined
+                        ? verified[message.id] ? `${verified[message.id]} link proposed` : "Verified"
+                        : "Helpful"}
+                    </button>
+                  )}
                 </div>
               )}
               {message.result && (

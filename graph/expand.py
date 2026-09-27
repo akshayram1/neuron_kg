@@ -17,6 +17,7 @@ import logging
 from falkordb import Graph
 
 from graph.access import AccessScope
+from graph.fact_predicates import live_fact_cypher
 from graph.search import SearchHit
 
 logger = logging.getLogger("neuron.expand")
@@ -109,7 +110,7 @@ def expand_neighbors(
         MATCH (seed) WHERE seed.uid IN $seed_uids
         MATCH (seed)-[r]-(neighbor)
         WHERE type(r) IN $rels
-          AND r.invalid_at IS NULL
+          AND {live_fact_cypher('r')}
           AND NOT neighbor.uid IN $exclude_uids
           AND NOT (labels(neighbor)[0] IN $hub_labels)
         MATCH (neighbor)-[:MENTIONED_IN]->(sr:SourceRecord)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from falkordb import Graph
 
 from graph.access import AccessScope
+from graph.fact_predicates import live_fact_cypher
 from graph.time_axis import held_at, holds_at, parse_iso
 
 
@@ -49,7 +50,7 @@ def fetch_fact_history(
     live_acl, live_params = scope.cypher("sr", "live_history_acl")
     live = graph.query(
         f"""
-        MATCH (a)-[r]->(b) WHERE r.fact_uid = $fact_uid AND r.invalid_at IS NULL
+        MATCH (a)-[r]->(b) WHERE r.fact_uid = $fact_uid AND {live_fact_cypher('r')}
         UNWIND coalesce(r.source_record_keys, []) AS source_key
         MATCH (sr:SourceRecord {{record_key: source_key}})
         WHERE sr.deleted_at IS NULL AND {live_acl}

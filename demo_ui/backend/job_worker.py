@@ -9,12 +9,49 @@ from contextlib import suppress
 from uuid import uuid4
 
 from connectors.bitbucket.api import BitbucketRepository
+from connectors.core.ledger import ConnectorLedger
 from connectors.core.jobs import ConnectorJob, ConnectorJobStore
 from connectors.github_app.api import GitHubRepository
+from graph import multigraph, vector_store
+from graph.falkor_client import get_graph
+from graph.hygiene import run_hygiene_checks
 from util.paths import DATA_DIR
 
 logger = logging.getLogger("uvicorn.error.connector_worker")
 JOB_STORE = ConnectorJobStore(DATA_DIR / os.getenv("CONNECTOR_JOB_DB", "connector_jobs.sqlite3"))
+
+
+def run_hygiene_for_graph(graph_name: str) -> None:
+    """Persist one complete health snapshot for a named graph."""
+    target = multigraph.resolve(
+        graph_name, data_dir=DATA_DIR,
+        base_falkor_name=os.getenv("FALKOR_GRAPH", "neuron"),
+        base_collection=vector_store.COLLECTION,
+    )
+    report = run_hygiene_checks(
+        get_graph(name=target.falkor_name), ConnectorLedger(target.ledger_path),
+        graph_name=graph_name,
+    )
+    logger.info(
+        "hygiene graph=%s run=%s violations=%d disputes=%d",
+        graph_name, report.run_id, len(report.cardinality_violations), len(report.open_disputes),
+    )
+
+
+async def run_hygiene_scheduler(stop: asyncio.Event, graph_names) -> None:
+    """Run hygiene nightly for every registered graph until shutdown."""
+    interval = max(60, int(os.getenv("NEURON_HYGIENE_INTERVAL_S", "86400")))
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            continue
+        except TimeoutError:
+            pass
+        for graph_name in graph_names():
+            try:
+                await asyncio.to_thread(run_hygiene_for_graph, graph_name)
+            except Exception:
+                logger.exception("nightly hygiene failed graph=%s", graph_name)
 
 
 async def dispatch(job: ConnectorJob) -> None:
@@ -75,6 +112,13 @@ async def run_worker(stop: asyncio.Event) -> None:
             state = JOB_STORE.fail(job, worker_id, str(exc))
             logger.exception("connector job=%s failed state=%s", job.job_id, state)
         else:
+            graph_name = str(job.payload.get("request", {}).get("graph_name") or "default")
+            try:
+                await asyncio.to_thread(run_hygiene_for_graph, graph_name)
+            except Exception:
+                # Connector data is already committed. Keep the completed sync
+                # and surface hygiene failure through logs/dashboard staleness.
+                logger.exception("post-sync hygiene failed graph=%s", graph_name)
             JOB_STORE.complete(job.job_id, worker_id)
         finally:
             heartbeat_task.cancel()

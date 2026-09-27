@@ -109,6 +109,20 @@ def test_hygiene_trend_scoped_by_graph_name(tmp_path):
     assert ledger.hygiene_trend("Document") == []
 
 
+def test_latest_hygiene_snapshot_returns_all_labels_from_newest_run(tmp_path):
+    ledger = ConnectorLedger(tmp_path / "l.sqlite3")
+    ledger.record_hygiene_counts("old", [HygieneCount("Document", 9, 10)])
+    ledger.record_hygiene_counts("new", [
+        HygieneCount("Document", 2, 10), HygieneCount("open_dispute", 1, 1),
+    ])
+
+    snapshot = ledger.latest_hygiene_snapshot()
+
+    assert {row.label: row.isolated_count for row in snapshot} == {
+        "Document": 2, "open_dispute": 1,
+    }
+
+
 # ---------------------------------------------------------- link_candidates
 
 

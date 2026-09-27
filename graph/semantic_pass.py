@@ -46,8 +46,14 @@ from graph import vector_store
 from graph import writer as w
 from graph.axioms import SWAPPED, AxiomSet, DEFAULT_AXIOMS, load_axioms
 from graph.dates import stated_dates
+from graph.entity_resolution import LayaSameEntityClassifier
+from graph.fact_update_classifier import LayaFactUpdateClassifier
 from graph.profiles import WorkManagementExtraction, profile_for_record_key
+from graph.resolve_text_fact import (
+    NewFact, classify_fact_update, find_conflict_candidates, resolve_text_fact,
+)
 from graph.token_usage import TokenUsage
+from graph.triage import LayaTriageClassifier, TriageDecision
 
 logger = logging.getLogger("neuron.semantic_pass")
 
@@ -67,26 +73,18 @@ logger = logging.getLogger("neuron.semantic_pass")
 #      existing: a chunk only reaches `_call_llm` if its record already has
 #      a resolved `primary_node_uid`, and only up to the run's
 #      `budget`/`record_prefix` selection (`ledger.pending_chunks`). The
-#      "optional Laya triage" half (skip a chunk by `chunk_type` /
-#      `has_durable_fact`, plan.md §3.1 shadow mode / §3.2 enforce) is
-#      blocked on an unresolved Laya-packaging decision -- see QUERIES.md
-#      ("Phase 3.1/3.2 skipped this wave") and the `LayaReranker` stub in
-#      `graph/rerank.py`. `_gate_laya_triage` below is a documented no-op
-#      placeholder for it, called from the same place a real triage check
-#      would run, but it never skips a chunk today.
+#      "optional Laya triage" half scores `chunk_type` and
+#      `has_durable_fact` in one batch. Shadow mode stores outcomes without
+#      changing admission; enforce mode applies the measured skip rule.
 #   2. Evidence verbatim       -- `evidence_in_chunk`, in `_write_extraction`
 #      (exists).
 #   3. Relation allowed / direction -- `axioms.resolve_direction`, in
 #      `_write_extraction` (exists).
-#   4. Merge candidate         -- the entity-resolution ladder (plan.md
-#      Phase 4, §4.1). Not built yet; `_gate_merge_candidate` is a
-#      documented no-op placeholder.
-#   5. Conflict classification -- `resolve_text_fact` (plan.md Phase 5,
-#      §5.2-5.3). Not built yet; `_gate_conflict_classification` is a
-#      documented no-op placeholder.
-#   6. Projection eligibility  -- low-confidence facts written as review
-#      candidates rather than live edges (plan.md Phase 5). Not built yet;
-#      `_gate_projection_eligibility` is a documented no-op placeholder.
+#   4. Merge candidate         -- performed by the entity-resolution ladder.
+#   5. Conflict classification -- bounded candidates + real Laya
+#      `fact_update`, immediately before the write.
+#   6. Projection eligibility  -- `resolve_text_fact` writes uncertain
+#      conflicts as pending-review projections.
 #
 # Gates 2 and 3 run per fact inside `_write_extraction`'s fact loop, in this
 # order, before a fact's endpoints are resolved. Gates 4-6 are called
@@ -110,18 +108,29 @@ ADMISSION_GATES: tuple[str, ...] = (
 )
 
 
-def _gate_laya_triage(chunk: PendingChunk) -> ExtractionDrop | None:
+def _gate_laya_triage(
+    chunk: PendingChunk,
+    decision: TriageDecision | None = None,
+    *,
+    mode: str | None = None,
+) -> ExtractionDrop | None:
     """Gate 1 (optional sub-check): Laya `chunk_type` / `has_durable_fact`
     triage before `_call_llm` (plan.md Phase 3.1 shadow mode, Phase 3.2
-    enforce). Blocked on an unresolved decision about how Laya is packaged
-    for Neuron (vendored dependency vs. sidecar service -- see QUERIES.md,
-    "Phase 3.1/3.2 skipped this wave", and the `LayaReranker` stub in
-    `graph/rerank.py`).
-
-    This is a placeholder, not a shadow-mode call: it always returns None
-    (never skips a chunk) until Phase 3.1/3.2 are actually implemented.
+    enforce). Shadow/off never reject. Enforce uses the exact initial rule
+    from the plan and records the full score in the drop detail.
     """
-    return None
+    mode = (mode or os.getenv("NEURON_TRIAGE", "shadow")).lower()
+    if mode not in {"off", "shadow", "enforce"}:
+        raise ValueError("NEURON_TRIAGE must be 'off', 'shadow', or 'enforce'")
+    if mode != "enforce" or decision is None or not decision.would_skip:
+        return None
+    return ExtractionDrop(
+        reason=DropReason.LAYA_TRIAGE_SKIP,
+        detail=(
+            f"type={decision.chunk_type};durable_p={decision.durable_probability:.6f};"
+            f"model={decision.model}"
+        ),
+    )
 
 
 def _gate_merge_candidate(
@@ -371,31 +380,40 @@ def _propose_polarity_conflict_review(
 
 
 def _rung6_laya_same_entity(
-    label: str, item: object, candidates: list[tuple[str, float]],
+    graph: Graph, label: str, item: object, candidates: list[tuple[str, float]],
+    *, classifier: LayaSameEntityClassifier | None = None,
 ) -> tuple[str | None, float]:
-    """Rung 6 (§4.2): Laya `same_entity`, scored against every candidate
-    rungs 4/5 gathered (blocked by label + namespace). BLOCKED (placeholder):
-    no real Laya call exists in this codebase yet -- the same unresolved
-    Laya-packaging decision as `_gate_laya_triage`'s docstring above and the
-    `LayaReranker` stub in `graph/rerank.py` (see QUERIES.md, "Phase 3.1/3.2
-    skipped this wave").
+    """Return a candidate only when p>=.85 and the top margin is >=.15.
 
-    Always returns `(None, 0.0)` -- "no candidate reached top p >= 0.85 and
-    top - second >= 0.15" -- so the ladder always falls through to a new
-    node, `resolved_by="new"`. This is not just a stand-in for a missing
-    call: it is also exactly what §4.3's "under-merge by default" policy
-    wants even once Laya is real ("Thresholds are set so that doubt produces
-    a new node"), so shipping the placeholder this way is never wrong, only
-    incomplete.
-
-    The `NEURON_RESOLVE_MODE=suggest/auto` branches and the
-    `POSSIBLY_SAME_AS` review-proposal path §4.2 describes for a REAL Laya
-    score are deliberately NOT scaffolded here as dead if/else branches --
-    there is no score yet to gate them on, and an unreachable branch is
-    untested noise, not readiness. When real Laya scoring lands, this
-    function is the one place to fill in.
+    Candidate profiles come from the graph's stored `search_text`; polarity
+    conflicts are removed before scoring. Any serving failure fails closed
+    to a new node.
     """
-    return None, 0.0
+    if not candidates:
+        return None, 0.0
+    mention_context = _embedding_text(label, item)
+    viable: list[tuple[str, str]] = []
+    for uid, _similarity in dict(candidates).items():
+        profile = _candidate_text(graph, uid)
+        if profile and not polarity_conflict(mention_context, profile):
+            viable.append((uid, profile))
+    if not viable:
+        return None, 0.0
+    states = [{
+        "mention": str(getattr(item, "name", "")),
+        "mention_context": mention_context,
+        "candidate": profile.split("\n", 1)[0][:200],
+        "candidate_profile": profile[:1200],
+    } for _uid, profile in viable]
+    try:
+        probabilities = (classifier or LayaSameEntityClassifier()).score_batch(states)
+    except Exception:
+        logger.exception("Laya same_entity failed; minting a new node")
+        return None, 0.0
+    ranked = sorted(zip(viable, probabilities), key=lambda pair: pair[1], reverse=True)
+    top_uid, top_p = ranked[0][0][0], float(ranked[0][1])
+    second_p = float(ranked[1][1]) if len(ranked) > 1 else 0.0
+    return (top_uid, top_p) if top_p >= 0.85 and top_p - second_p >= 0.15 else (None, top_p)
 
 
 def _resolve_semantic_entity(
@@ -410,6 +428,7 @@ def _resolve_semantic_entity(
     semantic_uids: dict[tuple[str, str, str], str],
     decision_name_index: dict[str, str],
     collection: str,
+    same_entity_classifier: LayaSameEntityClassifier | None = None,
 ) -> tuple[str, str, bool]:
     """Rungs 2-6 of the Phase 4 scoped entity-resolution ladder (§4.2) for
     one Term/Decision/System/Api/Endpoint mention already past the rung-1
@@ -417,9 +436,8 @@ def _resolve_semantic_entity(
     reaches this function).
 
     Returns `(uid, resolved_by, is_new)`. `resolved_by` is one of
-    `scoped_exact` / `alias` / `vector` / `new` (§4.2's vocabulary --
-    `laya`/`laya_suggest`/`review_required` never fire today, see
-    `_rung6_laya_same_entity`). `is_new` is True exactly when `uid` was just
+    `scoped_exact` / `alias` / `vector` / `new` / `laya` /
+    `laya_suggest` / `review_required`. `is_new` is True exactly when `uid` was just
     minted rather than reused from an existing node.
 
     Every outcome is written into `semantic_uids`/`decision_name_index`
@@ -513,11 +531,30 @@ def _resolve_semantic_entity(
                 collection=collection,
             ))
 
-    # Rung 6: Laya `same_entity` -- placeholder, see its own docstring.
-    top_uid, _confidence = _rung6_laya_same_entity(label, item, candidates)
-    if top_uid is not None:  # pragma: no cover -- placeholder never returns a candidate today
-        _remember(top_uid)
-        return top_uid, "laya", False
+    # Rung 6: a confident match is still review-first by default. Decisions
+    # always require review even if non-Decision types are explicitly put in
+    # auto mode.
+    top_uid, confidence = _rung6_laya_same_entity(
+        graph, label, item, candidates, classifier=same_entity_classifier,
+    )
+    if top_uid is not None:
+        resolve_mode = os.getenv("NEURON_RESOLVE_MODE", "suggest").lower()
+        if resolve_mode not in {"suggest", "auto"}:
+            raise ValueError("NEURON_RESOLVE_MODE must be 'suggest' or 'auto'")
+        if resolve_mode == "auto" and label != "Decision":
+            _remember(top_uid)
+            return top_uid, "laya", False
+        ledger.create_review(
+            "possibly_same_as",
+            {
+                "label": label, "subject_uid": scoped_uid, "object_uid": top_uid,
+                "namespace_uid": namespace_uid, "score": confidence,
+                "mention": item.name, "mention_context": mention_text[:1200],
+            },
+            identity=f"possibly_same_as:{label}:{scoped_uid}:{top_uid}",
+        )
+        _remember(scoped_uid)
+        return scoped_uid, "review_required" if label == "Decision" else "laya_suggest", True
 
     _remember(scoped_uid)
     return scoped_uid, "new", True
@@ -702,6 +739,8 @@ def _write_extraction(
     run_id: str | None = None,
     semantic_uids: dict[tuple[str, str, str], str] | None = None,
     decision_name_index: dict[str, str] | None = None,
+    fact_update_classifier: LayaFactUpdateClassifier | None = None,
+    same_entity_classifier: LayaSameEntityClassifier | None = None,
 ) -> tuple[int, int, int]:
     # §4.4/§4.6: `run_id`, `semantic_uids` and `decision_name_index` are
     # normally owned by `run_semantic_pass` and threaded through every chunk
@@ -798,7 +837,7 @@ def _write_extraction(
                 graph, ledger, label, item, vector,
                 namespace_uid=namespace_uid, record_key=chunk.record_key,
                 semantic_uids=semantic_uids, decision_name_index=decision_name_index,
-                collection=collection,
+                collection=collection, same_entity_classifier=same_entity_classifier,
             )
             for item, vector in zip(items, vectors)
         ]
@@ -829,11 +868,10 @@ def _write_extraction(
                     **item.model_dump(exclude={"name"}),
                     "name": item.name,
                     "search_text": _embedding_text(label, item),
-                    # §4.0: namespace_uid is stored explicitly on System/Term
-                    # nodes -- their identity is scoped by it. Decision/Api/
-                    # Endpoint are not namespace-scoped, so it's omitted for
-                    # them rather than written as a misleading property.
-                    **({"namespace_uid": namespace_uid} if label in {"System", "Term"} else {}),
+                    # System/Term use this in identity. Other semantic labels
+                    # keep it as a retrieval boundary so a vector rebuild
+                    # preserves namespace filtering.
+                    "namespace_uid": namespace_uid,
                 },
             }
             for uid, item in zip(uids, items)
@@ -879,7 +917,7 @@ def _write_extraction(
             vector_store.upsert_vectors(vector_store.client(), [
                 {"uid": uid, "label": label, "embedding": vector,
                  "name_embedding": name_vector, "embedded_text": _embedding_text(label, item)[:400],
-                 "embedded_model": embedding_model}
+                 "embedded_model": embedding_model, "namespace_uid": namespace_uid}
                 for uid, item, vector, name_vector in zip(uids, items, vectors, name_vectors)
             ], collection=collection)
 
@@ -974,12 +1012,11 @@ def _write_extraction(
             ))
             continue
 
-        # Gates 4-6 (ADMISSION_GATES[3:6]): documented no-op placeholders
-        # (see their docstrings above) -- called here, once endpoints are
-        # resolved but before the edge is written, so Phase 4/5 has this
-        # exact call site to fill in rather than needing to find one.
+        # Compatibility hooks retain the documented gate order. Their real
+        # work lives in the resolution ladder (4) and classify-before-write
+        # block below (5-6).
         merge_drop = _gate_merge_candidate(fact, subject_uid, object_uid)
-        if merge_drop is not None:  # pragma: no cover -- placeholder never rejects today
+        if merge_drop is not None:
             facts_rejected += 1
             logger.info(
                 "  gate 4 (merge_candidate) rejected fact: (%s) %r -%s-> (%s) %r",
@@ -988,7 +1025,7 @@ def _write_extraction(
             drops.append(merge_drop)
             continue
         conflict_drop = _gate_conflict_classification(fact, subject_uid, object_uid)
-        if conflict_drop is not None:  # pragma: no cover -- placeholder never rejects today
+        if conflict_drop is not None:
             facts_rejected += 1
             logger.info(
                 "  gate 5 (conflict_classification) rejected fact: (%s) %r -%s-> (%s) %r",
@@ -997,7 +1034,7 @@ def _write_extraction(
             drops.append(conflict_drop)
             continue
         projection_drop = _gate_projection_eligibility(fact, subject_uid, object_uid)
-        if projection_drop is not None:  # pragma: no cover -- placeholder never rejects today
+        if projection_drop is not None:
             facts_rejected += 1
             logger.info(
                 "  gate 6 (projection_eligibility) rejected fact: (%s) %r -%s-> (%s) %r",
@@ -1045,38 +1082,60 @@ def _write_extraction(
         }
         if invalid_at is not None:
             fact_row["invalid_at"] = invalid_at
-        w.upsert_fact_edges(graph, fact.relation, subject_kind, object_kind, [fact_row])
-
-        # STOPGAP -- see QUERIES.md ("§5.1 valid_at_basis/invalid_at not yet
-        # accepted by upsert_fact_edges"). Verified empirically (real
-        # FalkorDB): `w.upsert_fact_edges`'s UNWIND/SET Cypher only reads the
-        # row keys it explicitly names -- `valid_at_basis` and `invalid_at`
-        # above are silently ignored (no error, but also never written) by
-        # today's graph/writer.py, which is off-limits to this task (a
-        # parallel §5.2 task owns it). Until writer.py grows two additive
-        # ON CREATE/ON MATCH lines for these fields, persist them here
-        # directly with a small supplementary write, matched by `fact_uid`
-        # (same deterministic id `upsert_fact_edges` just computed) so this
-        # feature's data is actually readable from the graph today. Skipped
-        # entirely -- zero extra queries -- for the common case (no date
-        # stated, no end resolved), which is today's exact unchanged
-        # behavior. Delete this block once graph/writer.py accepts the
-        # fields natively; `fact_row` above already needs no change then.
-        if valid_at_basis == "stated" or invalid_at is not None:
-            fact_uid = w.make_uid("Fact", str(subject_uid), fact.relation, str(object_uid))
-            set_clause = "r.valid_at_basis = $valid_at_basis"
-            supp_params = {
-                "from_uid": subject_uid, "to_uid": object_uid, "fact_uid": fact_uid,
-                "valid_at_basis": valid_at_basis,
-            }
-            if invalid_at is not None:
-                set_clause += ", r.invalid_at = $invalid_at"
-                supp_params["invalid_at"] = invalid_at
-            graph.query(
-                "MATCH (a {uid: $from_uid})-[r]->(b {uid: $to_uid}) "
-                "WHERE r.fact_uid = $fact_uid "
-                f"SET {set_clause}",
-                params=supp_params,
+        # Classification precedes the write. The bounded candidate query is
+        # endpoint-scoped; when a live fact could conflict, Laya classifies
+        # the relationship and `resolve_text_fact` performs the only write.
+        new_fact = NewFact(
+            from_uid=subject_uid, from_label=subject_kind,
+            to_uid=object_uid, to_label=object_kind, rel_type=fact.relation,
+            source_time=source_time, source_record_key=chunk.record_key,
+            valid_at=valid_at, invalid_at=invalid_at, evidence=fact.evidence,
+            confidence=0.9, extraction_method="llm",
+            valid_at_basis=valid_at_basis, ended_unknown=ended_unknown,
+            adopted_batch=fact_row["adopted_batch"],
+            direction_corrected=direction == SWAPPED,
+        )
+        conflicts = find_conflict_candidates(
+            graph, subject_uid, object_uid, fact.relation,
+            w.make_uid("Fact", str(subject_uid), fact.relation, str(object_uid)),
+            axioms=axioms,
+        )
+        if conflicts:
+            classified: list[tuple[object, str]] = []
+            for old in conflicts:
+                try:
+                    kind = classify_fact_update(
+                        old.evidence or f"{old.from_uid} {old.rel_type} {old.to_uid}",
+                        old.valid_at, fact.evidence, source_time,
+                        classifier=fact_update_classifier,
+                    )
+                except Exception:
+                    # Fail closed into a human-reviewed dispute instead of
+                    # writing an uncertain claim live or dropping evidence.
+                    logger.exception("fact_update classification failed; routing to review")
+                    kind = "contradicts"
+                classified.append((old, kind))
+            exact_duplicate = next((
+                pair for pair in classified
+                if pair[1] == "duplicate"
+                and pair[0].from_uid == subject_uid and pair[0].to_uid == object_uid
+                and pair[0].rel_type == fact.relation
+            ), None)
+            selected = exact_duplicate or next(
+                (pair for pair in classified if pair[1] in {"newer_state", "contradicts", "corrects"}),
+                classified[0],
+            )
+            # A duplicate decision is safe only for the same deterministic
+            # edge.  A classifier can call a related-but-different fact a
+            # duplicate; confirming that candidate would otherwise discard
+            # the incoming statement.  Keep that ambiguity in review.
+            if selected[1] == "duplicate" and selected is not exact_duplicate:
+                selected = (selected[0], "contradicts")
+            resolve_text_fact(graph, ledger, new_fact, selected[0], selected[1])
+        else:
+            # Text/history ingestion must never reopen a closed edge.
+            w.upsert_fact_edges(
+                graph, fact.relation, subject_kind, object_kind, [fact_row], revive=False,
             )
 
         edges_supported.append(RecordEdgeRef(fact.relation, subject_uid, object_uid))
@@ -1145,6 +1204,9 @@ def run_semantic_pass(
     max_concurrency: int | None = None,
     collection: str = vector_store.COLLECTION,
     context_provider: Callable[[PendingChunk], str | SemanticContext | None] | None = None,
+    triage_classifier: LayaTriageClassifier | None = None,
+    fact_update_classifier: LayaFactUpdateClassifier | None = None,
+    same_entity_classifier: LayaSameEntityClassifier | None = None,
 ) -> SemanticPassResult:
     """Process up to `budget` pending chunks (default: $LLM_BUDGET_PER_RUN).
     A chunk that fails its LLM call is left 'pending' and retried on a later
@@ -1187,6 +1249,8 @@ def run_semantic_pass(
     run_id = str(uuid.uuid4())
     semantic_uids: dict[tuple[str, str, str], str] = {}
     decision_name_index: dict[str, str] = {}
+    fact_update_classifier = fact_update_classifier or LayaFactUpdateClassifier()
+    same_entity_classifier = same_entity_classifier or LayaSameEntityClassifier()
 
     result = SemanticPassResult()
     touched_records: set[str] = set()
@@ -1194,9 +1258,13 @@ def run_semantic_pass(
     chunks = ledger.pending_chunks(budget, record_prefix=record_prefix)
     total_chunks = len(chunks)
 
-    # Gate 1: selective admission + optional Laya triage (ADMISSION_GATES[0]),
-    # run once per chunk before it is scheduled for `_call_llm`.
-    runnable: list[tuple[PendingChunk, object, str | SemanticContext | None]] = []
+    # Gate 1: resolve deterministic eligibility first, then score every
+    # eligible chunk in one Laya batch. A scorer failure is fail-open: the
+    # existing selective policy remains authoritative and extraction runs.
+    triage_mode = os.getenv("NEURON_TRIAGE", "shadow").lower()
+    if triage_mode not in {"off", "shadow", "enforce"}:
+        raise ValueError("NEURON_TRIAGE must be 'off', 'shadow', or 'enforce'")
+    eligible: list[tuple[PendingChunk, object]] = []
     for chunk in chunks:
         entry = ledger.get(chunk.record_key)
         if entry is None or entry.primary_node_uid is None:
@@ -1206,11 +1274,31 @@ def run_semantic_pass(
                 chunk.chunk_id, chunk.record_key,
             )
             continue
-        if _gate_laya_triage(chunk) is not None:
-            # Unreachable today -- `_gate_laya_triage` is a documented no-op
-            # placeholder (plan.md Phase 3.1/3.2, blocked on Laya packaging).
-            # This branch exists so a real triage implementation has exactly
-            # one place to plug into.
+        eligible.append((chunk, entry))
+
+    triage_by_chunk: dict[tuple[str, str], TriageDecision] = {}
+    if triage_mode != "off" and eligible:
+        try:
+            scorer = triage_classifier or LayaTriageClassifier()
+            decisions = scorer.classify_batch([chunk for chunk, _entry in eligible])
+            for (chunk, _entry), decision in zip(eligible, decisions):
+                triage_by_chunk[(chunk.record_key, chunk.chunk_id)] = decision
+                ledger.record_triage(
+                    chunk.record_key, chunk.chunk_id, decision.chunk_type,
+                    decision.durable_probability, decision.model,
+                )
+        except Exception:
+            logger.exception("Laya triage failed; preserving existing selective admission")
+
+    runnable: list[tuple[PendingChunk, object, str | SemanticContext | None]] = []
+    for chunk, entry in eligible:
+        drop = _gate_laya_triage(
+            chunk, triage_by_chunk.get((chunk.record_key, chunk.chunk_id)), mode=triage_mode,
+        )
+        if drop is not None:
+            ledger.record_drops(chunk.record_key, chunk.chunk_id, [drop])
+            ledger.commit_chunk(chunk.record_key, chunk.chunk_id, SemanticStatus.DONE)
+            touched_records.add(chunk.record_key)
             logger.info(
                 "gate 1 (selective_admission_and_laya_triage) skipped chunk %s of %s: "
                 "laya triage",
@@ -1248,6 +1336,8 @@ def run_semantic_pass(
                     if isinstance(related_context, SemanticContext) else frozenset()
                 ),
                 run_id=run_id, semantic_uids=semantic_uids, decision_name_index=decision_name_index,
+                fact_update_classifier=fact_update_classifier,
+                same_entity_classifier=same_entity_classifier,
             )
             result.findings_written += sum(
                 1 for item in extraction.assessments
@@ -1262,6 +1352,7 @@ def run_semantic_pass(
             result.entities_written += entities
             result.facts_written += facts
             result.facts_rejected += rejected
+            ledger.record_triage_yield(chunk.record_key, chunk.chunk_id, facts)
             logger.info(
                 "chunk %s of %s: %d terms, %d decisions, %d semantic entities extracted, %d facts written, %d rejected",
                 chunk.chunk_index, chunk.record_key,

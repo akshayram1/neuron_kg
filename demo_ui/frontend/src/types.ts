@@ -29,6 +29,46 @@ export interface RetrievalInfo {
   expansionRounds: number;
 }
 
+export interface ReviewItem {
+  id: number;
+  type: string;
+  payload: Record<string, unknown>;
+  identity: string | null;
+  state: "pending" | "approved" | "rejected";
+  decided_by: string | null;
+  decided_at: string | null;
+  created_at: string;
+}
+
+export interface LinkCandidateItem {
+  id: number;
+  from_uid: string;
+  to_uid: string;
+  relation: string;
+  confidence: number;
+  derived_rule: string;
+  state: "pending" | "approved" | "rejected";
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface DashboardData {
+  graph_name: string;
+  hygiene: Array<{
+    label: string; isolated: number; total: number; ratio: number;
+    run_id: string; created_at: string;
+  }>;
+  queue: Record<string, number>;
+  resolution: Array<{
+    run_id: string; label: string; resolved_by: string; count: number; created_at: string;
+  }>;
+  merges: Array<{
+    id: number; survivor_uid: string; absorbed_uid: string; label: string;
+    merged_at: string; reason: string | null;
+  }>;
+  latest_eval: { title: string; metrics: Record<string, string> } | null;
+}
+
 export interface GraphInfo {
   name: string;
   displayName: string;
@@ -103,6 +143,11 @@ export interface ChatResponse {
   readOnly: boolean;
   tokenUsage: TokenUsage;
   retrieval: RetrievalInfo;
+  support?: {
+    score: number;
+    lowSupport: boolean;
+    citedNodeUids: string[];
+  };
 }
 
 export interface TokenUsage {

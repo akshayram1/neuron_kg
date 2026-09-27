@@ -1,9 +1,27 @@
 # Neuron — Retrieval, Ingestion and Temporal Upgrade Plan
 
-**Status:** proposed, not started.
-**Date:** 24 Sep 2026
+**Status:** implementation complete through Phase 7.3; measurement/data gates remain.
+**Date:** 24 Sep 2026 · **Last verified:** 27 Sep 2026
 **Scope:** `/Users/akshaychame/Animesh_sir_exp/neuron` only. Laya (`/Users/akshaychame/personal_exp/laya`) is used as a component *inside* Neuron, not as a separate system.
 **Relationship to the existing `plan.md`:** the original `plan.md` is the locked design for Neuron v1 (FalkorDB, deterministic-first, no Graphiti). This document is the next plan on top of it. It does not reverse any v1 decision. Save it next to the original as `upgrade-plan.md` so both stay readable.
+
+### Implementation status (27 Sep 2026)
+
+| Phase | Current state |
+|---|---|
+| 0 | Harness, stage/packing metrics, 44 chain questions and coverage reporting are implemented. The frozen mixed set and trustworthy baseline numbers remain blocked by missing/collided `nilus`/`less_token` graph data. |
+| 1 | Wide pool, token packing, typed expansion, authority tiers and pair lane are implemented. |
+| 2 | Real batched Laya reranking, all-lane scoring, bounded bridge recovery, RRF fallback and the on/off control are implemented. Promotion thresholds still require a valid dev/test benchmark. |
+| 3 | Review queue and real batched Laya triage (`off`/`shadow`/`enforce`) are implemented. Source eligibility changes remain conditional on measured yield. |
+| 4 | Scoped identity, namespace-aware vector projection, polarity veto, real Laya gray-zone scoring, review-first merge and aliases are implemented. Existing data still needs a scoped migration/rebuild. |
+| 5 | Writer contract, stated dates, classification-before-write, real Laya `fact_update`, correction/state-change primitives, four-clock handling and centralized live reads are implemented. `corrects` remains an explicit reviewed action because the trained Laya vocabulary cannot distinguish it from `updates`. |
+| 6 | Hygiene ledger/job, candidate links, duplicate collector, atomic review actions, `BridgePanel` and `/api/dashboard` are implemented. |
+| 7 | 7.1 path support, 7.2 recovered-hop validation and 7.3 explicit thumbs-up write-back are implemented. 7.4 and 7.5 remain conditional on measured latency/multi-hop failures. |
+
+Verification at this status: `503 passed, 169 skipped, 0 failed`; the React
+production build passes. A FalkorDB/Qdrant integration slice on isolated test
+graphs passes with `171 passed, 4 skipped, 0 failed`; those four skips are the
+Postgres-vector variants without an enabled test service configuration.
 
 ---
 

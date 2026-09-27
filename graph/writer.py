@@ -149,6 +149,7 @@ def upsert_fact_edges(
     """Create-or-confirm a live fact edge. rows: {from_uid, to_uid,
     source_record_keys, evidence, extraction_method, confidence, ...}.
     Optional per-row fields: `pinned` (bool), `decay_class` (str),
+    `valid_at_basis` ("stated" | "record_time"), `invalid_at` (ISO date),
     `attested_by_record` (str, a source record key -- see below),
     `projection_status` ("live" | "pending_review").
 
@@ -217,7 +218,9 @@ def upsert_fact_edges(
         MATCH (b:{_label(to_label)} {{uid: row.to_uid}})
         MERGE (a)-[r:{_label(rel_type)}]->(b)
         ON CREATE SET
-            r.valid_at = coalesce(row.valid_at, $now), r.invalid_at = null, r.first_seen_at = $now,
+            r.valid_at = coalesce(row.valid_at, $now),
+            r.valid_at_basis = coalesce(row.valid_at_basis, 'record_time'),
+            r.invalid_at = row.invalid_at, r.first_seen_at = $now,
             r.source_record_keys = row.source_record_keys,
             r.evidence = row.evidence, r.extraction_method = row.extraction_method,
             r.confidence = row.confidence, r.last_confirmed_at = $now,
@@ -241,6 +244,11 @@ def upsert_fact_edges(
                 WHEN NOT $revive THEN r.valid_at
                 WHEN r.invalid_at IS NULL THEN r.valid_at
                 ELSE coalesce(row.valid_at, $now)
+            END,
+            r.valid_at_basis = CASE
+                WHEN NOT $revive THEN coalesce(r.valid_at_basis, row.valid_at_basis, 'record_time')
+                WHEN row.valid_at_basis IS NULL THEN coalesce(r.valid_at_basis, 'record_time')
+                ELSE row.valid_at_basis
             END,
             r.invalid_at = CASE WHEN $revive THEN null ELSE r.invalid_at END,
             r.derived = CASE WHEN row.derived IS NULL THEN r.derived ELSE row.derived END,

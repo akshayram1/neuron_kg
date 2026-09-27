@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from falkordb import Graph
 
 from graph.access import AccessScope
+from graph.fact_predicates import live_fact_cypher
 from graph.search import SearchHit
 
 _WORD_RE = re.compile(r"[A-Za-z]+")
@@ -162,7 +163,7 @@ def _current_api_consumers(
         f"""
         MATCH (project:Project)-[:HAS_REPOSITORY]->(:Repository)-[:CONTAINS]->
               (file:SourceFile)-[call:CALLS_ENDPOINT]->(endpoint:Endpoint)
-        WHERE call.invalid_at IS NULL AND endpoint.path IS NOT NULL
+        WHERE {live_fact_cypher('call')} AND endpoint.path IS NOT NULL
         UNWIND coalesce(call.source_record_keys, []) AS source_key
         MATCH (sr:SourceRecord {{record_key: source_key}})
         WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}
@@ -341,7 +342,7 @@ def _unassigned_work_items(
         WHERE sr.deleted_at IS NULL AND w.issue_key IS NOT NULL
           AND {acl} {provider_filter}
         OPTIONAL MATCH (w)-[r:ASSIGNED_TO]->(:Person)
-        WHERE r.invalid_at IS NULL
+        WHERE {live_fact_cypher('r')}
         WITH w, count(r) AS live
         WHERE live = 0
         RETURN DISTINCT w.uid, w.name, w.issue_key
@@ -382,7 +383,7 @@ def _assigned_to(
     rows = graph.query(
         f"""
         MATCH (w:WorkItem)-[r:ASSIGNED_TO]->(p:Person)
-        WHERE p.uid IN $uids AND r.invalid_at IS NULL AND w.issue_key IS NOT NULL
+        WHERE p.uid IN $uids AND {live_fact_cypher('r')} AND w.issue_key IS NOT NULL
         UNWIND coalesce(r.source_record_keys, []) AS source_key
         MATCH (sr:SourceRecord {{record_key: source_key}})
         WHERE sr.deleted_at IS NULL AND {acl} {provider_filter}

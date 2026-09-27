@@ -50,6 +50,7 @@ from qdrant_client import QdrantClient
 from connectors.core.ledger import ConnectorLedger
 from graph import writer as w
 from graph.expand import HUB_LABELS
+from graph.fact_predicates import live_fact_cypher
 from graph.text_window import best_window
 from graph.vector_store import CONTENT_VECTOR, COLLECTION, search_above
 from storage.postgres import PostgresVectorClient
@@ -102,17 +103,17 @@ def find_two_hop_candidates(
     themselves.
     """
     rows = graph.query(
-        """
+        f"""
         MATCH (z) WHERE (z:Term OR z:System OR z:Decision)
         MATCH (a)-[r1]-(z)
-        WHERE r1.invalid_at IS NULL AND type(r1) <> 'MENTIONED_IN'
+        WHERE {live_fact_cypher('r1')} AND type(r1) <> 'MENTIONED_IN'
           AND NOT labels(a)[0] IN $hub_labels
         MATCH (b)-[r2]-(z)
-        WHERE r2.invalid_at IS NULL AND type(r2) <> 'MENTIONED_IN'
+        WHERE {live_fact_cypher('r2')} AND type(r2) <> 'MENTIONED_IN'
           AND NOT labels(b)[0] IN $hub_labels
           AND a.uid < b.uid
         OPTIONAL MATCH (a)-[existing]-(b)
-        WHERE existing.invalid_at IS NULL
+        WHERE {live_fact_cypher('existing')}
         WITH a, b, z, existing
         WHERE existing IS NULL
         RETURN DISTINCT a.uid, b.uid, z.uid
@@ -126,10 +127,10 @@ def find_two_hop_candidates(
 
     z_uids = list({z for _a, _b, z in triples})
     degree_rows = graph.query(
-        """
+        f"""
         UNWIND $z_uids AS zuid
-        MATCH (z {uid: zuid})-[r]-()
-        WHERE r.invalid_at IS NULL
+        MATCH (z {{uid: zuid}})-[r]-()
+        WHERE {live_fact_cypher('r')}
         RETURN z.uid, count(r)
         """,
         params={"z_uids": z_uids},
@@ -157,10 +158,10 @@ def _isolated_document_uids(graph: Graph) -> list[str]:
     (not just `e`), silently dropping every isolated node instead of
     finding it. Binding `d` in its own `MATCH` first avoids that."""
     rows = graph.query(
-        """
+        f"""
         MATCH (d:Document)
         OPTIONAL MATCH (d)-[e:DOCUMENTS]->()
-        WHERE e.invalid_at IS NULL
+        WHERE {live_fact_cypher('e')}
         WITH d, count(e) AS live_out
         WHERE live_out = 0
         RETURN d.uid
@@ -174,10 +175,10 @@ def _isolated_decision_uids(graph: Graph) -> list[str]:
     See `_isolated_document_uids` for why the node/relationship MATCHes are
     kept separate."""
     rows = graph.query(
-        """
+        f"""
         MATCH (d:Decision)
         OPTIONAL MATCH (d)-[e:APPLIES_TO]->()
-        WHERE e.invalid_at IS NULL
+        WHERE {live_fact_cypher('e')}
         WITH d, count(e) AS live_out
         WHERE live_out = 0
         RETURN d.uid

@@ -3,9 +3,8 @@
 25-plan.md Phase 5 §5.0.6 ("Read contract"): "ordinary world-time readers
 require `assertion_status != 'corrected'` and `projection_status = 'live'`."
 
-`graph/chat.py`, `graph/entity.py`, `graph/derived.py` and roughly twenty
-other call sites across the codebase each currently hand-roll
-`r.invalid_at IS NULL` wherever they need "the live fact(s)". That was
+Older readers across the codebase hand-rolled `r.invalid_at IS NULL`
+wherever they needed "the live fact(s)". That was
 harmless as long as nothing ever wrote `assertion_status` or
 `projection_status` -- every edge in the graph implicitly satisfied both
 checks by omission. `graph/writer.py`'s `correct_fact` and the
@@ -16,12 +15,8 @@ fact we now know was never true) or a `pending_review` candidate (a fact
 not yet eligible to answer with) as if either were an ordinary live fact.
 
 This module is the one place that predicate is defined, in both a Cypher
-fragment and a pure-Python mirror. It deliberately does **not** rewrite any
-existing reader -- `graph/chat.py` in particular is off-limits to this
-change, and updating the ~23 other `invalid_at IS NULL` call sites across
-the codebase is a separate, larger follow-up (tracked, not started here;
-see the Phase 5 writer-contract report). Every reader touched going
-forward should import and use `LIVE_FACT_CYPHER` / `live_fact_cypher` /
+fragment and a pure-Python mirror. World-time readers import and use
+`LIVE_FACT_CYPHER` / `live_fact_cypher` /
 `is_live_fact` instead of re-deriving the check by hand, so chat, entity
 detail, history and graph views cannot drift from each other again.
 """

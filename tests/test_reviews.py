@@ -239,13 +239,9 @@ def test_api_list_rejects_invalid_state(tmp_path, monkeypatch):
 
 def test_api_approve_and_reject_end_to_end(tmp_path, monkeypatch):
     """Generic queue plumbing (list/approve/reject/rejection-cache), for a
-    review `type` that has no Phase 6.5 apply-on-approval step --
+    review `type` that has no Phase 6.5 apply-on-approval step:
     `polarity_conflict_candidate` (§4.1, real type, never wired to an apply
-    function) rather than `possibly_same_as`, since approving a
-    `possibly_same_as` review now dispatches to
-    `apply_approved_possibly_same_as`, which always raises (see
-    `test_approve_possibly_same_as_is_approved_but_apply_fails` below) --
-    this test is specifically about the "no apply step" no-regression case."""
+    function). This test covers the "no apply step" no-regression case."""
     client = _client(tmp_path, monkeypatch)
     ledger = review_routes._ledger("default")
     approve_id = ledger.create_review(
@@ -438,18 +434,27 @@ def test_api_approve_duplicate_pair_triggers_real_apply(tmp_path, monkeypatch, g
 
 
 @integration
-def test_api_approve_possibly_same_as_is_approved_but_apply_fails(tmp_path, monkeypatch, graph_name):
-    """No real `possibly_same_as` review is ever proposed today
-    (`apply_approved_possibly_same_as` always raises `NotImplementedError` --
-    see `graph/resolve_text_fact.py`), so approving one through the unified
-    endpoint must surface that failure loudly (500, `review_routes.py`'s
-    documented approved-but-apply-failed edge case) rather than silently
-    reporting success -- and the ledger's state flip, which already
-    committed before the apply step ran, must not be hidden or rolled back."""
+def test_api_approve_possibly_same_as_triggers_real_apply(tmp_path, monkeypatch, graph_name):
+    """An approved semantic identity candidate merges the reviewed pair."""
     client = _client(tmp_path, monkeypatch)
+    g = _falkor_graph(graph_name)
+    w.upsert_entities(g, "Term", [
+        {"uid": "term-a", "props": {"name": "Redis rate limiter", "namespace_uid": "proj-1"}},
+        {"uid": "term-b", "props": {"name": "Redis limiter", "namespace_uid": "proj-1"}},
+    ])
+    w.upsert_entities(g, "System", [{"uid": "sys-1", "props": {"name": "Redis"}}])
+    w.upsert_fact_edges(g, "APPLIES_TO", "Term", "System", [{
+        "from_uid": "term-a", "to_uid": "sys-1", "source_record_keys": ["r1", "r2"],
+        "evidence": "e", "extraction_method": "llm", "confidence": 0.9,
+    }])
+    w.upsert_fact_edges(g, "APPLIES_TO", "Term", "System", [{
+        "from_uid": "term-b", "to_uid": "sys-1", "source_record_keys": ["r3"],
+        "evidence": "e", "extraction_method": "llm", "confidence": 0.9,
+    }])
     ledger = review_routes._ledger(graph_name)
     review_id = ledger.create_review(
-        "possibly_same_as", {"subject_uid": "a", "object_uid": "b"},
+        "possibly_same_as",
+        {"subject_uid": "term-a", "object_uid": "term-b", "namespace_uid": "proj-1"},
     )
 
     response = client.post(
@@ -457,10 +462,11 @@ def test_api_approve_possibly_same_as_is_approved_but_apply_fails(tmp_path, monk
         params={"decided_by": "tester", "graph_name": graph_name},
     )
 
-    assert response.status_code == 500
-    detail = response.json()["detail"]
-    assert str(review_id) in detail
-    assert "approved" in detail
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review"]["state"] == "approved"
+    assert body["applied"]["survivor_uid"] == "term-a"
+    assert body["applied"]["absorbed_uid"] == "term-b"
 
     row = ledger.get_review(review_id)
     assert row.state == ReviewState.APPROVED

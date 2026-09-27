@@ -21,8 +21,7 @@ calls it in the same request via `_APPLY_FUNCTIONS`:
   - `fact_update`     -> `graph.resolve_text_fact.apply_approved_fact_update`
   - `duplicate_pair`  -> `graph.duplicate_collector.apply_approved_duplicate_merge`
   - `possibly_same_as`-> `graph.resolve_text_fact.apply_approved_possibly_same_as`
-    (currently always raises `NotImplementedError` -- see that function's
-    docstring; nothing proposes a real `possibly_same_as` review yet)
+    (pairwise merge plus namespace-aware alias)
   - any other type (or an unrecognized one) -> no apply step, just the state
     flip, identical to this endpoint's behavior before this dispatch existed.
 

@@ -257,7 +257,7 @@ def resolve_backlinks_for_target(
         ledger.record_edge(record_key, ref.rel_type, ref.from_uid, ref.to_uid)
         written.append(ref)
     if written:
-        materialize_around(graph, target_uid, str(rows[0][0]))
+        materialize_around(graph, target_uid, str(rows[0][0]), ledger=ledger)
     return written
 
 

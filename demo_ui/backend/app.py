@@ -39,6 +39,7 @@ from util.paths import DATA_DIR
 
 from connectors.core.ledger import ConnectorLedger
 from demo_ui.backend.bitbucket_routes import router as bitbucket_router
+from demo_ui.backend.dashboard_routes import router as dashboard_router
 from demo_ui.backend.github_routes import router as github_router
 from demo_ui.backend.jira_routes import router as jira_router
 from demo_ui.backend.link_candidate_routes import router as link_candidate_router
@@ -47,7 +48,7 @@ from demo_ui.backend.review_routes import router as review_router
 from demo_ui.backend.story_routes import router as story_router
 from demo_ui.backend.sync_coverage_routes import router as sync_coverage_router
 from demo_ui.backend.access import access_scope_for_request
-from demo_ui.backend.job_worker import run_worker
+from demo_ui.backend.job_worker import run_hygiene_scheduler, run_worker
 from graph import multigraph
 from graph import vector_store
 from graph.chat import reranker_status, run_chat_turn, set_reranker_enabled
@@ -56,6 +57,7 @@ from graph.entity import fetch_entity_detail
 from graph.falkor_client import get_graph
 from graph.graph_view import fetch_graph, fetch_sources
 from graph.history import fetch_fact_history
+from graph.path_support import propose_verified_links
 from graph.schema import bootstrap_schema
 from graph.skos_export import build_skos_turtle
 from util.logging import configure_logging
@@ -65,6 +67,7 @@ configure_logging()
 logger = logging.getLogger("uvicorn.error.neuron")
 _worker_stop: asyncio.Event | None = None
 _worker_task: asyncio.Task | None = None
+_hygiene_task: asyncio.Task | None = None
 LEDGER_PATH = DATA_DIR / "connector_ledger.sqlite3"
 GRAPH_REGISTRY = multigraph.GraphRegistry(DATA_DIR / "graphs.sqlite3")
 RUNTIME_SETTINGS_PATH = DATA_DIR / "runtime_settings.sqlite3"
@@ -93,6 +96,12 @@ class GraphCreateRequest(BaseModel):
 
 class RerankerConfigRequest(BaseModel):
     enabled: bool
+
+
+class ChatFeedbackRequest(BaseModel):
+    graph_name: str = Field(default=multigraph.DEFAULT_GRAPH_NAME, max_length=40)
+    node_uids: list[str] = Field(min_length=2, max_length=20)
+    helpful: bool
 
 
 def _runtime_setting(name: str) -> str | None:
@@ -145,6 +154,7 @@ app.include_router(story_router)
 app.include_router(sync_coverage_router)
 app.include_router(review_router)
 app.include_router(link_candidate_router)
+app.include_router(dashboard_router)
 
 
 @app.middleware("http")
@@ -157,7 +167,7 @@ async def prevent_stale_frontend_shell(request: Request, call_next):
 
 @app.on_event("startup")
 async def _ensure_schema() -> None:
-    global _worker_stop, _worker_task
+    global _worker_stop, _worker_task, _hygiene_task
     bootstrap_schema(get_graph())
     stored_laya = _runtime_setting("laya_enabled")
     if stored_laya is not None:
@@ -169,6 +179,9 @@ async def _ensure_schema() -> None:
     )
     _worker_stop = asyncio.Event()
     _worker_task = asyncio.create_task(run_worker(_worker_stop))
+    _hygiene_task = asyncio.create_task(run_hygiene_scheduler(
+        _worker_stop, lambda: [row["name"] for row in GRAPH_REGISTRY.list()],
+    ))
 
 
 @app.on_event("shutdown")
@@ -179,6 +192,10 @@ async def _stop_worker() -> None:
         _worker_task.cancel()
         with suppress(asyncio.CancelledError):
             await _worker_task
+    if _hygiene_task is not None:
+        _hygiene_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _hygiene_task
 
 
 @app.get("/api/health")
@@ -517,7 +534,27 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
                 result.retrieval_trace.expansion_rounds if result.retrieval_trace else 0
             ),
         },
+        "support": {
+            "score": result.path_support_score,
+            "lowSupport": result.low_support,
+            "citedNodeUids": result.cited_node_uids,
+        },
     }
+
+
+@app.post("/api/chat/feedback")
+async def chat_feedback(payload: ChatFeedbackRequest) -> dict:
+    """Explicit positive verification may propose links; silence never does."""
+    if not payload.helpful:
+        return {"candidateIds": []}
+    target = _resolve(payload.graph_name)
+    candidate_ids = await run_in_threadpool(
+        propose_verified_links,
+        get_graph(name=target.falkor_name),
+        ConnectorLedger(target.ledger_path),
+        payload.node_uids,
+    )
+    return {"candidateIds": candidate_ids}
 
 
 # After `npm run build`, FastAPI can serve the complete app on one port.

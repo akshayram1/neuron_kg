@@ -373,10 +373,6 @@ class PostgresStore:
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()",
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS stale_at TIMESTAMPTZ",
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS stale_reason TEXT",
-            # No write path populates this yet (see graph/vector_store.py's
-            # search_above docstring) -- the column exists so the namespace
-            # filter is real once a follow-up wires it into upsert_vectors's
-            # callers, and existing rows read back NULL (no namespace).
             "ALTER TABLE entity_embeddings ADD COLUMN IF NOT EXISTS namespace_uid TEXT",
         ]
         # A pristine database does not have a ``vector`` type to register yet.
@@ -1041,20 +1037,21 @@ class PostgresStore:
         values = [(
             collection, row["uid"], row["label"], row["embedding"],
             row.get("name_embedding") or row["embedding"], row.get("embedded_text"),
-            row.get("embedded_model") or "text-embedding-3-small",
+            row.get("embedded_model") or "text-embedding-3-small", row.get("namespace_uid"),
         ) for row in rows]
         with self.connect() as connection:
             connection.cursor().executemany(
                 """
                 INSERT INTO entity_embeddings(
                     collection, uid, label, content_embedding, name_embedding,
-                    embedded_text, embedded_model
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    embedded_text, embedded_model, namespace_uid
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (collection, uid) DO UPDATE SET
                     label=excluded.label, content_embedding=excluded.content_embedding,
                     name_embedding=excluded.name_embedding,
                     embedded_text=excluded.embedded_text,
-                    embedded_model=excluded.embedded_model, updated_at=now()
+                    embedded_model=excluded.embedded_model,
+                    namespace_uid=excluded.namespace_uid, updated_at=now()
                 """,
                 values,
             )

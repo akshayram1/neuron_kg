@@ -96,9 +96,18 @@ def test_windows_disjoint_missing_starts_but_new_ends_before_old_starts():
     ) is True
 
 
-def test_classify_fact_update_raises_not_implemented():
-    with pytest.raises(NotImplementedError):
-        classify_fact_update("the limit is 100", "2026-01-01T00:00:00Z", "the limit is now 1000", "2026-06-01T00:00:00Z")
+def test_classify_fact_update_calls_laya_and_maps_updates():
+    class Classifier:
+        def classify(self, state):
+            assert state["existing_fact"] == "the limit is 100"
+            assert state["new_timestamp"] == "2026-06-01T00:00:00Z"
+            return "updates", 0.97
+
+    assert classify_fact_update(
+        "the limit is 100", "2026-01-01T00:00:00Z",
+        "the limit is now 1000", "2026-06-01T00:00:00Z",
+        classifier=Classifier(),
+    ) == "newer_state"
 
 
 @pytest.mark.parametrize(
@@ -615,15 +624,40 @@ def test_apply_approved_fact_update_wrong_state_raises(ledger):
         apply_approved_fact_update(None, ledger, review_id)
 
 
-def test_apply_approved_possibly_same_as_raises_not_implemented():
-    """Rung 6 of the §4.2 resolution ladder (`_rung6_laya_same_entity`) is a
-    verified placeholder that never proposes a real `possibly_same_as`
-    review (see that function's own docstring) -- this stub matches
-    `classify_fact_update`'s established "raise loud, document what's
-    missing" posture rather than guessing at a merge/alias implementation.
-    Raises unconditionally, with no graph/ledger access needed to prove it."""
-    with pytest.raises(NotImplementedError, match="possibly_same_as"):
-        apply_approved_possibly_same_as(None, None, 1)
+def test_apply_approved_possibly_same_as_merges_and_adds_scoped_alias(monkeypatch):
+    from types import SimpleNamespace
+    import graph.duplicate_collector as duplicates
+
+    calls = []
+    monkeypatch.setattr(duplicates, "_choose_survivor", lambda _g, a, b: (b, a))
+    monkeypatch.setattr(duplicates, "_absorb_fact_edges", lambda *args: calls.append("edges"))
+    monkeypatch.setattr(duplicates, "_absorb_mentions", lambda *args: calls.append("mentions"))
+
+    class Graph:
+        def query(self, *_args, **_kwargs):
+            return SimpleNamespace(result_set=[[
+                "Term", "old API", "project-1", "Term", "Payments API", "project-1",
+            ]])
+
+    class Ledger:
+        def __init__(self):
+            self.alias = None
+        def get_review(self, _id):
+            return SimpleNamespace(
+                type="possibly_same_as", state=ReviewState.APPROVED,
+                payload={"subject_uid": "new", "object_uid": "existing"},
+            )
+        def add_entity_alias(self, *args, **kwargs):
+            self.alias = (args, kwargs)
+        def record_merge_trace(self, *args, **kwargs):
+            return 7
+
+    ledger = Ledger()
+    result = apply_approved_possibly_same_as(Graph(), ledger, 1)
+    assert calls == ["edges", "mentions"]
+    assert result["survivor_uid"] == "existing"
+    assert result["absorbed_uid"] == "new"
+    assert ledger.alias[0][:4] == ("Term", "project-1", "old api", "existing")
 
 
 # --------------------------------------------------- end-to-end (integration)

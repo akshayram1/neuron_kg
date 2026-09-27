@@ -192,6 +192,19 @@ def test_resolution_stats_for_unknown_run_is_empty(tmp_path):
     assert ledger.resolution_stats_for_run("no-such-run") == []
 
 
+def test_latest_resolution_stats_returns_whole_newest_run(tmp_path):
+    ledger = ConnectorLedger(tmp_path / "l.sqlite3")
+    ledger.record_resolution("old", "Term", "new")
+    ledger.record_resolution("new", "Term", "alias", 2)
+    ledger.record_resolution("new", "Decision", "vector", 3)
+
+    rows = ledger.latest_resolution_stats()
+
+    assert {(row.label, row.resolved_by): row.count for row in rows} == {
+        ("Decision", "vector"): 3, ("Term", "alias"): 2,
+    }
+
+
 def test_resolution_stats_read_back_covers_the_ladders_vocabulary(tmp_path):
     """Not an enum -- the ladder's current outcomes (§4.2) must all be
     representable as plain strings without any schema change."""
