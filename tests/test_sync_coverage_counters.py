@@ -309,11 +309,12 @@ def test_sync_coverage_migrates_a_pre_phase_0_6_table(tmp_path):
     the same migration-safe `ALTER TABLE ... ADD COLUMN` pattern the rest of
     this ledger already uses for `source_records`/`source_chunks`/
     `relation_axioms`."""
-    import sqlite3
     from datetime import UTC, datetime
 
+    from storage import sql_backend
+
     path = tmp_path / "legacy.sqlite3"
-    connection = sqlite3.connect(path)
+    connection = sql_backend.connect(path)
     connection.execute(
         """
         CREATE TABLE sync_coverage (
