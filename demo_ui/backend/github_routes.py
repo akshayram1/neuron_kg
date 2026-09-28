@@ -176,6 +176,7 @@ async def _run_sync(
             "records_done": 0, "records_total": 0, "records_written": 0,
             "records_kept": 0, "files_matched": 0, "files_processed": 0,
             "files_too_large": 0, "files_without_text": 0, "commits_fetched": 0,
+            "files_extension_filtered": 0, "commits_capped": False,
             "chunks_ingested": 0, "chunks_total": 0,
             "entities_written": 0, "facts_written": 0,
         }
@@ -190,12 +191,15 @@ async def _run_sync(
             files_task = client.list_files(repository, set(payload.file_types), settings.max_file_bytes)
             commits_task = (
                 client.list_commits(repository, settings.max_commits_per_sync)
-                if payload.include_commit_messages else asyncio.sleep(0, result=[])
+                if payload.include_commit_messages else asyncio.sleep(0, result=([], False))
             )
-            (files, too_large), commits = await asyncio.gather(files_task, commits_task)
+            (files, too_large, extension_filtered), (commits, commits_capped) = await asyncio.gather(
+                files_task, commits_task
+            )
             total = len(files) + len(commits)
             base.update({"records_total": total, "files_matched": len(files),
-                         "files_too_large": too_large, "commits_fetched": len(commits)})
+                         "files_too_large": too_large, "commits_fetched": len(commits),
+                         "files_extension_filtered": extension_filtered, "commits_capped": commits_capped})
             store.set_sync_run(run_id, "running", {
                 **base, "phase": "ingesting", "current": f"Writing {total} GitHub records…",
             })
@@ -262,15 +266,21 @@ async def _run_sync(
 
         orphans_removed = gp.delete_orphaned_shared_entities(graph)
 
-        # Sync coverage (plan.md Phase 0.4). `skipped_by_rule_count` covers
-        # what this run's own rules dropped before writing (files over
-        # `max_file_bytes`, files that failed to decode as text) -- it does
-        # NOT include files whose extension doesn't match
-        # `payload.file_types` (filtered inside GitHubApiClient.list_files
-        # without a counter) or commits beyond `max_commits_per_sync`
-        # (unknown without a provider total). `provider_reported_total` is
-        # left None: the GitHub tree/commit listing calls used here
-        # (connectors/github_app/api.py) don't return an aggregate total.
+        # Sync coverage (plan.md Phase 0.4, extended by Phase 0.6).
+        # `skipped_by_rule_count` stays narrowly defined as what this run's
+        # own rules dropped after the extension filter (files over
+        # `max_file_bytes`, files that failed to decode as text) -- its
+        # meaning is unchanged from before Phase 0.6 so no existing
+        # caller/dashboard sees its number shift. The two previously
+        # -uncounted drops now have their own fields instead:
+        # `files_extension_filtered` (files whose extension doesn't match
+        # `payload.file_types`, from `GitHubApiClient.list_files`) and
+        # `commits_capped` (whether more commits exist beyond
+        # `max_commits_per_sync` -- a boolean, not a count: see
+        # `SyncCoverage`'s docstring for why an exact beyond-cap count isn't
+        # fetched). `provider_reported_total` is left None: the GitHub
+        # tree/commit listing calls used here (connectors/github_app/api.py)
+        # don't return an aggregate total.
         record_keys = list(present_file_keys) + list(present_commit_keys)
         sync_ledger_count = ledger.count_present(record_keys)
         sync_skipped_by_rule = too_large + without_text
@@ -279,6 +289,8 @@ async def _run_sync(
             provider_reported_total=None,
             fetched_count=total, ledger_count=sync_ledger_count,
             skipped_by_rule_count=sync_skipped_by_rule,
+            extension_filtered_count=extension_filtered,
+            commits_capped=commits_capped,
         )
 
         result = {
@@ -291,6 +303,7 @@ async def _run_sync(
             "orphans_removed": orphans_removed,
             "provider_reported_total": None, "fetched_count": total,
             "ledger_count": sync_ledger_count, "skipped_by_rule_count": sync_skipped_by_rule,
+            "files_extension_filtered": extension_filtered, "commits_capped": commits_capped,
             **TokenUsage().as_dict("ingestion"),
         }
         store.finish_source_sync(payload.installation_id, payload.repository_id)

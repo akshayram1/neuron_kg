@@ -280,17 +280,24 @@ class BitbucketApiClient:
 
     async def files(
         self, repository: BitbucketRepository, extensions: set[str], max_bytes: int,
-    ) -> tuple[list[BitbucketFile], int, int]:
+    ) -> tuple[list[BitbucketFile], int, int, int]:
         """Walk the repository tree, downloading matched files inline.
 
         Bitbucket's src API has no single recursive-tree endpoint like
         GitHub's git/trees — each directory needs its own listing call — so
         content is fetched during the same walk rather than in a second pass.
-        Returns (files, too_large_count, without_text_count).
+        Returns (files, too_large_count, without_text_count,
+        extension_filtered_count) -- the last being files whose extension is
+        not in `extensions` (plan.md Phase 0.6): previously this filter
+        (below) silently `continue`d with no counter at all, so a repo full
+        of e.g. `.go`/`.json` files reported a clean sync with no sign that
+        almost everything was dropped before it ever reached the tree walk's
+        other counters.
         """
         output: list[BitbucketFile] = []
         too_large = 0
         without_text = 0
+        extension_filtered = 0
         visited: set[str] = set()
         # Read the tree at a resolved commit, never at a branch name -- see
         # resolve_ref: a branch containing '/' cannot be addressed here.
@@ -321,7 +328,7 @@ class BitbucketApiClient:
                 output.append(BitbucketFile(item_path, commit_hash, size, content, language))
 
         async def walk(path: str) -> None:
-            nonlocal too_large
+            nonlocal too_large, extension_filtered
             async with lock:
                 if path in visited:
                     return
@@ -339,6 +346,8 @@ class BitbucketApiClient:
                 if value.get("type") != "commit_file":
                     continue
                 if PurePosixPath(item_path).suffix.lower() not in extensions:
+                    async with lock:
+                        extension_filtered += 1
                     continue
                 size = int(value.get("size") or 0)
                 if size > max_bytes:
@@ -350,7 +359,7 @@ class BitbucketApiClient:
             await asyncio.gather(*[walk(child) for child in child_dirs], *pending)
 
         await walk("")
-        return output, too_large, without_text
+        return output, too_large, without_text, extension_filtered
 
     async def pull_requests(
         self, repository: BitbucketRepository,
@@ -387,15 +396,42 @@ class BitbucketApiClient:
             ))
         return output
 
-    async def commits(self, repository: BitbucketRepository, limit: int) -> list[BitbucketCommit]:
+    async def commits(
+        self, repository: BitbucketRepository, limit: int,
+    ) -> tuple[list[BitbucketCommit], bool]:
+        """List up to `limit` commits, newest first, plus whether more exist
+        beyond the cap (plan.md Phase 0.6).
+
+        This used to call `self.paginated(...)`, which walks every page
+        Bitbucket has -- following `next` until the API stops returning one
+        -- regardless of `limit`, only slicing down to `limit` afterwards.
+        For a repository with thousands of commits that meant thousands of
+        unneeded requests just to throw almost all of the result away, and
+        it still never told the caller how many commits existed beyond the
+        cap. This instead stops paging as soon as `limit` raw items have
+        been gathered. Bitbucket's own page JSON already says whether a
+        `next` page exists -- that's a free signal from a request already
+        made, not an extra one -- so `commits_capped` costs nothing beyond
+        what fetching `limit` commits already costs. An *exact* count of
+        commits beyond the cap would need paging all the way to the real
+        end, i.e. the same expensive, wasted walk this now avoids, so only
+        the boolean is reported.
+        """
         head = await self.resolve_ref(repository, repository.main_branch)
-        values = await self.paginated(
+        url = (
             f"{BASE_URL}/repositories/{quote(repository.workspace)}/{quote(repository.slug)}"
-            f"/commits/{quote(head, safe='')}",
-            {"pagelen": min(100, max(1, limit))},
+            f"/commits/{quote(head, safe='')}"
         )
+        pagelen = min(100, max(1, limit))
+        raw: list[dict] = []
+        next_url: str | None = url
+        while next_url and len(raw) < limit:
+            data = await self.json(next_url, params={"pagelen": pagelen} if next_url == url else None)
+            raw.extend(item for item in data.get("values", []) if isinstance(item, dict))
+            next_url = data.get("next")
+        commits_capped = len(raw) > limit or bool(next_url)
         output = []
-        for value in values[:limit]:
+        for value in raw[:limit]:
             message = str(value.get("message") or "").strip()
             if not message:
                 continue
@@ -405,7 +441,7 @@ class BitbucketApiClient:
                 str(value.get("date") or ""),
                 str(((value.get("links") or {}).get("html") or {}).get("href") or ""),
             ))
-        return output
+        return output, commits_capped
 
     async def diffstat(
         self, repository: BitbucketRepository, commit_hash: str,
