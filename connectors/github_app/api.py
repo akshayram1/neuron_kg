@@ -53,8 +53,13 @@ class GitHubCommit:
 
 
 class GitHubApiClient:
-    def __init__(self, token: str):
-        self._client = httpx.AsyncClient(
+    def __init__(self, token: str, client: httpx.AsyncClient | None = None):
+        # `client` lets a test inject an `httpx.MockTransport` instead of
+        # hitting the real API (same convention as
+        # `connectors.bitbucket.api.BitbucketApiClient`); `_owns` makes sure
+        # we only close a client we created ourselves.
+        self._owns = client is None
+        self._client = client or httpx.AsyncClient(
             base_url="https://api.github.com",
             timeout=45,
             follow_redirects=True,
@@ -70,7 +75,8 @@ class GitHubApiClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        await self._client.aclose()
+        if self._owns:
+            await self._client.aclose()
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         response: httpx.Response | None = None
@@ -122,7 +128,14 @@ class GitHubApiClient:
 
     async def list_files(
         self, repository: GitHubRepository, file_types: set[str], max_bytes: int
-    ) -> tuple[list[GitHubFile], int]:
+    ) -> tuple[list[GitHubFile], int, int]:
+        """Returns (files, too_large_count, extension_filtered_count) --
+        the last being blobs whose extension is not in `file_types`
+        (plan.md Phase 0.6): previously this filter (the `not extension`
+        branch below) silently `continue`d with no counter, distinct from a
+        tree entry that isn't a blob at all (a directory/submodule), which
+        was never a "file" to begin with and stays uncounted.
+        """
         owner, name = repository.full_name.split("/", 1)
         tree = await self._get(
             f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/git/trees/"
@@ -135,17 +148,21 @@ class GitHubApiClient:
             )
         matched: list[GitHubFile] = []
         too_large = 0
+        extension_filtered = 0
         for item in tree.get("tree", []):
+            if item.get("type") != "blob":
+                continue
             path = str(item.get("path") or "")
             extension = next((ext for ext in file_types if path.lower().endswith(ext)), None)
-            if item.get("type") != "blob" or not extension:
+            if not extension:
+                extension_filtered += 1
                 continue
             size = int(item.get("size") or 0)
             if size > max_bytes:
                 too_large += 1
                 continue
             matched.append(GitHubFile(path=path, sha=str(item["sha"]), size=size))
-        return sorted(matched, key=lambda item: item.path.lower()), too_large
+        return sorted(matched, key=lambda item: item.path.lower()), too_large, extension_filtered
 
     async def read_blob(self, repository: GitHubRepository, sha: str) -> str:
         owner, name = repository.full_name.split("/", 1)
@@ -162,10 +179,26 @@ class GitHubApiClient:
 
     async def list_commits(
         self, repository: GitHubRepository, limit: int
-    ) -> list[GitHubCommit]:
+    ) -> tuple[list[GitHubCommit], bool]:
+        """List up to `limit` commits, newest first, plus whether more exist
+        beyond the cap (plan.md Phase 0.6).
+
+        GitHub's commits endpoint reports no total anywhere in the response
+        body, and while it does send a `Link: rel="last"` pagination header,
+        that only gives a page *number* -- the last page can be partial, so
+        turning it into an exact commit count would still mean fetching that
+        last page, i.e. paging exactly as far as an exact count would anyway.
+        Once this loop has gathered `limit` commits by paging normally (no
+        extra requests over what fetching `limit` commits already costs),
+        one cheap `per_page=1` request for the very next page is enough to
+        say whether at least one more commit exists past the cap -- that is
+        the honest, cheap signal, not a wasted paginate-to-the-end just to
+        name the exact leftover count.
+        """
         owner, name = repository.full_name.split("/", 1)
         output: list[GitHubCommit] = []
         page = 1
+        ran_out = False
         while len(output) < limit:
             page_size = min(100, limit - len(output))
             batch = await self._get(
@@ -173,6 +206,7 @@ class GitHubApiClient:
                 {"sha": repository.default_branch, "per_page": page_size, "page": page},
             )
             if not batch:
+                ran_out = True
                 break
             for item in batch:
                 commit = item.get("commit") or {}
@@ -189,6 +223,17 @@ class GitHubApiClient:
                     html_url=str(item.get("html_url") or ""),
                 ))
             if len(batch) < page_size:
+                ran_out = True
                 break
             page += 1
-        return output[:limit]
+        output = output[:limit]
+        commits_capped = False
+        if not ran_out and len(output) >= limit:
+            # `page` already points at the next unfetched page (see the
+            # increment above) -- a minimal probe, not a real page fetch.
+            probe = await self._get(
+                f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/commits",
+                {"sha": repository.default_branch, "per_page": 1, "page": page},
+            )
+            commits_capped = bool(probe)
+        return output, commits_capped

@@ -257,6 +257,7 @@ async def _run_sync(
             "records_done": 0, "records_total": 0, "records_written": 0,
             "records_kept": 0, "files_matched": 0, "files_processed": 0,
             "files_too_large": 0, "files_without_text": 0,             "commits_fetched": 0,
+            "files_extension_filtered": 0, "commits_capped": False,
             "commit_files_changed": 0,
             "pull_requests_fetched": 0,
             "chunks_ingested": 0, "chunks_total": 0,
@@ -267,29 +268,33 @@ async def _run_sync(
         })
         connection = store.get_connection(payload.connection_id)
         async with BitbucketApiClient(connection["token"]["access_token"]) as client:
-            async def _commits_with_diffstats() -> list:
+            async def _commits_with_diffstats() -> tuple[list, bool]:
                 if not payload.include_commit_messages:
-                    return []
-                found = await client.commits(repository, settings.max_commits_per_sync)
+                    return [], False
+                found, commits_capped = await client.commits(repository, settings.max_commits_per_sync)
                 store.set_run(run_id, "running", {
                     **base, "phase": "fetching",
                     "current": f"Fetching file lists for {len(found)} commits (in parallel with the tree)…",
                     "commits_fetched": len(found),
                 })
-                return await client.attach_diffstats(repository, found)
+                attached = await client.attach_diffstats(repository, found)
+                return attached, commits_capped
 
-            (files, too_large, without_text), commits, pull_requests = await asyncio.gather(
-                client.files(repository, set(payload.file_types), settings.max_file_bytes),
-                _commits_with_diffstats(),
-                client.pull_requests(repository) if payload.include_pull_requests
-                else asyncio.sleep(0, result=[]),
+            (files, too_large, without_text, extension_filtered), (commits, commits_capped), pull_requests = (
+                await asyncio.gather(
+                    client.files(repository, set(payload.file_types), settings.max_file_bytes),
+                    _commits_with_diffstats(),
+                    client.pull_requests(repository) if payload.include_pull_requests
+                    else asyncio.sleep(0, result=[]),
+                )
             )
             total = len(files) + len(commits) + len(pull_requests)
             files_changed = sum(len(commit.files) for commit in commits)
             base.update({"records_total": total, "files_matched": len(files),
                          "files_too_large": too_large, "files_without_text": without_text,
+                         "files_extension_filtered": extension_filtered,
                          "commits_fetched": len(commits), "pull_requests_fetched": len(pull_requests),
-                         "commit_files_changed": files_changed})
+                         "commit_files_changed": files_changed, "commits_capped": commits_capped})
             store.set_run(run_id, "running", {
                 **base, "phase": "ingesting", "current": f"Writing {total} Bitbucket records…",
             })
@@ -371,13 +376,18 @@ async def _run_sync(
 
         orphans_removed = bp.delete_orphaned_shared_entities(graph)
 
-        # Sync coverage (plan.md Phase 0.4). `skipped_by_rule_count` counts
-        # what this run's own rules dropped before writing (files over
-        # `max_file_bytes`, files that don't decode as UTF-8) -- it does NOT
-        # include files whose extension doesn't match `payload.file_types`
-        # (that filter runs inside BitbucketApiClient.files' tree walk and
-        # isn't counted there) or commits beyond `max_commits_per_sync`
-        # (unknown without a provider total). `provider_reported_total` is
+        # Sync coverage (plan.md Phase 0.4, extended by Phase 0.6).
+        # `skipped_by_rule_count` stays narrowly defined as what this run's
+        # own rules dropped AFTER the extension filter (files over
+        # `max_file_bytes`, files that don't decode as UTF-8) -- its meaning
+        # is unchanged from before Phase 0.6 so no existing caller/dashboard
+        # sees its number shift. The two previously-uncounted drops now have
+        # their own fields instead: `files_extension_filtered` (files whose
+        # extension isn't in `payload.file_types`, from
+        # `BitbucketApiClient.files`' tree walk) and `commits_capped`
+        # (whether more commits exist beyond `max_commits_per_sync` -- a
+        # boolean, not a count: see `SyncCoverage`'s docstring for why an
+        # exact beyond-cap count isn't fetched). `provider_reported_total` is
         # left None: Bitbucket's paginated() (connectors/bitbucket/api.py)
         # does not surface the `size` field some list endpoints return, and
         # it is not populated for the commits endpoint at all.
@@ -389,6 +399,8 @@ async def _run_sync(
             provider_reported_total=None,
             fetched_count=total, ledger_count=sync_ledger_count,
             skipped_by_rule_count=sync_skipped_by_rule,
+            extension_filtered_count=extension_filtered,
+            commits_capped=commits_capped,
         )
 
         result = {
@@ -401,6 +413,7 @@ async def _run_sync(
             "orphans_removed": orphans_removed,
             "provider_reported_total": None, "fetched_count": total,
             "ledger_count": sync_ledger_count, "skipped_by_rule_count": sync_skipped_by_rule,
+            "files_extension_filtered": extension_filtered, "commits_capped": commits_capped,
             **TokenUsage().as_dict("ingestion"),
         }
         store.save_source(

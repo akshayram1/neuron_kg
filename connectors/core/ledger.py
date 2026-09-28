@@ -61,9 +61,27 @@ class SyncCoverage:
     """One sync's accounting (plan.md Phase 0.4): what the provider says
     exists (when its API exposes a total), what we actually fetched, what
     landed in the ledger, and what a deliberate rule dropped before it ever
-    reached the ledger (e.g. Bitbucket/GitHub non-.py/.md files, a commit
-    cap). `provider_reported_total` is `None` -- not 0 or a guess -- for any
-    provider/endpoint whose API does not hand back a total count."""
+    reached the ledger. `provider_reported_total` is `None` -- not 0 or a
+    guess -- for any provider/endpoint whose API does not hand back a total
+    count.
+
+    `skipped_by_rule_count` is deliberately narrow -- files over
+    `max_file_bytes` plus files that failed to decode as text -- NOT a true
+    total of everything a rule ever dropped (plan.md Phase 0.6 follow-up).
+    Two more rule-driven drops exist and are reported as their own fields
+    instead of folded into it, so this field's long-standing meaning never
+    silently shifts under an existing caller/dashboard/test:
+
+    - `extension_filtered_count` -- files whose extension isn't in the
+      requested set (e.g. Bitbucket/GitHub non-.py/.md), rejected by the
+      tree walk before `files_too_large`/`files_without_text` even apply.
+    - `commits_capped` -- whether more commits exist beyond
+      `GITHUB_MAX_COMMITS_PER_SYNC`/`BITBUCKET_MAX_COMMITS_PER_SYNC`. This is
+      a boolean, not a count: an exact beyond-cap count needs paging all the
+      way to the real end of commit history, which is exactly the expensive
+      walk capping the fetch was meant to avoid, so only "there is more" is
+      reported, not "there are exactly N more".
+    """
 
     run_id: str
     provider: str
@@ -72,6 +90,8 @@ class SyncCoverage:
     fetched_count: int
     ledger_count: int
     skipped_by_rule_count: int
+    extension_filtered_count: int
+    commits_capped: bool
     created_at: str
 
 
@@ -560,6 +580,18 @@ class ConnectorLedger:
                 )
                 """
             )
+            sync_coverage_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(sync_coverage)")
+            }
+            if "extension_filtered_count" not in sync_coverage_columns:
+                connection.execute(
+                    "ALTER TABLE sync_coverage ADD COLUMN extension_filtered_count "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            if "commits_capped" not in sync_coverage_columns:
+                connection.execute(
+                    "ALTER TABLE sync_coverage ADD COLUMN commits_capped INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sync_coverage_provider "
                 "ON sync_coverage(provider, id)"
@@ -1438,8 +1470,13 @@ class ConnectorLedger:
         fetched_count: int = 0,
         ledger_count: int = 0,
         skipped_by_rule_count: int = 0,
+        extension_filtered_count: int = 0,
+        commits_capped: bool = False,
     ) -> None:
-        """Log one sync's coverage numbers (plan.md Phase 0.4).
+        """Log one sync's coverage numbers (plan.md Phase 0.4, extended by
+        Phase 0.6 with `extension_filtered_count`/`commits_capped` -- see
+        `SyncCoverage` for what each field means and why they are separate
+        from `skipped_by_rule_count` rather than folded into it).
 
         Append-only, one row per run -- coverage is a measurement over time,
         not a single mutable "latest" cell, so a regression shows up as a
@@ -1450,10 +1487,12 @@ class ConnectorLedger:
             connection.execute(
                 "INSERT INTO sync_coverage(run_id, provider, connection_id, "
                 "provider_reported_total, fetched_count, ledger_count, "
-                "skipped_by_rule_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "skipped_by_rule_count, extension_filtered_count, commits_capped, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id, provider, connection_id, provider_reported_total,
                     fetched_count, ledger_count, skipped_by_rule_count,
+                    extension_filtered_count, int(commits_capped),
                     datetime.now(UTC).isoformat(),
                 ),
             )
@@ -1466,6 +1505,8 @@ class ConnectorLedger:
             provider_reported_total=row["provider_reported_total"],
             fetched_count=int(row["fetched_count"]), ledger_count=int(row["ledger_count"]),
             skipped_by_rule_count=int(row["skipped_by_rule_count"]),
+            extension_filtered_count=int(row["extension_filtered_count"]),
+            commits_capped=bool(row["commits_capped"]),
             created_at=str(row["created_at"]),
         )
 
