@@ -146,6 +146,12 @@ hop validation. Neither is currently justified by valid measurements.
 **Bottom line:** synchronous CPU Laya scoring at the real pool size costs ~17.8s p90 — this is the hard number behind why `NEURON_RERANK=off` is still the correct production default until batching/hardware/a smaller model changes it. Not a question, just the measured evidence §10.4/§2.3 asked for.
 **Note:** candidates were synthetic-but-realistic text (real `best_window` windowing, synthetic node text) rather than pulled from a live graph, for iteration speed — flagged in case a graph-sourced re-run is wanted for the final go/no-go record.
 
+## New: sync coverage counters completed (25 Sep, run 3)
+
+`extension_filtered_count` (both providers) and `commits_capped` (a boolean, not an exact count — an exact count would require paging to the true end of history, exactly the expensive walk the cap exists to avoid) are now recorded in `sync_coverage`. Merged. Also fixed a real, pre-existing perf bug as a necessary side effect: Bitbucket's `commits()` used to page through a repo's *entire* history before slicing to the cap; it now stops as soon as `limit` items are gathered.
+**One small follow-up, out of this task's file scope:** `demo_ui/backend/sync_coverage_routes.py`'s `_as_dict()` (the `/api/sync-coverage` read endpoint) doesn't include the two new fields yet — they're fully recorded in the ledger, just not exposed through that one endpoint. One-line addition whenever someone's next in that file.
+**`skipped_by_rule_count`'s definition kept unchanged** (still `files_too_large + files_without_text` only) — the two new counters are separate fields, so nothing existing shifts meaning.
+
 ## Verification
 
 - Python: `503 passed, 169 skipped, 0 failed`.
