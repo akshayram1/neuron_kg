@@ -187,6 +187,9 @@ def translate(sql: str, has_params: bool) -> str:
             return "%s"
         if token == "%":
             return "%%" if has_params else "%"
+        if has_params and "%" in token:
+            # psycopg parses placeholders inside literals too.
+            return token.replace("%", "%%")
         return token
 
     return _STRING_OR_PLACEHOLDER.sub(replace, sql)

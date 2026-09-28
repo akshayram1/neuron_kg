@@ -10,10 +10,13 @@ BOTH = pytest.mark.parametrize("sql_backend", ["sqlite", "postgres"], indirect=T
 
 def test_translate_placeholders_skip_string_literals():
     assert translate("SELECT '?', x FROM t WHERE a = ? AND b LIKE 'x%'", True) == (
-        "SELECT '?', x FROM t WHERE a = %s AND b LIKE 'x%'"
+        "SELECT '?', x FROM t WHERE a = %s AND b LIKE 'x%%'"
     )
     assert translate("SELECT a % 2 FROM t WHERE a = ?", True) == "SELECT a %% 2 FROM t WHERE a = %s"
     assert translate("SELECT a % 2 FROM t", False) == "SELECT a % 2 FROM t"
+    assert translate("SELECT 1 FROM t WHERE b LIKE 'x%' AND a = ?", True) == (
+        "SELECT 1 FROM t WHERE b LIKE 'x%%' AND a = %s"
+    )
 
 
 def test_translate_ddl_types():
@@ -110,3 +113,12 @@ def test_separate_files_are_separate_schemas(tmp_path, sql_backend):
             db.execute("INSERT INTO t VALUES (?)", (name,))
     with connect(tmp_path / "one.sqlite3") as db:
         assert [r[0] for r in db.execute("SELECT k FROM t")] == ["one"]
+
+
+@BOTH
+def test_percent_literal_with_params(tmp_path, sql_backend):
+    with connect(tmp_path / "p.sqlite3") as db:
+        db.execute("CREATE TABLE IF NOT EXISTS t (k TEXT, n INTEGER)")
+        db.execute("INSERT INTO t VALUES (?, ?)", ("abc", 1))
+        rows = db.execute("SELECT k FROM t WHERE k LIKE 'ab%' AND n = ?", (1,)).fetchall()
+    assert [r[0] for r in rows] == ["abc"]
