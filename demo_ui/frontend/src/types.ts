@@ -283,78 +283,38 @@ export interface ConnectorSyncProgress {
   wisdom_total_tokens?: number;
 }
 
-export interface StoryFinding {
-  id: string;
-  key: string;
-  kind: string;
-  severity: string;
-  status: "open" | "stale" | "resolved" | "accepted" | "dismissed";
-  title: string;
-  summary: string;
-  reasoning: string;
-  confidence: number;
-  projectRef: string | null;
-  createdAt: string;
-  updatedAt: string;
-  lastSeenAt: string;
-  statusChangedAt: string;
-  staleAt: string | null;
-  staleReason: string | null;
-  resolvedAt: string | null;
-  sources: Array<{
-    recordKey: string;
-    role: string;
-    excerpt: string | null;
-    chunkId: string | null;
-    provider: string | null;
-    name: string | null;
-    url: string | null;
-    sourceTime: string | null;
-  }>;
+export type SyntheticProvider = "jira" | "bitbucket" | "notion";
+
+export interface SyntheticStepStatus {
+  available: boolean;
+  ingested_records: number;
 }
 
-export interface StoryRun {
-  runId: string;
-  graphId: string | null;
-  phase: string;
-  status: "running" | "completed" | "failed";
-  progress: ConnectorSyncProgress & { open_findings?: number };
-  error: string | null;
-  startedAt: string;
-  finishedAt: string | null;
+export interface SyntheticStatus {
+  steps: Record<SyntheticProvider, SyntheticStepStatus>;
 }
 
-export interface StoryWisdomProposal {
-  id: string;
-  key: string;
-  type: "Policy" | "Principle" | "Pattern" | "AntiPattern" | "Playbook" | "Heuristic";
-  topicKey: string;
-  title: string;
-  statement: string;
-  rationale: string;
-  recommendedAction: string;
-  status: "proposed" | "active" | "rejected" | "superseded";
-  confidence: number;
-  scope: Record<string, unknown>;
-  properties: Record<string, unknown>;
-  version: number;
-  generationMethod: string;
-  createdAt: string;
-  updatedAt: string;
-  reviewedAt: string | null;
-  reviewedBy: string | null;
-  signalIds: string[];
-  supportingFindings: Array<StoryFinding & { role: string }>;
-}
-
-export interface StoryState {
-  graph: GraphInfo & { id: string; falkorName: string; vectorCollection: string };
-  completedPhases: string[];
-  running: StoryRun | null;
-  lastRun: StoryRun | null;
-  routingTotals: ConnectorSyncProgress;
-  findings: StoryFinding[];
-  wisdom: StoryWisdomProposal[];
+export interface SyntheticIngestResult {
+  provider: SyntheticProvider;
+  records_kept: number;
+  records_written: number;
+  orphans_removed: number;
+  // Jira
+  project_key?: string;
+  issues_fetched?: number;
+  // Bitbucket
+  repository?: string;
+  pull_requests_fetched?: number;
+  commits_written?: number;
+  // Notion
+  workspace?: string;
+  pages_fetched?: number;
+  chunks_ingested?: number;
+  entities_written?: number;
+  facts_written?: number;
+  ingestion_input_tokens?: number;
+  ingestion_output_tokens?: number;
+  ingestion_total_tokens?: number;
 }
 
 export interface GitHubInstallation {

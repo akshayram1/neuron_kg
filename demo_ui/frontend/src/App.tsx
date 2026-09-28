@@ -3,14 +3,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat, setReranker, verifyChatAnswer } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import EntityPanel from "./components/EntityPanel";
-import OntologyPanel from "./components/OntologyPanel";
 import GraphCanvas from "./components/GraphCanvas";
 import GraphSelector from "./components/GraphSelector";
 import BitbucketPanel from "./components/BitbucketPanel";
 import GitHubPanel from "./components/GitHubPanel";
 import JiraPanel from "./components/JiraPanel";
 import NotionPanel from "./components/NotionPanel";
-import StoryDemoPanel from "./components/StoryDemoPanel";
+import SyntheticIngestPanel from "./components/SyntheticIngestPanel";
 import BridgePanel from "./components/BridgePanel";
 import type { AppConfig, ConversationMessage, GitHubSource, GraphInfo, GraphPayload, GraphSelection, Highlight, IngestionTokenUsage, NotionConnection, OAuthConnectorSource, TokenUsage } from "./types";
 
@@ -119,7 +118,7 @@ export default function App() {
   const [githubOpen, setGitHubOpen] = useState(false);
   const [bitbucketOpen, setBitbucketOpen] = useState(false);
   const [notionOpen, setNotionOpen] = useState(false);
-  const [storyOpen, setStoryOpen] = useState(false);
+  const [syntheticOpen, setSyntheticOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [jiraSources, setJiraSources] = useState<OAuthConnectorSource[]>([]);
   const [githubSources, setGitHubSources] = useState<GitHubSource[]>([]);
@@ -342,8 +341,8 @@ export default function App() {
           <button className="notion-trigger" onClick={() => setBridgeOpen(true)}>
             <GitMerge size={14} /> Review
           </button>
-          <button className={`notion-trigger ${graphName.startsWith("story-") ? "connected" : ""}`} onClick={() => setStoryOpen(true)}>
-            <FlaskConical size={14} /> Story demo
+          <button className="notion-trigger" onClick={() => setSyntheticOpen(true)}>
+            <FlaskConical size={14} /> Synthetic data
           </button>
           <button className={`notion-trigger ${jiraSources.length > 0 ? "connected" : ""}`} onClick={() => setJiraOpen(true)}>
             <ListTodo size={14} /> Jira
@@ -474,8 +473,6 @@ export default function App() {
                 }}
               />
             )}
-            <OntologyPanel graphName={graphName} onChanged={() => void loadGraph()} />
-
             {selection?.kind === "edge" && (
               <aside className="selection-card">
                 <button className="selection-close" onClick={() => setSelection(null)} aria-label="Close details">×</button>
@@ -529,19 +526,12 @@ export default function App() {
         onSyncComplete={() => void loadGraph()}
         onTokenUsage={reportIngestionUsage}
       />
-      <StoryDemoPanel
-        open={storyOpen}
+      <SyntheticIngestPanel
+        open={syntheticOpen}
         graphName={graphName}
-        onClose={() => setStoryOpen(false)}
-        onGraphCreated={async (name) => {
-          await refreshGraphs();
-          selectGraph(name);
-        }}
-        onGraphChanged={() => void loadGraph()}
-        onReset={async () => {
-          await refreshGraphs();
-          selectGraph("default");
-        }}
+        onClose={() => setSyntheticOpen(false)}
+        onSyncComplete={() => void loadGraph()}
+        onTokenUsage={reportIngestionUsage}
       />
       <BridgePanel
         open={bridgeOpen}

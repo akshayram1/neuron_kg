@@ -22,6 +22,7 @@ Two things beyond simple hash-based KEEP/INSERT/UPDATE/DELETE live here:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -303,6 +304,29 @@ class ExtractionDrop:
     object_kind: str | None = None
     object_name: str | None = None
     detail: str | None = None
+
+
+@dataclass(frozen=True)
+class IngestionFinding:
+    """A validated, `should_flag=True` LLM ingestion judgement
+    (`graph.profiles.IngestionAssessment`), persisted by
+    `ConnectorLedger.record_ingestion_assessments`."""
+
+    finding_key: str
+    record_key: str
+    chunk_id: str
+    kind: str
+    severity: str
+    status: str
+    title: str
+    summary: str
+    reasoning: str
+    confidence: float
+    properties: dict
+    created_at: str
+    updated_at: str
+    stale_at: str | None = None
+    stale_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -764,6 +788,47 @@ class ConnectorLedger:
                 "CREATE INDEX IF NOT EXISTS idx_merge_trace_survivor "
                 "ON merge_trace(survivor_uid)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ingestion_findings (
+                    finding_key TEXT PRIMARY KEY,
+                    record_key TEXT NOT NULL,
+                    chunk_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    reasoning TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    stale_at TEXT,
+                    stale_reason TEXT
+                )
+                """
+            )
+            # The hot lookup on reprocessing is "what did this exact chunk
+            # already flag" (see `record_ingestion_assessments`), not a
+            # finding_key prefix -- a finding_key groups the same recurring
+            # topic across many different chunks/records on purpose.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ingestion_findings_chunk "
+                "ON ingestion_findings(record_key, chunk_id, status)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ingestion_finding_evidence (
+                    finding_key TEXT NOT NULL,
+                    record_key TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    chunk_id TEXT,
+                    excerpt TEXT,
+                    PRIMARY KEY (finding_key, record_key, role)
+                )
+                """
+            )
 
     def _connect(self):
         """A ``sqlite3.Connection`` or a Postgres ``PgConnection`` shim (see
@@ -1163,6 +1228,164 @@ class ConnectorLedger:
             )
             for r in rows
         ]
+
+    # ------------------------------------------------------------ ingestion findings
+
+    def record_ingestion_assessments(
+        self, record_key: str, chunk_id: str, assessments: list[dict],
+    ) -> list[str]:
+        """Persist validated LLM ingestion judgements
+        (`graph.profiles.IngestionAssessment`, `should_flag=True` only) as
+        durable, queryable findings. Ordinary additions/updates stay in the
+        graph without alert noise -- only `should_flag=True` ones land here.
+
+        `graph.semantic_pass.run_semantic_pass` calls this via
+        ``getattr(ledger, "record_ingestion_assessments", None)`` after every
+        chunk extraction, on any provider whose route runs the semantic pass.
+        Before this method existed on `ConnectorLedger`, that call was always
+        a silent no-op for every real (and synthetic) connector sync --
+        `graph.profiles.IngestionAssessment` was already generic across
+        providers, but only the removed story demo's Postgres-only ledger
+        (`storage/ledger.py`) ever implemented the save step.
+
+        Mirrors that removed implementation with one fix: it scoped
+        reprocessing-staleness by a `finding_key` string prefix
+        (``f"llm:{record_key}:{chunk_id}:"``) that could never actually match
+        the keys it wrote (``f"llm:{project_ref}:{action}:{topic_key}"``), so
+        a reprocessed chunk's stale findings were never actually retired.
+        This version keys staleness off the real `record_key`/`chunk_id`
+        columns below instead of parsing them back out of a string.
+
+        Returns the finding_keys written or refreshed (empty if nothing
+        flagged this call).
+        """
+        now = datetime.now(UTC).isoformat()
+        provider = record_key.split(":", 1)[0]
+        written: list[str] = []
+        with self._connect() as connection:
+            # A chunk re-extracted after evidence/ontology changes must not
+            # leave its previous findings open if the new pass no longer
+            # raises them.
+            connection.execute(
+                "UPDATE ingestion_findings SET status = 'stale', stale_at = ?, "
+                "stale_reason = 'The evidence chunk was reprocessed and no "
+                "longer produced this finding.', updated_at = ? "
+                "WHERE record_key = ? AND chunk_id = ? AND status = 'open'",
+                (now, now, record_key, chunk_id),
+            )
+            for item in assessments:
+                if not item.get("should_flag"):
+                    continue
+                topic_key = "-".join(
+                    part for part in re.sub(
+                        r"[^a-z0-9]+", "-",
+                        str(item.get("topic_key") or item.get("title") or "finding").lower(),
+                    ).strip("-").split("-") if part
+                )[:100] or "finding"
+                action = str(item.get("action") or "review")
+                finding_key = f"llm:{provider}:{action}:{topic_key}"
+                properties_json = json.dumps({
+                    "action": item.get("action"),
+                    "topicKey": topic_key,
+                    "relatedCandidateUids": item.get("related_candidate_uids") or [],
+                })
+                connection.execute(
+                    "INSERT INTO ingestion_findings("
+                    "  finding_key, record_key, chunk_id, kind, severity, status, title,"
+                    "  summary, reasoning, confidence, properties_json, created_at, updated_at"
+                    ") VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(finding_key) DO UPDATE SET "
+                    "  record_key = excluded.record_key, chunk_id = excluded.chunk_id, "
+                    "  kind = excluded.kind, severity = excluded.severity, status = 'open', "
+                    "  title = excluded.title, summary = excluded.summary, "
+                    "  reasoning = excluded.reasoning, confidence = excluded.confidence, "
+                    "  properties_json = excluded.properties_json, updated_at = excluded.updated_at, "
+                    "  stale_at = NULL, stale_reason = NULL",
+                    (
+                        finding_key, record_key, chunk_id, f"llm_{action}",
+                        str(item.get("severity") or "warning"),
+                        str(item.get("title") or "Evidence requires review"),
+                        str(item.get("summary") or ""), str(item.get("reasoning") or ""),
+                        float(item.get("confidence") or 0.5), properties_json, now, now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO ingestion_finding_evidence("
+                    "  finding_key, record_key, role, chunk_id, excerpt"
+                    ") VALUES (?, ?, 'new_evidence', ?, ?) "
+                    "ON CONFLICT(finding_key, record_key, role) DO UPDATE SET "
+                    "  chunk_id = excluded.chunk_id, excerpt = excluded.excerpt",
+                    (finding_key, record_key, chunk_id, str(item.get("evidence") or "")),
+                )
+                written.append(finding_key)
+        return written
+
+    def findings(
+        self, status: str | None = None, *, record_prefix: str | None = None, limit: int = 200,
+    ) -> list[IngestionFinding]:
+        query = (
+            "SELECT finding_key, record_key, chunk_id, kind, severity, status, title, summary, "
+            "reasoning, confidence, properties_json, created_at, updated_at, stale_at, stale_reason "
+            "FROM ingestion_findings"
+        )
+        clauses: list[str] = []
+        params: list = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if record_prefix:
+            escaped = record_prefix.replace("%", "\\%").replace("_", "\\_") + "%"
+            clauses.append("record_key LIKE ? ESCAPE '\\'")
+            params.append(escaped)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        with self._connect() as connection:
+            rows = connection.execute(query, (*params, limit)).fetchall()
+        return [
+            IngestionFinding(
+                finding_key=r["finding_key"], record_key=r["record_key"], chunk_id=r["chunk_id"],
+                kind=r["kind"], severity=r["severity"], status=r["status"], title=r["title"],
+                summary=r["summary"], reasoning=r["reasoning"], confidence=float(r["confidence"]),
+                properties=json.loads(r["properties_json"] or "{}"),
+                created_at=r["created_at"], updated_at=r["updated_at"],
+                stale_at=r["stale_at"], stale_reason=r["stale_reason"],
+            )
+            for r in rows
+        ]
+
+    def finding_evidence(self, finding_key: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT record_key, role, chunk_id, excerpt FROM ingestion_finding_evidence "
+                "WHERE finding_key = ? ORDER BY record_key",
+                (finding_key,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_findings_with_prefix(self, record_prefix: str) -> list[str]:
+        """Scoped delete: only findings triggered by a record_key under this
+        prefix (e.g. one provider's one connection), never every finding.
+        Returns the finding_keys removed, so a caller can also drop their
+        FalkorDB `Finding` nodes (see `graph.finding_bridge`)."""
+        escaped = record_prefix.replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT finding_key FROM ingestion_findings "
+                "WHERE record_key LIKE ? ESCAPE '\\'",
+                (escaped,),
+            ).fetchall()
+            finding_keys = [str(row["finding_key"]) for row in rows]
+            if finding_keys:
+                connection.execute(
+                    "DELETE FROM ingestion_finding_evidence WHERE record_key LIKE ? ESCAPE '\\'",
+                    (escaped,),
+                )
+                connection.execute(
+                    "DELETE FROM ingestion_findings WHERE record_key LIKE ? ESCAPE '\\'",
+                    (escaped,),
+                )
+        return finding_keys
 
     # ------------------------------------------------------------ ontology
 

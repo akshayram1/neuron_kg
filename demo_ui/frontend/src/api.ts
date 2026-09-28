@@ -23,9 +23,8 @@ import type {
   OntologyPending,
   OntologyUnadoptResult,
   SourceRecord,
-  StoryRun,
-  StoryState,
-  StoryWisdomProposal,
+  SyntheticIngestResult,
+  SyntheticStatus,
   RerankerStatus,
   ReviewItem,
   LinkCandidateItem,
@@ -293,38 +292,25 @@ export function setAutoExtend(graphName: string, enabled: boolean): Promise<{ au
   });
 }
 
-export function startStoryDemo(): Promise<{ run_id: string; graph_name: string; phase: string; status: string }> {
-  return request("/api/story-demo/start", { method: "POST" });
+export function getSyntheticStatus(graphName: string): Promise<SyntheticStatus> {
+  return request(`/api/synthetic/status?${new URLSearchParams({ graph_name: graphName })}`);
 }
 
-export function applyStoryPhase(
-  graphName: string, phase: string,
-): Promise<{ run_id: string; graph_name: string; phase: string; status: string }> {
-  const query = new URLSearchParams({ graph_name: graphName });
-  return request(`/api/story-demo/apply/${encodeURIComponent(phase)}?${query}`, { method: "POST" });
-}
-
-export function getStoryRun(runId: string): Promise<StoryRun> {
-  return request(`/api/story-demo/runs/${encodeURIComponent(runId)}`);
-}
-
-export function getStoryState(graphName: string): Promise<StoryState> {
-  return request(`/api/story-demo/state?${new URLSearchParams({ graph_name: graphName })}`);
-}
-
-export function resetStoryDemo(graphName: string): Promise<{ reset: boolean; nodes_removed: number }> {
-  return request(`/api/story-demo/reset?${new URLSearchParams({ graph_name: graphName })}`, {
-    method: "DELETE",
-  });
-}
-
-export function reviewStoryWisdom(
-  graphName: string, proposalId: string, decision: "approve" | "reject",
-): Promise<{ wisdom: StoryWisdomProposal }> {
-  const query = new URLSearchParams({ graph_name: graphName });
-  return request(`/api/story-demo/wisdom/${encodeURIComponent(proposalId)}/review?${query}`, {
+function ingestSynthetic(provider: "jira" | "bitbucket" | "notion", graphName: string): Promise<SyntheticIngestResult> {
+  return request(`/api/synthetic/${provider}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision }),
+    body: JSON.stringify({ graph_name: graphName }),
   });
+}
+
+export const ingestSyntheticJira = (graphName: string) => ingestSynthetic("jira", graphName);
+export const ingestSyntheticBitbucket = (graphName: string) => ingestSynthetic("bitbucket", graphName);
+export const ingestSyntheticNotion = (graphName: string) => ingestSynthetic("notion", graphName);
+
+export function resetSynthetic(
+  provider: "jira" | "bitbucket" | "notion", graphName: string,
+): Promise<{ deleted: boolean; records_removed: number; orphans_removed: number }> {
+  const query = new URLSearchParams({ graph_name: graphName });
+  return request(`/api/synthetic/${provider}?${query}`, { method: "DELETE" });
 }

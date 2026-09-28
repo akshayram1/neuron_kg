@@ -36,3 +36,6 @@ build/
 # Scratch notes
 kk.txt
 trash/
+# Root-anchored: only the captured fixture data at synthetic/mcp-access/,
+# never connectors/synthetic/ (the loader that reads it).
+/synthetic/

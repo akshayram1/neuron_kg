@@ -11,12 +11,23 @@ from connectors.core.oauth_store import OAuthConnectorStore
 from connectors.github_app.store import GitHubStore, github_state_db_path
 from connectors.jira.oauth import JiraOAuthSettings
 from connectors.notion.oauth import NotionOAuthSettings, NotionStore, notion_state_db_path
+from connectors.synthetic.loader import (
+    SYNTHETIC_BITBUCKET_CONNECTION, SYNTHETIC_JIRA_CONNECTION, SYNTHETIC_NOTION_CONNECTION,
+)
 from graph.access import AccessScope
 from util.paths import DATA_DIR
 
 
 def access_scope_for_request(request: Request) -> AccessScope:
-    allowed: dict[str, list[str]] = {}
+    # Synthetic-fixture records (demo_ui/backend/synthetic_routes.py) have no
+    # OAuth session to prove ownership of -- they aren't anyone's private
+    # data, so every session gets to see them, the same way a real OAuth
+    # connection's session grants visibility into that connection's records.
+    allowed: dict[str, list[str]] = {
+        "jira": [SYNTHETIC_JIRA_CONNECTION],
+        "bitbucket": [SYNTHETIC_BITBUCKET_CONNECTION],
+        "notion": [SYNTHETIC_NOTION_CONNECTION],
+    }
 
     jira_session = request.cookies.get("neuron_jira_session")
     if jira_session:
@@ -27,7 +38,7 @@ def access_scope_for_request(request: Request) -> AccessScope:
                 "jira", settings.encryption_key,
             )
             rows = store.list_connections(store.session_hash(jira_session))
-            allowed["jira"] = [str(row["connection_id"]) for row in rows]
+            allowed["jira"] += [str(row["connection_id"]) for row in rows]
         except Exception:
             pass
 
@@ -49,7 +60,7 @@ def access_scope_for_request(request: Request) -> AccessScope:
                 "bitbucket", settings.encryption_key,
             )
             rows = store.list_connections(store.session_hash(bitbucket_session))
-            allowed["bitbucket"] = [str(row["connection_id"]) for row in rows]
+            allowed["bitbucket"] += [str(row["connection_id"]) for row in rows]
         except Exception:
             pass
 
@@ -59,7 +70,7 @@ def access_scope_for_request(request: Request) -> AccessScope:
             settings = NotionOAuthSettings.from_env()
             store = NotionStore(notion_state_db_path(), settings.encryption_key)
             rows = store.list_connections(store.session_hash(notion_session))
-            allowed["notion"] = [str(row["workspace_id"]) for row in rows]
+            allowed["notion"] += [str(row["workspace_id"]) for row in rows]
         except Exception:
             pass
 
