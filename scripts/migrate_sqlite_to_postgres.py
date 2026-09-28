@@ -267,10 +267,23 @@ def _pg_type(sqlite_type: str) -> str:
 
 
 def _fallback_table_ddl(source: sqlite3.Connection, table: str) -> str:
+    """Column names, affinity-mapped types, NOT NULL and the primary key.
+
+    Defaults and CHECKs are dropped (they are SQLite expressions); a lone
+    ``INTEGER PRIMARY KEY`` (SQLite's rowid alias) becomes ``BIGSERIAL``."""
     info = list(source.execute(f"PRAGMA table_info({_q(table)})"))
-    columns = [f"{_q(str(row[1]))} {_pg_type(str(row[2]))}" for row in info]
     pk = [str(row[1]) for row in sorted(info, key=lambda r: r[5]) if row[5]]
-    if pk:
+    rowid_alias = len(pk) == 1 and next(
+        str(row[2]).upper() == "INTEGER" for row in info if str(row[1]) == pk[0]
+    )
+    columns = []
+    for row in info:
+        name = str(row[1])
+        if rowid_alias and name == pk[0]:
+            columns.append(f"{_q(name)} BIGSERIAL PRIMARY KEY")
+            continue
+        columns.append(f"{_q(name)} {_pg_type(str(row[2]))}" + (" NOT NULL" if row[3] else ""))
+    if pk and not rowid_alias:
         columns.append("PRIMARY KEY (" + ", ".join(_q(name) for name in pk) + ")")
     return f"CREATE TABLE IF NOT EXISTS {_q(table)} (" + ", ".join(columns) + ")"
 

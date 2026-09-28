@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import os
 import sqlite3
@@ -79,6 +80,13 @@ def data_dir(tmp_path, pg_prefix):
             "INSERT INTO things(label, weight, payload) VALUES (?, ?, ?)",
             [("a", 1.5, b"\x00\x01"), ("b", None, None), ("c", 3.0, b"z")],
         )
+    # Stores leave WAL connections to the GC; settle them so later file
+    # digests only change if something actually writes the SQLite files.
+    gc.collect()
+    for path in tmp_path.glob("*.sqlite3"):
+        connection = sqlite3.connect(path)
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.close()
     return tmp_path
 
 

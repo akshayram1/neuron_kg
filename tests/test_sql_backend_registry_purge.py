@@ -75,7 +75,7 @@ def test_purge_ledger_prefix_is_scoped(sql_backend, tmp_path):
     _seed_ledger(path)
 
     assert purge_ledger_prefix(path, "jira:c1:") == 2
-    expected = ["bitbucket:c_1:a", "bitbucket:cX1:a", "jira:c10:X", "jira:c2:A"]
+    expected = sorted(["bitbucket:c_1:a", "bitbucket:cX1:a", "jira:c10:X", "jira:c2:A"])
     assert _keys(path, "source_records") == expected
     assert _keys(path, "source_chunks") == expected
 
