@@ -576,7 +576,7 @@ BM25 + vector + RRF, bounded graph expansion, temporal modes, provenance-cited a
 
 - No OAuth tokens, refresh tokens, private keys, or signed URLs in the graph, in
   prompts, or in logs — stable IDs and safe public URLs only.
-- Unchanged records never reach chunking, the LLM, or the embedding API.
+- Unchanged records never reach chunking, the LLM, or the local embedding model.
 - Every persisted fact carries `source_record_keys` and `extraction_method`.
 - Unknown/unlisted relation types are rejected, not stored.
 - Indexes exist before the first bulk load.

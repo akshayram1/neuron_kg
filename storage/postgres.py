@@ -19,7 +19,8 @@ from datetime import UTC, datetime
 from typing import Any, Iterable, Iterator, Sequence
 
 
-EMBEDDING_DIMENSION = 1536
+EMBEDDING_DIMENSION = 1024
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 
 
 class PostgresConfigurationError(RuntimeError):
@@ -118,7 +119,7 @@ class PostgresStore:
                 llm_text TEXT,
                 resolution_status TEXT NOT NULL DEFAULT 'unresolved',
                 resolution_reason TEXT,
-                embedding vector(1536),
+                embedding vector(1024),
                 embedded_model TEXT,
                 committed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 superseded_at TIMESTAMPTZ,
@@ -130,10 +131,12 @@ class PostgresStore:
                 collection TEXT NOT NULL,
                 uid UUID NOT NULL,
                 label TEXT NOT NULL,
-                content_embedding vector(1536) NOT NULL,
-                name_embedding vector(1536) NOT NULL,
+                content_embedding vector(1024) NOT NULL,
+                name_embedding vector(1024) NOT NULL,
                 embedded_text TEXT,
                 embedded_model TEXT NOT NULL,
+                embedded_content_hash TEXT,
+                embedding_schema_version INTEGER NOT NULL DEFAULT 2,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 PRIMARY KEY (collection, uid)
             )
@@ -374,6 +377,8 @@ class PostgresStore:
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS stale_at TIMESTAMPTZ",
             "ALTER TABLE findings ADD COLUMN IF NOT EXISTS stale_reason TEXT",
             "ALTER TABLE entity_embeddings ADD COLUMN IF NOT EXISTS namespace_uid TEXT",
+            "ALTER TABLE entity_embeddings ADD COLUMN IF NOT EXISTS embedded_content_hash TEXT",
+            "ALTER TABLE entity_embeddings ADD COLUMN IF NOT EXISTS embedding_schema_version INTEGER NOT NULL DEFAULT 2",
         ]
         # A pristine database does not have a ``vector`` type to register yet.
         # Create the extension using a raw psycopg connection, commit it, and
@@ -1037,21 +1042,26 @@ class PostgresStore:
         values = [(
             collection, row["uid"], row["label"], row["embedding"],
             row.get("name_embedding") or row["embedding"], row.get("embedded_text"),
-            row.get("embedded_model") or "text-embedding-3-small", row.get("namespace_uid"),
+            row.get("embedded_model") or EMBEDDING_MODEL, row.get("namespace_uid"),
+            row.get("embedded_content_hash"), row.get("embedding_schema_version", 2),
         ) for row in rows]
         with self.connect() as connection:
             connection.cursor().executemany(
                 """
                 INSERT INTO entity_embeddings(
                     collection, uid, label, content_embedding, name_embedding,
-                    embedded_text, embedded_model, namespace_uid
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    embedded_text, embedded_model, namespace_uid,
+                    embedded_content_hash, embedding_schema_version
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (collection, uid) DO UPDATE SET
                     label=excluded.label, content_embedding=excluded.content_embedding,
                     name_embedding=excluded.name_embedding,
                     embedded_text=excluded.embedded_text,
                     embedded_model=excluded.embedded_model,
-                    namespace_uid=excluded.namespace_uid, updated_at=now()
+                    namespace_uid=excluded.namespace_uid,
+                    embedded_content_hash=excluded.embedded_content_hash,
+                    embedding_schema_version=excluded.embedding_schema_version,
+                    updated_at=now()
                 """,
                 values,
             )

@@ -19,12 +19,11 @@ from __future__ import annotations
 import argparse
 import logging
 
-from openai import OpenAI
-
 from util import paths as _paths  # noqa: F401 — loads .env from repo root
 from util.logging import configure_logging
 
 from graph import multigraph, vector_store
+from graph.embeddings import embed_texts
 from graph.falkor_client import get_graph
 from graph.schema import VECTOR_LABELS
 from scripts.evaluate_retrieval import resolve_target
@@ -39,7 +38,6 @@ def rebuild(*, recreate: bool, graph_name: str = multigraph.DEFAULT_GRAPH_NAME) 
     collection = target.qdrant_collection
     graph = get_graph(name=target.falkor_name)
     client = vector_store.build_client()
-    openai_client = OpenAI()
 
     if recreate and client.collection_exists(collection):
         client.delete_collection(collection)
@@ -63,18 +61,20 @@ def rebuild(*, recreate: bool, graph_name: str = multigraph.DEFAULT_GRAPH_NAME) 
                 vector_store.truncate_for_embedding((row[2] or row[1]).strip() or row[1])
                 for row in batch
             ]
-            vectors = openai_client.embeddings.create(
-                model=vector_store.EMBEDDING_MODEL, input=texts + names
-            ).data
+            vectors = embed_texts(
+                texts + names, model_name=vector_store.EMBEDDING_MODEL,
+            ).vectors
             vector_store.upsert_vectors(
                 client,
                 [
                     {
                         "uid": row[0], "label": label,
-                        "embedding": vectors[index].embedding,
-                        "name_embedding": vectors[len(batch) + index].embedding,
+                        "embedding": vectors[index],
+                        "name_embedding": vectors[len(batch) + index],
                         "embedded_text": texts[index][:400],
                         "embedded_model": vector_store.EMBEDDING_MODEL,
+                        "embedded_content_hash": vector_store.embedding_content_hash(texts[index]),
+                        "embedding_schema_version": vector_store.EMBEDDING_SCHEMA_VERSION,
                         "namespace_uid": row[3],
                     }
                     for index, row in enumerate(batch)

@@ -15,6 +15,7 @@ from falkordb import Graph
 from openai import OpenAI
 
 from graph import vector_store
+from graph.embeddings import embed_texts
 from graph.schema import FULLTEXT_LABELS
 from graph.access import AccessScope
 from graph.token_usage import TokenUsage
@@ -88,13 +89,15 @@ class SearchHit:
 
 
 def embed_query(
-    client: OpenAI, text: str, model: str = "text-embedding-3-small",
+    client: OpenAI, text: str, model: str | None = None,
     token_usage: TokenUsage | None = None,
 ) -> list[float]:
-    response = client.embeddings.create(model=model, input=[text])
+    """Embed with the same local BGE-M3 projection used at write time."""
+    result = embed_texts([text], model_name=model or vector_store.EMBEDDING_MODEL)
     if token_usage is not None:
-        token_usage.add(response.usage)
-    return response.data[0].embedding
+        token_usage.input_tokens += result.input_tokens
+        token_usage.total_tokens += result.input_tokens
+    return result.vectors[0]
 
 
 def _fulltext_search(

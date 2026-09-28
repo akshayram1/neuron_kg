@@ -64,12 +64,12 @@ FULLTEXT_LABELS = [
 # subword-aware embedding can bridge that. Verified real cost of embedding
 # all 264 existing SourceFile nodes: ~435K tokens, ~$0.009 total (see
 # cost.md) -- not the "264+ extra OpenAI calls" cost concern it looks like
-# on paper, because text-embedding-3-small is priced at $0.02/1M tokens.
+# because dense embeddings are a rebuildable search projection.
 VECTOR_LABELS = [
     "WorkItem", "Document", "Decision", "Term", "Api", "Endpoint",
     "PullRequest", "Commit", "SourceFile", "Finding", "Wisdom",
 ]
-EMBEDDING_DIMENSION = 1536  # text-embedding-3-small
+EMBEDDING_DIMENSION = 1024  # BAAI/bge-m3 dense vector
 
 
 def _run_idempotent(graph: Graph, cypher: str, description: str) -> None:

@@ -165,10 +165,10 @@ async def _run_sync(
         bootstrap_schema(graph)
         vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
         ledger = ConnectorLedger(target.ledger_path)
-                # One request per batch instead of one per record -- see
+                # One local model forward per batch instead of per record -- see
         # graph/embed_batch.py. Must be closed on every exit path below.
         open_batch(OpenAI(timeout=30.0, max_retries=2),
-                   os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                   os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
                    target.qdrant_collection)
         np.write_workspace(graph, ledger, payload.workspace_id, connection.workspace_name)
         kept = written = 0

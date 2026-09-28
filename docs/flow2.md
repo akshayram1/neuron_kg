@@ -139,14 +139,16 @@ batayi, is page se nahi.
 point id = d837df9a-29c7-5365-be20-f2401bca786d    ← wahi uid, teesri baar
 
 vectors:
-  name    : 1536 floats   ← sirf "All things Nilus!" embed hua
-  content : 1536 floats   ← poora 1,508-char text embed hua
+  name    : 1024 floats   ← sirf "All things Nilus!" embed hua
+  content : 1024 floats   ← poora 1,508-char text embed hua
 
 payload:
   label          : "Document"
   uid            : "d837df9a…"
   embedded_text  : "[SOURCE] Kind: Document…"     ← kya embed hua, verbatim
-  embedded_model : "text-embedding-3-small"
+  embedded_model : "BAAI/bge-m3"
+  embedding_schema_version : 2
+  embedded_content_hash : "sha256…"
 ```
 
 `embedded_text` store karne ki wajah: ek timestamp batata hai *"embed hua tha
@@ -271,8 +273,8 @@ padhne ke liye nahi.
 ```
 "Is Nilus GA, and which customers are live in production?"
         │
-        ▼  text-embedding-3-small
-   1536 floats
+        ▼  BAAI/bge-m3 (main backend)
+   1024 normalized floats
 ```
 
 Wahi model jo ingestion mein use hua tha — warna dono vectors ek hi space mein

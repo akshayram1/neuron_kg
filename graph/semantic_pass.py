@@ -43,6 +43,7 @@ from connectors.core.ledger import (
     SemanticStatus,
 )
 from graph import vector_store
+from graph.embeddings import embed_texts
 from graph import writer as w
 from graph.axioms import SWAPPED, AxiomSet, DEFAULT_AXIOMS, load_axioms
 from graph.dates import stated_dates
@@ -211,11 +212,12 @@ def _embed(
 ) -> list[list[float]]:
     if not texts:
         return []
-    response = client.embeddings.create(
-        model=model, input=[vector_store.truncate_for_embedding(t) for t in texts]
+    response = embed_texts(
+        [vector_store.truncate_for_embedding(t) for t in texts], model_name=model,
     )
-    token_usage.add(response.usage)
-    return [item.embedding for item in response.data]
+    token_usage.input_tokens += response.input_tokens
+    token_usage.total_tokens += response.input_tokens
+    return response.vectors
 
 
 def semantic_uid(kind: str, name: str) -> str:
@@ -917,7 +919,10 @@ def _write_extraction(
             vector_store.upsert_vectors(vector_store.client(), [
                 {"uid": uid, "label": label, "embedding": vector,
                  "name_embedding": name_vector, "embedded_text": _embedding_text(label, item)[:400],
-                 "embedded_model": embedding_model, "namespace_uid": namespace_uid}
+                 "embedded_model": embedding_model, "namespace_uid": namespace_uid,
+                 "embedded_content_hash": vector_store.embedding_content_hash(
+                     vector_store.truncate_for_embedding(_embedding_text(label, item))
+                 ), "embedding_schema_version": vector_store.EMBEDDING_SCHEMA_VERSION}
                 for uid, item, vector, name_vector in zip(uids, items, vectors, name_vectors)
             ], collection=collection)
 
@@ -1226,7 +1231,7 @@ def run_semantic_pass(
     """
     client = client or OpenAI()
     model = model or os.getenv("LLM_MODEL", "gpt-5.6-luna")
-    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_model = vector_store.EMBEDDING_MODEL
     budget = budget if budget is not None else int(os.getenv("LLM_BUDGET_PER_RUN", "200"))
     max_concurrency = max_concurrency or int(os.getenv("LLM_CONCURRENCY", "6"))
     # Read the vocabulary once per run, not once per fact: it is per-graph
@@ -1394,6 +1399,9 @@ def run_semantic_pass(
                     "uid": entry.primary_node_uid, "label": own_label,
                     "embedding": vectors[0], "name_embedding": vectors[1],
                     "embedded_text": search_text[:400], "embedded_model": embedding_model,
+                    "embedded_content_hash": vector_store.embedding_content_hash(
+                        vector_store.truncate_for_embedding(search_text)
+                    ), "embedding_schema_version": vector_store.EMBEDDING_SCHEMA_VERSION,
                 }], collection=collection)
 
     logger.info(

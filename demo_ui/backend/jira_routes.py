@@ -224,10 +224,10 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
                 lambda c: c.issues(payload.cloud_id, project.key, on_progress=fetch_progress),
             )
 
-                # One request per batch instead of one per record -- see
+                # One local model forward per batch instead of per record -- see
         # graph/embed_batch.py. Must be closed on every exit path below.
         open_batch(OpenAI(timeout=30.0, max_retries=2),
-                   os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                   os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
                    target.qdrant_collection)
         jp.write_project(graph, ledger, project, site, payload.connection_id)
         total = len(issues)

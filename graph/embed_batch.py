@@ -1,16 +1,9 @@
-"""Batch the write-time embedding calls.
+"""Batch write-time local BGE-M3 embeddings.
 
-The deterministic pass embeds one record at a time: 659 Bitbucket records
-meant 659 separate OpenAI requests, issued back to back. Measured on an idle
-machine a full `write_file` takes ~740 ms (so ~81 records/min, ~8 minutes for
-that repo), but the real sync ran at 3-5 records/min -- 16-27x slower, in
-bursts separated by long stalls. The work per record had not changed; the
-number of REQUESTS had. Rate limiting and the occasional hung connection are
-counted per request, not per token.
-
-So: inside `batch_embeddings(...)`, `_embed_now` stops calling the API and
-appends instead. One request then carries many records, cutting request count
-by the batch size while embedding exactly the same text.
+The deterministic pass naturally encounters one record at a time. This
+module queues those records and sends larger input batches through the one
+BGE-M3 model held by the backend process. That reduces per-forward overhead
+while embedding exactly the same text.
 
 Scoped with a ContextVar rather than a module global so the batch belongs to
 the sync that opened it, and an unrelated code path embedding something in
@@ -30,16 +23,13 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
-from openai import OpenAI
-
 from graph import vector_store
+from graph.embeddings import embed_texts
 
 logger = logging.getLogger("neuron.embed_batch")
 
-# 16 records = 32 inputs (content + name each). Each input is already clipped
-# to 8k tokens, so a full batch stays under ~256k tokens -- inside the
-# embeddings endpoint's per-request ceiling with room to spare. A token
-# budget is enforced as well, for the case where every record is a big file.
+# 16 records = 32 inputs (content + name each). The token budget limits peak
+# memory when a batch contains unusually large files.
 BATCH_RECORDS = 16
 BATCH_TOKEN_BUDGET = 100_000
 
@@ -48,7 +38,6 @@ _active: ContextVar["EmbeddingBatch | None"] = ContextVar("neuron_embed_batch", 
 
 @dataclass
 class EmbeddingBatch:
-    client: OpenAI
     model: str
     collection: str
     max_records: int = BATCH_RECORDS
@@ -74,15 +63,17 @@ class EmbeddingBatch:
         # Content first, then names, so `data[i]` and `data[len+i]` pair up.
         inputs = [content for _uid, _label, content, _name in rows]
         inputs += [name for _uid, _label, _content, name in rows]
-        response = self.client.embeddings.create(model=self.model, input=inputs)
+        response = embed_texts(inputs, model_name=self.model)
         self.requests += 1
         vector_store.upsert_vectors(vector_store.client(), [
             {
                 "uid": uid, "label": label,
-                "embedding": response.data[index].embedding,
-                "name_embedding": response.data[len(rows) + index].embedding,
+                "embedding": response.vectors[index],
+                "name_embedding": response.vectors[len(rows) + index],
                 "embedded_text": content[:400],
                 "embedded_model": self.model,
+                "embedded_content_hash": vector_store.embedding_content_hash(content),
+                "embedding_schema_version": vector_store.EMBEDDING_SCHEMA_VERSION,
             }
             for index, (uid, label, content, _name) in enumerate(rows)
         ], collection=self.collection)
@@ -95,9 +86,11 @@ def active_batch() -> EmbeddingBatch | None:
 
 
 @contextmanager
-def batch_embeddings(client: OpenAI, model: str, collection: str, **kwargs):
+def batch_embeddings(client: object, model: str, collection: str, **kwargs):
     """Collect write-time embeddings for the duration of one sync."""
-    batch = EmbeddingBatch(client=client, model=model, collection=collection, **kwargs)
+    # ``client`` is retained in the public signature while connector callers
+    # also use it for LLM work; local embedding does not use it.
+    batch = EmbeddingBatch(model=model, collection=collection, **kwargs)
     token = _active.set(batch)
     try:
         yield batch
@@ -106,12 +99,12 @@ def batch_embeddings(client: OpenAI, model: str, collection: str, **kwargs):
         _active.reset(token)
         if batch.embedded:
             logger.info(
-                "embedded %d records in %d request(s) (%.0fx fewer than one-per-record)",
+                "embedded %d records in %d local batch(es) (%.0fx fewer forwards than one-per-record)",
                 batch.embedded, batch.requests, batch.embedded / max(batch.requests, 1),
             )
 
 
-def open_batch(client: OpenAI, model: str, collection: str, **kwargs) -> EmbeddingBatch:
+def open_batch(client: object, model: str, collection: str, **kwargs) -> EmbeddingBatch:
     """Explicit open/close instead of only a `with` block.
 
     The sync routines are long `try:` bodies; wrapping them in a context
@@ -120,7 +113,7 @@ def open_batch(client: OpenAI, model: str, collection: str, **kwargs) -> Embeddi
     `close_batch()` must be called on every exit path, success or failure --
     a dropped batch is a set of records with no vectors.
     """
-    batch = EmbeddingBatch(client=client, model=model, collection=collection, **kwargs)
+    batch = EmbeddingBatch(model=model, collection=collection, **kwargs)
     _active.set(batch)
     return batch
 
@@ -134,9 +127,8 @@ def close_batch() -> int:
     try:
         written = batch.flush()
     except Exception:
-        # Called from failure handlers too. If the flush itself fails -- most
-        # likely because the embedding API is exactly what broke the sync --
-        # raising here would replace the real error with this one. The
+        # Called from failure handlers too. Raising here would replace the
+        # real sync error with this one. The
         # records are already in the graph with their `search_text`, so
         # `scripts/rebuild_vectors.py` can still supply the vectors.
         logger.exception("embedding batch flush failed; run rebuild_vectors to repair")
@@ -144,7 +136,7 @@ def close_batch() -> int:
         _active.set(None)
     if batch.embedded:
         logger.info(
-            "embedded %d records in %d request(s) instead of %d",
+            "embedded %d records in %d local batch(es) instead of %d forwards",
             batch.embedded, batch.requests, batch.embedded,
         )
     return written

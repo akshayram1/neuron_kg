@@ -125,7 +125,7 @@ So “when was this ticket created?” has no evidence on the WorkItem. Assignme
 
 ## 4. Vector
 
-One Qdrant point per **WorkItem** at write time (`_embed_now`). Model: `text-embedding-3-small` (1536). Point payload is only `uid` + `label` + the vector.
+One Qdrant point per **WorkItem** at write time (`_embed_now`). The backend's shared `BAAI/bge-m3` model writes normalized 1024-dimensional `content` and `name` vectors. Payload includes identity, label, namespace, model/schema metadata, content hash, and a short text preview.
 
 Input = the `search_text` blob above (truncated at 8000 tokens; real tickets here are a few thousand characters).  
 **Not embedded:** Project, Person, SourceRecord, changelog, created/updated.

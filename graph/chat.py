@@ -28,6 +28,7 @@ from util import paths as _paths  # noqa: F401
 
 from graph import vector_store
 from graph.access import AccessScope
+from graph.agentic_retrieval import plan_subqueries
 from graph.bridge.anchors import commit_shas, jira_keys, pull_request_refs, repository_names
 from graph.entity import fetch_entity_detail
 from graph.expand import MAX_SEEDS, TIER_ORDER, expand_neighbors, tier_for_extraction_method
@@ -101,6 +102,9 @@ NEURON_RERANK_MAX_KEEP = int(os.getenv("NEURON_RERANK_MAX_KEEP", "12"))
 NEURON_RERANK_MAX_ROUNDS = int(os.getenv("NEURON_RERANK_MAX_ROUNDS", "2"))
 NEURON_RERANK_FACTS = int(os.getenv("NEURON_RERANK_FACTS", "6"))
 NEURON_PATH_MIN = float(os.getenv("NEURON_PATH_MIN", "0.4"))
+NEURON_AGENTIC_MAX_SUBQUERIES = int(os.getenv("NEURON_AGENTIC_MAX_SUBQUERIES", "2"))
+NEURON_AGENTIC_POOL_PER_QUERY = int(os.getenv("NEURON_AGENTIC_POOL_PER_QUERY", "20"))
+NEURON_AGENTIC_MIN_RESULTS = int(os.getenv("NEURON_AGENTIC_MIN_RESULTS", "2"))
 
 _laya_reranker: LayaReranker | None = None
 _laya_reranker_config: tuple[str | None, str] | None = None
@@ -261,6 +265,9 @@ class RetrievalTrace:
     reranker: str | None = None
     fallback: bool = False
     fallback_reason: str | None = None
+    agentic_subqueries: list[str] = field(default_factory=list)
+    agentic_candidate_uids: list[str] = field(default_factory=list)
+    agentic_rounds: int = 0
 
 
 def _log_hits(stage: str, hits: list[SearchHit]) -> None:
@@ -749,7 +756,7 @@ def _pair_anchor_candidates(
         lowered = [path.lower() for path in paths]
         rows = graph.query(
             f"""MATCH (n:SourceFile)-[:MENTIONED_IN]->(sr:SourceRecord)
-                WHERE any(v IN $paths WHERE toLower(n.name) = v OR toLower(n.name) ENDS WITH '/' + v)
+                WHERE any(v IN $paths WHERE toLower(n.name) = v OR toLower(n.name) ENDS WITH ('/' + v))
                   AND sr.deleted_at IS NULL AND {acl} {provider_filter}
                 RETURN DISTINCT n.uid, n.name""",
             params={**base_params, "paths": lowered},
@@ -1308,6 +1315,79 @@ def _laya_two_pass_search(
     return selected
 
 
+def _agentic_laya_retry(
+    reranker: Reranker,
+    graph: Graph,
+    client: OpenAI,
+    question: str,
+    initial_hits: list[SearchHit],
+    selected: list[SearchHit],
+    *,
+    scope: AccessScope,
+    providers: list[str] | None,
+    at: str | None,
+    at_end: str | None,
+    as_of: str | None,
+    collection: str,
+    token_usage: TokenUsage | None,
+    exclude_edges: frozenset[tuple[str, str, str]],
+    trace: RetrievalTrace | None,
+) -> list[SearchHit]:
+    """One bounded planner round after normal Laya hop recovery is thin."""
+    if os.getenv("NEURON_AGENTIC_RETRIEVAL", "off").strip().lower() != "on":
+        return selected
+    if len(selected) >= NEURON_AGENTIC_MIN_RESULTS:
+        return selected
+    clues = [
+        {
+            "uid": hit.uid, "label": hit.label, "name": hit.name,
+            "text": best_window(question, hit.summary or hit.name, 120, vector_store._encoding),
+            "methods": hit.methods,
+        }
+        for hit in initial_hits[:8]
+    ]
+    subqueries = plan_subqueries(
+        client, question, clues, max_subqueries=NEURON_AGENTIC_MAX_SUBQUERIES,
+        token_usage=token_usage,
+    )
+    if not subqueries:
+        return selected
+    followup_hits: list[SearchHit] = []
+    for subquery in subqueries:
+        hits = hybrid_search(
+            graph, client, subquery, limit=NEURON_AGENTIC_POOL_PER_QUERY,
+            providers=providers, scope=scope, token_usage=token_usage,
+            collection=collection,
+        )
+        for hit in hits:
+            hit.methods = list(dict.fromkeys(hit.methods + ["agentic_subquery"]))
+        followup_hits.extend(hits)
+    known = {hit.uid for hit in initial_hits}
+    new_hits = [hit for hit in _merge_unique_hits(followup_hits) if hit.uid not in known]
+    if trace is not None:
+        trace.agentic_subqueries = subqueries
+        trace.agentic_candidate_uids = [hit.uid for hit in new_hits]
+        trace.agentic_rounds = 1
+    if not new_hits:
+        return selected
+    _log_hits("agentic-retry", new_hits)
+    retry_trace = RetrievalTrace()
+    retried = _laya_two_pass_search(
+        reranker, graph, question, _merge_unique_hits(selected, initial_hits, new_hits),
+        scope=scope, providers=providers, at=at, at_end=at_end, as_of=as_of,
+        exclude_edges=exclude_edges, trace=retry_trace,
+    )
+    if trace is not None:
+        trace.expanded_candidate_uids.extend(
+            uid for uid in retry_trace.expanded_candidate_uids
+            if uid not in trace.expanded_candidate_uids
+        )
+        trace.bridge_uids = retry_trace.bridge_uids
+        trace.final_uids = retry_trace.final_uids
+        trace.expansion_rounds += retry_trace.expansion_rounds
+    return retried
+
+
 def retrieve(
     graph: Graph, client: OpenAI, question: str, *,
     limit: int, providers: list[str] | None, scope: AccessScope,
@@ -1463,11 +1543,18 @@ def retrieve(
         _log_hits("time-window", window_hits)
         hits = _merge_unique_hits(pair_hits, named_hits, window_hits, hits)
         try:
-            return None, _laya_two_pass_search(
+            selected = _laya_two_pass_search(
                 active_reranker, graph, question, hits,
                 scope=scope, providers=providers, at=at, at_end=at_end,
                 as_of=as_of, exclude_edges=exclude_edges, trace=trace,
             )
+            selected = _agentic_laya_retry(
+                active_reranker, graph, client, question, hits, selected,
+                scope=scope, providers=providers, at=at, at_end=at_end,
+                as_of=as_of, collection=collection, token_usage=token_usage,
+                exclude_edges=exclude_edges, trace=trace,
+            )
+            return None, selected
         except Exception as exc:
             # A model/package/checkpoint failure must not take chat down. The
             # original RRF + bounded-expansion path below remains the fallback.

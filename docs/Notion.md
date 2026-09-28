@@ -111,7 +111,7 @@ Bitbucket still reaches Jira by key in the **commit message** (`IMPLEMENTS`). No
 
 ## 4. Vector
 
-After write, the Document `search_text` is embedded (`text-embedding-3-small`), same as WorkItem/Commit. Extracted Term/Decision nodes are also embeddable. Workspace is not.
+After write, the backend embeds Document `search_text` with `BAAI/bge-m3`, the same model used for WorkItem/Commit. Extracted Term/Decision nodes are also embeddable. Workspace is not.
 
 Hybrid search can therefore surface a gap-matrix page for “glossary context cards” even when no `DOCUMENTS` edge exists.
 

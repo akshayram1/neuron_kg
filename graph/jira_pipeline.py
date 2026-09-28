@@ -12,12 +12,9 @@ touched Graphiti, so the change here is dropping the Graphiti-era
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime
 
 from falkordb import Graph
-from openai import OpenAI
-
 from connectors.core.actions import RecordAction
 from connectors.core.ledger import ConnectorLedger, RecordEdgeRef, SemanticStatus
 from connectors.core.models import SourceAccess, SourceBreadcrumb, SourceRecord
@@ -26,6 +23,7 @@ from connectors.jira.api import JiraIssue, JiraPerson, JiraProject, JiraSite, fi
 from graph.derived import materialize_around
 from graph import vector_store
 from graph.embed_batch import active_batch
+from graph.embeddings import embed_texts
 from graph import writer as w
 from graph.resolver import (
     anchor_properties, link_verified_person_identity, resolve_backlinks_for_target,
@@ -34,9 +32,6 @@ from graph.resolver import (
 from graph.selective_ingestion import has_pending, selective_chunk_writes
 
 logger = logging.getLogger("neuron.jira_pipeline")
-
-_embed_client: OpenAI | None = None
-
 
 def _embed_now(
     uid: str, label: str, text: str, collection: str = vector_store.COLLECTION,
@@ -62,16 +57,7 @@ def _embed_now(
     See `vector_store.ensure_collection` for why a single combined embedding
     loses short-query matches.
     """
-    global _embed_client
-    if _embed_client is None:
-        # An explicit timeout, because the SDK default is a 600s read with two
-        # retries -- up to 30 MINUTES stalled on one record inside a loop of
-        # hundreds. Observed live: an 11-minute silence mid-sync with the
-        # process at 0% CPU. Failing this call fast and letting
-        # `scripts/rebuild_vectors.py` repair the gap is strictly better than
-        # holding an entire ingestion hostage to one hung connection.
-        _embed_client = OpenAI(timeout=30.0, max_retries=2)
-    model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    model = vector_store.EMBEDDING_MODEL
     content = vector_store.truncate_for_embedding(text)
     name_text = vector_store.truncate_for_embedding((name or "").strip() or content)
 
@@ -82,15 +68,15 @@ def _embed_now(
         batch.add(uid, label, content, name_text)
         return
 
-    response = _embed_client.embeddings.create(
-        model=model, input=[content, name_text],
-    )
+    response = embed_texts([content, name_text], model_name=model)
     vector_store.upsert_vectors(vector_store.client(), [{
         "uid": uid, "label": label,
-        "embedding": response.data[0].embedding,
-        "name_embedding": response.data[1].embedding,
+        "embedding": response.vectors[0],
+        "name_embedding": response.vectors[1],
         "embedded_text": content[:400],
         "embedded_model": model,
+        "embedded_content_hash": vector_store.embedding_content_hash(content),
+        "embedding_schema_version": vector_store.EMBEDDING_SCHEMA_VERSION,
     }], collection=collection)
 
 

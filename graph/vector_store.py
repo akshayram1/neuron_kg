@@ -7,16 +7,16 @@ backend while existing deployments migrate.
 Why Qdrant instead of FalkorDB's built-in vector index: FalkorDB stores
 vectors as full-precision float32 in RAM with no quantization option
 (verified against the running instance — its vector index exposes only
-`dimension`/`similarityFunction`/HNSW `M`/`ef*`), so ~6 KB per 1536-dim
-embedding sits permanently in memory. Qdrant gives scalar quantization
+`dimension`/`similarityFunction`/HNSW `M`/`ef*`). A BGE-M3 vector uses about
+4 KB at 1024 float32 dimensions. Qdrant gives scalar quantization
 (~4x smaller) with the originals on disk, so the embedding count stops
 being bounded by RAM.
 
 DESIGN RULE — the graph is the single source of truth; this collection is a
 rebuildable projection of it.
 
-That rule is why this module stores the absolute minimum per point:
-`uid`, `label`, the identity `namespace_uid`, and the vector. No ACL, no
+That rule is why this module stores only projection metadata per point:
+`uid`, `label`, identity `namespace_uid`, model/schema fingerprints, and vectors. No ACL, no
 provider, no `deleted_at`. Every
 authorization and lifecycle filter stays in FalkorDB, where the truth lives,
 and is applied to the uids Qdrant returns (callers over-fetch to absorb the
@@ -34,6 +34,7 @@ matching anything. `find_similar_uid` here takes `min_similarity`, not
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from typing import Any, Iterable
@@ -55,12 +56,13 @@ from qdrant_client.models import (
 )
 
 from storage.postgres import PostgresVectorClient, database_url
+from graph.embeddings import DIMENSION as EMBEDDING_DIMENSION
+from graph.embeddings import MODEL_NAME as EMBEDDING_MODEL
+from graph.embeddings import SCHEMA_VERSION as EMBEDDING_SCHEMA_VERSION
 
 logger = logging.getLogger("neuron.vector_store")
 
 COLLECTION = os.getenv("VECTOR_COLLECTION", os.getenv("QDRANT_COLLECTION", "neuron_entities"))
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIMENSION = 1536  # text-embedding-3-small
 # Changing the model or dimension requires recreating the collection:
 #   uv run python -m scripts.rebuild_vectors --recreate
 
@@ -68,24 +70,19 @@ EMBEDDING_DIMENSION = 1536  # text-embedding-3-small
 NAME_VECTOR = "name"
 CONTENT_VECTOR = "content"
 
-_MAX_EMBEDDING_TOKENS = 8000  # OpenAI's hard cap is 8192; leave headroom
+# Chat context packing uses this tokenizer as its stable accounting contract.
+# It is independent of BGE-M3's own tokenizer, which runs inside embed_texts.
 _encoding = tiktoken.get_encoding("cl100k_base")
 
 
 def truncate_for_embedding(text: str) -> str:
-    """Clip to the embedding API's input limit.
+    """Conservative pre-clip; BGE's tokenizer enforces the exact token cap."""
+    return text[:32768]
 
-    Only SourceFile search_text (a whole file's content) is ever big enough
-    to matter here -- verified live: adding SourceFile to VECTOR_LABELS hit
-    `Invalid 'input[13]': maximum input length is 8192 tokens` on the first
-    real rebuild. Truncating loses the tail of very large files, which is an
-    acceptable lossy fallback for a projection that's rebuildable anyway --
-    the graph's own `search_text` (used for fulltext + as the source of
-    truth) is untouched."""
-    tokens = _encoding.encode(text)
-    if len(tokens) <= _MAX_EMBEDDING_TOKENS:
-        return text
-    return _encoding.decode(tokens[:_MAX_EMBEDDING_TOKENS])
+
+def embedding_content_hash(text: str) -> str:
+    """Stable fingerprint of the exact content-channel input."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def build_client() -> QdrantClient | PostgresVectorClient:
@@ -106,7 +103,7 @@ def client() -> QdrantClient | PostgresVectorClient:
     """Process-wide lazy client, collection ensured on first use. Qdrant's
     HTTP client is safe to share, and holding it here keeps every call site
     free of plumbing another handle through signatures that already carry
-    `graph` and the OpenAI client."""
+    `graph` and the embedding model."""
     global _client
     if _client is None:
         _client = build_client()
@@ -139,6 +136,14 @@ def ensure_collection(
         client.store.bootstrap()
         return
     if client.collection_exists(collection):
+        info = client.get_collection(collection)
+        vectors = info.config.params.vectors
+        sizes = {getattr(value, "size", None) for value in vectors.values()}
+        if sizes != {EMBEDDING_DIMENSION}:
+            raise RuntimeError(
+                f"Qdrant collection {collection!r} has dimensions {sorted(sizes)}; "
+                f"BGE-M3 requires {EMBEDDING_DIMENSION}. Recreate the collection."
+            )
         return
     params = VectorParams(
         size=EMBEDDING_DIMENSION,
@@ -201,6 +206,11 @@ def upsert_vectors(
                     **({"namespace_uid": row["namespace_uid"]} if row.get("namespace_uid") else {}),
                     **({"embedded_text": row["embedded_text"]} if row.get("embedded_text") else {}),
                     "embedded_model": row.get("embedded_model") or EMBEDDING_MODEL,
+                    "embedding_dimension": EMBEDDING_DIMENSION,
+                    "embedding_schema_version": EMBEDDING_SCHEMA_VERSION,
+                    "embedded_content_hash": row.get("embedded_content_hash") or embedding_content_hash(
+                        str(row.get("embedded_text") or "")
+                    ),
                 },
             )
             for row in rows
