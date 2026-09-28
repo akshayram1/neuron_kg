@@ -1584,15 +1584,15 @@ class ConnectorLedger:
                 ).fetchone()
                 if already_rejected:
                     return None
-            cursor = connection.execute(
+            row = connection.execute(
                 "INSERT INTO reviews(type, payload, identity, state, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?) RETURNING id",
                 (
                     review_type, json.dumps(payload), identity, str(ReviewState.PENDING),
                     datetime.now(UTC).isoformat(),
                 ),
-            )
-        return int(cursor.lastrowid)
+            ).fetchone()
+        return int(row["id"])
 
     def get_review(self, review_id: int) -> Review | None:
         with self._connect() as connection:
@@ -1656,8 +1656,10 @@ class ConnectorLedger:
             review = self._review_row(row)
             if review.identity is not None:
                 connection.execute(
-                    "INSERT OR REPLACE INTO review_rejections(identity, type, review_id, rejected_at) "
-                    "VALUES (?, ?, ?, ?)",
+                    "INSERT INTO review_rejections(identity, type, review_id, rejected_at) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(identity) DO UPDATE SET type = excluded.type, "
+                    "  review_id = excluded.review_id, rejected_at = excluded.rejected_at",
                     (review.identity, review.type, review.id, now),
                 )
         return review
@@ -1810,7 +1812,7 @@ class ConnectorLedger:
         """All resolution rows from the most recently recorded sync run."""
         with self._connect() as connection:
             latest = connection.execute(
-                "SELECT run_id FROM resolution_stats ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                "SELECT run_id FROM resolution_stats ORDER BY created_at DESC, id DESC LIMIT 1"
             ).fetchone()
         return self.resolution_stats_for_run(str(latest["run_id"])) if latest else []
 
@@ -1904,7 +1906,7 @@ class ConnectorLedger:
     ) -> int:
         """Propose one derived-edge candidate (plan.md Phase 6 §6.2).
 
-        Idempotent on `(from_uid, to_uid, relation)`: `INSERT OR IGNORE`
+        Idempotent on `(from_uid, to_uid, relation)`: `INSERT ... ON CONFLICT DO NOTHING`
         against the table's UNIQUE constraint means the same triple
         proposed twice -- by the same hygiene run or a later one -- never
         duplicates. This is a simpler mechanism than `reviews`' rejection
@@ -1922,8 +1924,9 @@ class ConnectorLedger:
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute(
-                "INSERT OR IGNORE INTO link_candidates(from_uid, to_uid, relation, "
-                "confidence, derived_rule, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO link_candidates(from_uid, to_uid, relation, "
+                "confidence, derived_rule, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(from_uid, to_uid, relation) DO NOTHING",
                 (from_uid, to_uid, relation, confidence, derived_rule, str(ReviewState.PENDING), now),
             )
             row = connection.execute(
@@ -1991,7 +1994,7 @@ class ConnectorLedger:
         if `candidate_id` does not exist or is no longer PENDING. No
         separate rejection cache is needed here (unlike `reviews`): the row
         itself IS the identity (its UNIQUE triple), so it simply stays
-        `rejected` and `create_link_candidate`'s `INSERT OR IGNORE` will
+        `rejected` and `create_link_candidate`'s `ON CONFLICT DO NOTHING` will
         never resurrect it as pending."""
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
@@ -2028,12 +2031,12 @@ class ConnectorLedger:
         practice, but nothing here enforces that -- this is a durable audit
         log, not a constraint surface. Returns the new trace row's id."""
         with self._connect() as connection:
-            cursor = connection.execute(
+            row = connection.execute(
                 "INSERT INTO merge_trace(survivor_uid, absorbed_uid, label, merged_at, reason) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?) RETURNING id",
                 (survivor_uid, absorbed_uid, label, datetime.now(UTC).isoformat(), reason),
-            )
-        return int(cursor.lastrowid)
+            ).fetchone()
+        return int(row["id"])
 
     def merged_into(self, uid: str) -> str | None:
         """The uid this node was absorbed into, or `None` if it was never
