@@ -132,6 +132,12 @@ hop validation. Neither is currently justified by valid measurements.
 - Phase 7.1–7.3 path support, recovered-hop rejection and explicit verified
   write-back are implemented.
 
+## New: review precision/ECE measurement script (25 Sep, run 3)
+
+`scripts/measure_review_precision.py` built and merged (§10.4's ">= 0.95 precision, <= 0.05 ECE" promotion bar). Key finding, verified by reading code not guessed: **`fact_update` reviews can't have ECE computed today** — `classify_fact_update` already computes Laya's confidence (`choice, _confidence = ...`) but discards it (leading underscore, never returned, never reaches the review payload). Precision-only for that type until a 3-line fix (return the confidence, thread it through `_resolve_conflict`, add it to the payload). `possibly_same_as` genuinely has a usable confidence field (`top_p` from `same_entity`) and can reach a real PASS verdict. `duplicate_pair`'s score is a hand-weighted heuristic, not a Laya probability — shown but permanently capped at `ECE_NOT_COMPUTABLE`. `link_candidate` excluded entirely (separate table, not a `review`, and its stored confidence is a hardcoded 0.5 constant regardless).
+**Question:** worth the 3-line fix to `graph/resolve_text_fact.py` now so `fact_update` can be calibration-measured too? Also: sample-size threshold was set to 200 (matching §10.4's literal "on >= 200 reviewed items" text) rather than a lower default — confirm that's the bar you want enforced.
+**Assumption made for now:** none — precision-only reporting for `fact_update`/`duplicate_pair`, real ECE only where a genuine probability exists.
+
 ## Verification
 
 - Python: `503 passed, 169 skipped, 0 failed`.
