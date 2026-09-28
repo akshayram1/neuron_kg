@@ -30,6 +30,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from connectors.core.actions import RecordAction, resolve_action
+from storage import sql_backend
 
 
 class SemanticStatus(StrEnum):
@@ -671,8 +672,8 @@ class ConnectorLedger:
             # covers the hot lookup shape (`term_norm = ? AND label IN (?,
             # '')`) since both columns are its leading prefix.
             connection.executemany(
-                "INSERT OR IGNORE INTO mention_stoplist(term_norm, label, reason, created_at) "
-                "VALUES (?, '', 'seed', ?)",
+                "INSERT INTO mention_stoplist(term_norm, label, reason, created_at) "
+                "VALUES (?, '', 'seed', ?) ON CONFLICT DO NOTHING",
                 [(term, datetime.now(UTC).isoformat()) for term in _STOPLIST_SEED_TERMS],
             )
             connection.execute(
@@ -764,10 +765,21 @@ class ConnectorLedger:
                 "ON merge_trace(survivor_uid)"
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        return connection
+    def _connect(self):
+        """A ``sqlite3.Connection`` or a Postgres ``PgConnection`` shim (see
+        ``storage.sql_backend``), both with name-addressable rows."""
+        return sql_backend.connect(self.path)
+
+    @staticmethod
+    def _least(connection) -> str:
+        """Scalar two-argument minimum: SQLite's ``min(a, b)`` is Postgres' ``LEAST``."""
+        return "LEAST" if sql_backend.is_postgres(connection) else "min"
+
+    @staticmethod
+    def _binary_collate(connection) -> str:
+        """Postgres text ordering follows the database locale; SQLite's is
+        byte order. ``COLLATE "C"`` keeps ORDER BY / MIN identical."""
+        return ' COLLATE "C"' if sql_backend.is_postgres(connection) else ""
 
     # ------------------------------------------------------------ hash / action
 
@@ -800,8 +812,9 @@ class ConnectorLedger:
         record with no prose), or DONE if the semantic pass ran in the same
         step (no budget contention)."""
         with self._connect() as connection:
+            least = self._least(connection)
             connection.execute(
-                """
+                f"""
                 INSERT INTO source_records(
                     record_key, content_hash, primary_node_uid, semantic_status,
                     semantic_priority, update_count, updated_at
@@ -812,7 +825,7 @@ class ConnectorLedger:
                     primary_node_uid = excluded.primary_node_uid,
                     semantic_status = excluded.semantic_status,
                     update_count = source_records.update_count + 1,
-                    semantic_priority = min(300, 200 + source_records.update_count),
+                    semantic_priority = {least}(300, 200 + source_records.update_count),
                     updated_at = excluded.updated_at
                 """,
                 (record_key, content_hash, primary_node_uid, str(semantic_status), datetime.now(UTC).isoformat()),
@@ -970,8 +983,8 @@ class ConnectorLedger:
                 return int(latest["version"])
             version = int(latest["version"]) + 1 if latest else 1
             connection.execute(
-                "INSERT OR IGNORE INTO record_versions(record_key, version, content_hash, ingested_at) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO record_versions(record_key, version, content_hash, ingested_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
                 (record_key, version, content_hash, datetime.now(UTC).isoformat()),
             )
         return version
@@ -1166,9 +1179,10 @@ class ConnectorLedger:
         with self._connect() as connection:
             before = connection.execute("SELECT COUNT(*) AS n FROM relation_axioms").fetchone()["n"]
             connection.executemany(
-                "INSERT OR IGNORE INTO relation_axioms(relation, subject_kind, object_kind, "
+                "INSERT INTO relation_axioms(relation, subject_kind, object_kind, "
                 "extractable, functional, is_transitive, is_symmetric, is_asymmetric, "
-                "inverse_of, sub_property_of, temporal) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "inverse_of, sub_property_of, temporal) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT DO NOTHING",
                 [
                     (r["relation"], r["subject_kind"], r["object_kind"],
                      int(r["extractable"]), int(r["functional"]), int(r["is_transitive"]),
@@ -1213,8 +1227,8 @@ class ConnectorLedger:
         query = "SELECT kind, key, count, example FROM ontology_misses"
         if not include_dismissed:
             query += " WHERE dismissed_at IS NULL"
-        query += " ORDER BY count DESC, key"
         with self._connect() as connection:
+            query += f" ORDER BY count DESC, key{self._binary_collate(connection)}"
             rows = connection.execute(query).fetchall()
         return [(str(r["kind"]), str(r["key"]), int(r["count"]), r["example"]) for r in rows]
 
@@ -1251,12 +1265,13 @@ class ConnectorLedger:
         the system overruling an explicit human decision.
         """
         with self._connect() as connection:
+            collate = self._binary_collate(connection)
             rows = connection.execute(
-                """
+                f"""
                 SELECT d.subject_kind, d.relation, d.object_kind,
                        COUNT(*)                   AS facts,
                        COUNT(DISTINCT d.record_key) AS docs,
-                       MIN(d.subject_name || ' -> ' || d.object_name) AS example
+                       MIN((d.subject_name || ' -> ' || d.object_name){collate}) AS example
                 FROM extraction_drops d
                 WHERE d.reason = ?
                   AND d.relation != ''
@@ -1272,7 +1287,7 @@ class ConnectorLedger:
                           AND a.subject_kind = d.subject_kind
                           AND a.object_kind = d.object_kind)
                 GROUP BY d.subject_kind, d.relation, d.object_kind
-                HAVING docs >= ? AND facts >= ?
+                HAVING COUNT(DISTINCT d.record_key) >= ? AND COUNT(*) >= ?
                 ORDER BY docs DESC, facts DESC
                 """,
                 (DropReason.RELATION_NOT_ALLOWED, min_docs, min_facts),
@@ -1296,8 +1311,9 @@ class ConnectorLedger:
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.executemany(
-                "INSERT OR IGNORE INTO relation_axioms(relation, subject_kind, object_kind, "
-                "extractable, temporal, adopted_batch) VALUES (?,?,?,1,'state',?)",
+                "INSERT INTO relation_axioms(relation, subject_kind, object_kind, "
+                "extractable, temporal, adopted_batch) VALUES (?,?,?,1,'state',?) "
+                "ON CONFLICT DO NOTHING",
                 [(s["relation"], s["subject_kind"], s["object_kind"], batch_id) for s in shapes],
             )
             connection.execute(
@@ -1398,8 +1414,8 @@ class ConnectorLedger:
         with self._connect() as connection:
             connection.executemany(
                 """
-                INSERT OR IGNORE INTO record_edges(record_key, rel_type, from_uid, to_uid)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO record_edges(record_key, rel_type, from_uid, to_uid)
+                VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING
                 """,
                 [(record_key, e.rel_type, e.from_uid, e.to_uid) for e in edges],
             )
@@ -1498,7 +1514,7 @@ class ConnectorLedger:
             )
 
     @staticmethod
-    def _sync_coverage_row(row: sqlite3.Row) -> SyncCoverage:
+    def _sync_coverage_row(row) -> SyncCoverage:
         return SyncCoverage(
             run_id=str(row["run_id"]), provider=str(row["provider"]),
             connection_id=row["connection_id"],
@@ -1524,12 +1540,12 @@ class ConnectorLedger:
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT s.* FROM sync_coverage s
                     INNER JOIN (
                         SELECT provider, MAX(id) AS max_id FROM sync_coverage GROUP BY provider
                     ) latest ON s.provider = latest.provider AND s.id = latest.max_id
-                    ORDER BY s.provider
+                    ORDER BY s.provider{self._binary_collate(connection)}
                     """
                 ).fetchall()
         return [self._sync_coverage_row(row) for row in rows]
@@ -1584,15 +1600,15 @@ class ConnectorLedger:
                 ).fetchone()
                 if already_rejected:
                     return None
-            cursor = connection.execute(
+            row = connection.execute(
                 "INSERT INTO reviews(type, payload, identity, state, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?) RETURNING id",
                 (
                     review_type, json.dumps(payload), identity, str(ReviewState.PENDING),
                     datetime.now(UTC).isoformat(),
                 ),
-            )
-        return int(cursor.lastrowid)
+            ).fetchone()
+        return int(row["id"])
 
     def get_review(self, review_id: int) -> Review | None:
         with self._connect() as connection:
@@ -1656,8 +1672,10 @@ class ConnectorLedger:
             review = self._review_row(row)
             if review.identity is not None:
                 connection.execute(
-                    "INSERT OR REPLACE INTO review_rejections(identity, type, review_id, rejected_at) "
-                    "VALUES (?, ?, ?, ?)",
+                    "INSERT INTO review_rejections(identity, type, review_id, rejected_at) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(identity) DO UPDATE SET type = excluded.type, "
+                    "  review_id = excluded.review_id, rejected_at = excluded.rejected_at",
                     (review.identity, review.type, review.id, now),
                 )
         return review
@@ -1810,7 +1828,7 @@ class ConnectorLedger:
         """All resolution rows from the most recently recorded sync run."""
         with self._connect() as connection:
             latest = connection.execute(
-                "SELECT run_id FROM resolution_stats ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                "SELECT run_id FROM resolution_stats ORDER BY created_at DESC, id DESC LIMIT 1"
             ).fetchone()
         return self.resolution_stats_for_run(str(latest["run_id"])) if latest else []
 
@@ -1904,7 +1922,7 @@ class ConnectorLedger:
     ) -> int:
         """Propose one derived-edge candidate (plan.md Phase 6 §6.2).
 
-        Idempotent on `(from_uid, to_uid, relation)`: `INSERT OR IGNORE`
+        Idempotent on `(from_uid, to_uid, relation)`: `INSERT ... ON CONFLICT DO NOTHING`
         against the table's UNIQUE constraint means the same triple
         proposed twice -- by the same hygiene run or a later one -- never
         duplicates. This is a simpler mechanism than `reviews`' rejection
@@ -1922,8 +1940,9 @@ class ConnectorLedger:
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute(
-                "INSERT OR IGNORE INTO link_candidates(from_uid, to_uid, relation, "
-                "confidence, derived_rule, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO link_candidates(from_uid, to_uid, relation, "
+                "confidence, derived_rule, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(from_uid, to_uid, relation) DO NOTHING",
                 (from_uid, to_uid, relation, confidence, derived_rule, str(ReviewState.PENDING), now),
             )
             row = connection.execute(
@@ -1991,7 +2010,7 @@ class ConnectorLedger:
         if `candidate_id` does not exist or is no longer PENDING. No
         separate rejection cache is needed here (unlike `reviews`): the row
         itself IS the identity (its UNIQUE triple), so it simply stays
-        `rejected` and `create_link_candidate`'s `INSERT OR IGNORE` will
+        `rejected` and `create_link_candidate`'s `ON CONFLICT DO NOTHING` will
         never resurrect it as pending."""
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
@@ -2028,12 +2047,12 @@ class ConnectorLedger:
         practice, but nothing here enforces that -- this is a durable audit
         log, not a constraint surface. Returns the new trace row's id."""
         with self._connect() as connection:
-            cursor = connection.execute(
+            row = connection.execute(
                 "INSERT INTO merge_trace(survivor_uid, absorbed_uid, label, merged_at, reason) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?) RETURNING id",
                 (survivor_uid, absorbed_uid, label, datetime.now(UTC).isoformat(), reason),
-            )
-        return int(cursor.lastrowid)
+            ).fetchone()
+        return int(row["id"])
 
     def merged_into(self, uid: str) -> str | None:
         """The uid this node was absorbed into, or `None` if it was never

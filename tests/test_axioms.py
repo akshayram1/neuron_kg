@@ -130,8 +130,8 @@ def test_seeding_never_overwrites_an_edit(tmp_path):
     ledger = ConnectorLedger(tmp_path / "l.sqlite3")
     load_axioms(ledger)
 
-    import sqlite3
-    with sqlite3.connect(ledger.path) as db:
+    from storage import sql_backend
+    with sql_backend.connect(ledger.path) as db:
         db.execute(
             "UPDATE relation_axioms SET extractable = 0 "
             "WHERE relation = 'APPLIES_TO' AND subject_kind = 'Decision' AND object_kind = 'System'"
