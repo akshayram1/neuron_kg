@@ -122,3 +122,35 @@ def test_percent_literal_with_params(tmp_path, sql_backend):
         db.execute("INSERT INTO t VALUES (?, ?)", ("abc", 1))
         rows = db.execute("SELECT k FROM t WHERE k LIKE 'ab%' AND n = ?", (1,)).fetchall()
     assert [r[0] for r in rows] == ["abc"]
+
+
+@BOTH
+def test_pragma_assignments_are_noops_on_postgres(tmp_path, sql_backend):
+    with connect(tmp_path / "w.sqlite3") as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA foreign_keys = ON")
+        db.execute("PRAGMA busy_timeout(5000)")
+        db.execute("CREATE TABLE IF NOT EXISTS t (k TEXT)")
+
+
+@pytest.mark.parametrize("sql_backend", ["postgres"], indirect=True)
+def test_concurrent_first_connect_to_new_schema(tmp_path, sql_backend):
+    import threading
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        try:
+            barrier.wait()
+            with connect(tmp_path / "race.sqlite3") as db:
+                db.execute("SELECT 1").fetchone()
+        except BaseException as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []

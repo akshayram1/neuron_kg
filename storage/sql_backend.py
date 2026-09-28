@@ -161,7 +161,7 @@ class Row(Sequence):
 
 _STRING_OR_PLACEHOLDER = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|\?|%")
 _DDL_START = re.compile(r"^\s*(CREATE\s+TABLE|ALTER\s+TABLE)\b", re.IGNORECASE)
-_NOOP = re.compile(r"^\s*(PRAGMA\s+(?!table_info)\w+|BEGIN(\s+(IMMEDIATE|DEFERRED|EXCLUSIVE))?(\s+TRANSACTION)?)\s*;?\s*$", re.IGNORECASE)
+_NOOP = re.compile(r"^\s*(PRAGMA\s+(?!table_info)\w+(\s*=\s*[\w'\"-]+|\s*\([^)]*\))?|BEGIN(\s+(IMMEDIATE|DEFERRED|EXCLUSIVE))?(\s+TRANSACTION)?)\s*;?\s*$", re.IGNORECASE)
 _READ_ONLY = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
 _TABLE_INFO = re.compile(r"^\s*PRAGMA\s+table_info\(\s*[\"']?(\w+)[\"']?\s*\)\s*;?\s*$", re.IGNORECASE)
 
@@ -264,9 +264,13 @@ def _open_raw(url: str, schema: str):
             raw.close()
     raw = psycopg.connect(url, autocommit=False)
     if key not in _SCHEMAS_READY:
-        with raw.cursor() as cursor:
-            cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
-        raw.commit()
+        try:
+            with raw.cursor() as cursor:
+                cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+            raw.commit()
+        except (_pg_errors.UniqueViolation, _pg_errors.DuplicateSchema):
+            # Another process/thread created it between our check and insert.
+            raw.rollback()
         _SCHEMAS_READY.add(key)
     with raw.cursor() as cursor:
         cursor.execute(f'SET search_path TO "{schema}"')
