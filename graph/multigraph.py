@@ -20,10 +20,12 @@ should never require re-authenticating a connector.
 from __future__ import annotations
 
 import re
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+from storage import sql_backend
 
 DEFAULT_GRAPH_NAME = "default"
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
@@ -88,13 +90,15 @@ class GraphRegistry:
                 """
             )
             connection.execute(
-                "INSERT OR IGNORE INTO graphs(name, display_name, created_at) VALUES (?, ?, ?)",
+                "INSERT INTO graphs(name, display_name, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO NOTHING",
                 (DEFAULT_GRAPH_NAME, "Default", datetime.now(UTC).isoformat()),
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.execute("PRAGMA journal_mode=WAL")
+    def _connect(self) -> Any:
+        connection = sql_backend.connect(self.path)
+        if not sql_backend.is_postgres(connection):
+            connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
     def list(self) -> list[dict]:

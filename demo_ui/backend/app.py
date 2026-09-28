@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import os
 import asyncio
-import sqlite3
 from contextlib import suppress
 from pathlib import Path
 
@@ -60,6 +59,7 @@ from graph.history import fetch_fact_history
 from graph.path_support import propose_verified_links
 from graph.schema import bootstrap_schema
 from graph.skos_export import build_skos_turtle
+from storage import sql_backend
 from util.logging import configure_logging
 
 configure_logging()
@@ -105,7 +105,7 @@ class ChatFeedbackRequest(BaseModel):
 
 
 def _runtime_setting(name: str) -> str | None:
-    with sqlite3.connect(RUNTIME_SETTINGS_PATH) as db:
+    with sql_backend.connect(RUNTIME_SETTINGS_PATH) as db:
         db.execute(
             "CREATE TABLE IF NOT EXISTS runtime_settings "
             "(name TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -117,7 +117,7 @@ def _runtime_setting(name: str) -> str | None:
 
 
 def _save_runtime_setting(name: str, value: str) -> None:
-    with sqlite3.connect(RUNTIME_SETTINGS_PATH) as db:
+    with sql_backend.connect(RUNTIME_SETTINGS_PATH) as db:
         db.execute(
             "CREATE TABLE IF NOT EXISTS runtime_settings "
             "(name TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -364,7 +364,7 @@ async def clear_graph(graph_name: str = Query(default=multigraph.DEFAULT_GRAPH_N
     vector_store.ensure_collection(client, collection=target.qdrant_collection)
 
     ledger = ConnectorLedger(target.ledger_path)
-    with sqlite3.connect(ledger.path) as db:
+    with sql_backend.connect(ledger.path) as db:
         db.execute("DELETE FROM source_records")
         db.execute("DELETE FROM source_chunks")
         db.execute("DELETE FROM record_edges")
