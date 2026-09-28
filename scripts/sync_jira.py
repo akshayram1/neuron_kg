@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sqlite3
 from typing import Awaitable, Callable, TypeVar
 
 from util import paths as _paths  # noqa: F401 — loads .env from repo root
@@ -22,6 +21,7 @@ from connectors.jira.oauth import JiraOAuthSettings
 from graph import jira_pipeline as jp
 from graph.falkor_client import get_graph
 from graph.schema import bootstrap_schema
+from storage import sql_backend
 
 LEDGER_PATH = "connector_ledger.sqlite3"
 OAUTH_STORE_PATH = "oauth_connectors.sqlite3"
@@ -50,13 +50,17 @@ async def _with_refresh(
 
 
 def list_connections() -> None:
+    rows = []
+    db = sql_backend.connect(OAUTH_STORE_PATH)
     try:
-        db = sqlite3.connect(OAUTH_STORE_PATH)
-        rows = db.execute(
-            "SELECT connection_id, account_name, created_at FROM oauth_connections WHERE provider='jira'"
-        ).fetchall()
-    except sqlite3.OperationalError:
+        if sql_backend.table_columns(db, "oauth_connections"):
+            rows = db.execute(
+                "SELECT connection_id, account_name, created_at FROM oauth_connections WHERE provider='jira'"
+            ).fetchall()
+    except sql_backend.OperationalError:
         rows = []
+    finally:
+        db.close()
     if not rows:
         print(f"No Jira connections in {OAUTH_STORE_PATH}. Authorize one first.")
         return

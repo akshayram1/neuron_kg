@@ -7,12 +7,11 @@ owns the two things every provider shares.
 from __future__ import annotations
 
 import os
-import sqlite3
 from pathlib import Path
 
 from falkordb import FalkorDB
 
-from graph.bridge.resolver import get_default_store
+from storage import sql_backend
 
 
 def delete_falkordb_group(group_id: str) -> bool:
@@ -31,6 +30,10 @@ def purge_groups(group_ids: list[str]) -> dict[str, object]:
     with group_ids that were never actually synced (e.g. a connection with
     no sources yet) -- each step is a no-op when there is nothing to delete.
     """
+    # Imported lazily: graph.bridge.resolver no longer exists in this tree, and
+    # a module-level import made purge_ledger_prefix unimportable too.
+    from graph.bridge.resolver import get_default_store
+
     deleted_graphs: list[str] = []
     links_removed = records_removed = 0
     store = get_default_store()
@@ -50,18 +53,33 @@ def purge_groups(group_ids: list[str]) -> dict[str, object]:
 def purge_ledger_prefix(ledger_path: str | Path, record_key_prefix: str) -> int:
     """For the shared connectors.core.ledger.ConnectorLedger (Jira/Bitbucket):
     delete every row whose record_key starts with the given prefix, e.g.
-    'jira:<connection_id>:'. Returns the number of source_records removed."""
+    'jira:<connection_id>:'. Returns the number of source_records removed.
+
+    Matching is ASCII case-insensitive on both backends (SQLite's LIKE
+    semantics), with ``%``/``_`` in the prefix escaped so the prefix is always
+    literal -- the delete never reaches beyond that one prefix."""
+    if not record_key_prefix:
+        raise ValueError("record_key_prefix must be non-empty")
     path = Path(ledger_path)
-    if not path.exists():
+    if sql_backend.backend() == "sqlite" and not path.exists():
         return 0
-    with sqlite3.connect(path) as db:
-        db.execute(
-            "DELETE FROM source_chunks WHERE record_key LIKE ? ESCAPE '\\'",
-            (record_key_prefix.replace("%", "\\%").replace("_", "\\_") + "%",),
-        )
-        removed = db.execute(
-            "DELETE FROM source_records WHERE record_key LIKE ? ESCAPE '\\'",
-            (record_key_prefix.replace("%", "\\%").replace("_", "\\_") + "%",),
-        ).rowcount
-        db.commit()
+    pattern = (
+        record_key_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    ).lower()
+    db = sql_backend.connect(path)
+    try:
+        if not sql_backend.table_columns(db, "source_records"):
+            return 0
+        with db:
+            if sql_backend.table_columns(db, "source_chunks"):
+                db.execute(
+                    "DELETE FROM source_chunks WHERE LOWER(record_key) LIKE ? ESCAPE '\\'",
+                    (pattern,),
+                )
+            removed = db.execute(
+                "DELETE FROM source_records WHERE LOWER(record_key) LIKE ? ESCAPE '\\'",
+                (pattern,),
+            ).rowcount
+    finally:
+        db.close()
     return removed
