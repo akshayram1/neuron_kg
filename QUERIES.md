@@ -138,6 +138,14 @@ hop validation. Neither is currently justified by valid measurements.
 **Question:** worth the 3-line fix to `graph/resolve_text_fact.py` now so `fact_update` can be calibration-measured too? Also: sample-size threshold was set to 200 (matching §10.4's literal "on >= 200 reviewed items" text) rather than a lower default — confirm that's the bar you want enforced.
 **Assumption made for now:** none — precision-only reporting for `fact_update`/`duplicate_pair`, real ECE only where a genuine probability exists.
 
+## New: Laya serving/latency benchmark, real measured numbers (25 Sep, run 3)
+
+`scripts/benchmark_laya.py` built and merged (§2.3). Real numbers, real checkpoint, no mocking (`LAYA_MODEL_DIR`, real `laya` package):
+- Cold start (incl. model load): **17.9s**. Warm p50/p90 at pool 10: **3.0s / 3.3s**. Pool 20: **6.2s / 6.4s** (matches the plan's own "~7.4s" estimate closely). **Pool 40 (the real production `POOL_SIZE`): p50 16.8s, p90 17.8s.** Peak memory 2.5GB.
+- Fallback path independently reproduced as real, not just read from code: pointed a real `LayaReranker` at a missing checkpoint, confirmed `graph/chat.py`'s `try/except` caught the `RuntimeError` and `RetrievalTrace.fallback=True` with the real error message attached.
+**Bottom line:** synchronous CPU Laya scoring at the real pool size costs ~17.8s p90 — this is the hard number behind why `NEURON_RERANK=off` is still the correct production default until batching/hardware/a smaller model changes it. Not a question, just the measured evidence §10.4/§2.3 asked for.
+**Note:** candidates were synthetic-but-realistic text (real `best_window` windowing, synthetic node text) rather than pulled from a live graph, for iteration speed — flagged in case a graph-sourced re-run is wanted for the final go/no-go record.
+
 ## Verification
 
 - Python: `503 passed, 169 skipped, 0 failed`.
