@@ -6,11 +6,16 @@ import hashlib
 import json
 import os
 import secrets
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from connectors.core.oauth_store import (
+    connect_sqlite_pragmas,
+    lock_schema_init,
+    rebuild_partial_index,
+)
+from storage.sql_backend import IntegrityError, is_postgres, table_columns
 from util.paths import DATA_DIR
 
 STATE_TTL_SECONDS = 600
@@ -36,15 +41,12 @@ class GitHubStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.path, timeout=30)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA foreign_keys=ON")
-        return db
+    def _connect(self):
+        return connect_sqlite_pragmas(self.path)
 
     def _initialize(self) -> None:
         with self._connect() as db:
+            lock_schema_init(db)
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS github_oauth_states (
@@ -106,7 +108,7 @@ class GitHubStore:
             )
             # Idempotent migration for pre-multi-graph databases (same idiom
             # as connectors/core/ledger.py / oauth_store.py).
-            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(github_sync_runs)")}
+            columns = table_columns(db, "github_sync_runs")
             if "graph_name" not in columns:
                 db.execute(
                     "ALTER TABLE github_sync_runs ADD COLUMN graph_name TEXT NOT NULL DEFAULT 'default'"
@@ -114,12 +116,19 @@ class GitHubStore:
             # Widen "one active sync per repo" to "...per repo per graph" --
             # otherwise syncing the same repo into a second graph while the
             # first is still running would be wrongly rejected as a conflict.
-            db.execute("DROP INDEX IF EXISTS github_one_active_sync_per_repo")
-            db.execute(
+            rebuild_partial_index(
+                db,
+                "github_one_active_sync_per_repo",
+                "graph_name",
                 """CREATE UNIQUE INDEX github_one_active_sync_per_repo
                    ON github_sync_runs(installation_id, repository_id, graph_name)
-                   WHERE status IN ('queued', 'running')"""
+                   WHERE status IN ('queued', 'running')""",
             )
+            if is_postgres(db):
+                # latest_source_episode tie-breaks on insertion order through
+                # SQLite's implicit rowid; give Postgres a real column of that
+                # name so the query text stays identical on both engines.
+                db.execute("ALTER TABLE github_episodes ADD COLUMN IF NOT EXISTS rowid BIGSERIAL")
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -150,13 +159,14 @@ class GitHubStore:
 
     def consume_oauth_state(self, state: str) -> str | None:
         key = self._hash(state)
+        # One atomic statement so a state is consumed exactly once on both
+        # engines (BEGIN IMMEDIATE is a no-op on Postgres).
         with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT session_hash, expires_at FROM github_oauth_states WHERE state_hash=?",
+                """DELETE FROM github_oauth_states WHERE state_hash=?
+                   RETURNING session_hash, expires_at""",
                 (key,),
             ).fetchone()
-            db.execute("DELETE FROM github_oauth_states WHERE state_hash=?", (key,))
         return str(row["session_hash"]) if row and row["expires_at"] >= self._now() else None
 
     def save_installation(self, installation: dict[str, Any]) -> int:
@@ -317,7 +327,11 @@ class GitHubStore:
     ) -> None:
         with self._connect() as db:
             db.execute(
-                "INSERT OR IGNORE INTO github_episodes VALUES (?, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO github_episodes(
+                       installation_id, repository_id, source_kind, source_id,
+                       episode_uid, graph_episode_uuid, ingested_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT DO NOTHING""",
                 (
                     installation_id, repository_id, source_kind, source_id,
                     episode_uid, graph_episode_uuid, self._now(),
@@ -345,7 +359,7 @@ class GitHubStore:
                        ) VALUES (?, ?, ?, 'queued', ?, ?)""",
                     (run_id, installation_id, repository_id, self._now(), graph_name),
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise RuntimeError("A sync is already queued or running for this repository") from exc
 
     def fail_orphaned_sync_runs(
