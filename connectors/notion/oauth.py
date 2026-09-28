@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import secrets
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +20,12 @@ from urllib.parse import urlencode
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
+from connectors.core.oauth_store import (
+    connect_sqlite_pragmas,
+    lock_schema_init,
+    rebuild_partial_index,
+)
+from storage.sql_backend import IntegrityError, table_columns
 from util.paths import DATA_DIR
 
 
@@ -132,7 +137,7 @@ def graph_group_for_workspace(workspace_id: str) -> str:
 
 
 class NotionStore:
-    """Small SQLite store safe to reuse from CLI and FastAPI processes."""
+    """Small SQLite/Postgres store safe to reuse from CLI and FastAPI processes."""
 
     def __init__(self, path: Path, encryption_key: str):
         self.path = path
@@ -140,15 +145,12 @@ class NotionStore:
         self._fernet = Fernet(encryption_key.encode())
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+    def _connect(self):
+        return connect_sqlite_pragmas(self.path)
 
     def _initialize(self) -> None:
         with self._connect() as db:
+            lock_schema_init(db)
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS oauth_states (
@@ -206,17 +208,13 @@ class NotionStore:
             )
             # Migration for connector databases created before browser sessions
             # were introduced.
-            columns = {
-                row["name"] for row in db.execute("PRAGMA table_info(oauth_states)").fetchall()
-            }
+            columns = table_columns(db, "oauth_states")
             if "session_hash" not in columns:
                 db.execute(
                     "ALTER TABLE oauth_states ADD COLUMN session_hash TEXT NOT NULL DEFAULT ''"
                 )
             # Multi-graph migration (same idiom as connectors/core/ledger.py).
-            sync_run_columns = {
-                row["name"] for row in db.execute("PRAGMA table_info(notion_sync_runs)").fetchall()
-            }
+            sync_run_columns = table_columns(db, "notion_sync_runs")
             if "graph_name" not in sync_run_columns:
                 db.execute(
                     "ALTER TABLE notion_sync_runs ADD COLUMN graph_name TEXT NOT NULL DEFAULT 'default'"
@@ -225,11 +223,13 @@ class NotionStore:
             # graph" -- otherwise syncing the same workspace into a second
             # graph while the first is still running would be wrongly
             # rejected as a conflict.
-            db.execute("DROP INDEX IF EXISTS notion_one_active_sync_per_workspace")
-            db.execute(
+            rebuild_partial_index(
+                db,
+                "notion_one_active_sync_per_workspace",
+                "graph_name",
                 """CREATE UNIQUE INDEX notion_one_active_sync_per_workspace
                    ON notion_sync_runs(workspace_id, graph_name)
-                   WHERE status IN ('queued', 'running')"""
+                   WHERE status IN ('queued', 'running')""",
             )
         try:
             self.path.chmod(0o600)
@@ -268,13 +268,14 @@ class NotionStore:
     def consume_oauth_state(self, state: str) -> str | None:
         state_hash = self._state_hash(state)
         now = self._now()
+        # One atomic statement so a state is consumed exactly once on both
+        # engines (BEGIN IMMEDIATE is a no-op on Postgres).
         with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT session_hash, expires_at FROM oauth_states WHERE state_hash = ?",
+                """DELETE FROM oauth_states WHERE state_hash = ?
+                   RETURNING session_hash, expires_at""",
                 (state_hash,),
             ).fetchone()
-            db.execute("DELETE FROM oauth_states WHERE state_hash = ?", (state_hash,))
         return row["session_hash"] if row and row["expires_at"] >= now else None
 
     def _encrypt(self, payload: dict[str, Any]) -> bytes:
@@ -430,10 +431,11 @@ class NotionStore:
     ) -> None:
         with self._connect() as db:
             db.execute(
-                """INSERT OR IGNORE INTO notion_episodes(
+                """INSERT INTO notion_episodes(
                        workspace_id, group_id, episode_uid, page_id,
                        graph_episode_uuid, ingested_at
-                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT DO NOTHING""",
                 (
                     workspace_id,
                     group_id,
@@ -497,7 +499,7 @@ class NotionStore:
                        VALUES (?, ?, 'queued', ?, ?)""",
                     (run_id, workspace_id, self._now(), graph_name),
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise RuntimeError("A sync is already queued or running for this workspace") from exc
 
     def fail_orphaned_sync_runs(

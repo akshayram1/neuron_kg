@@ -1,20 +1,66 @@
-"""Encrypted browser-session state shared by OAuth connector implementations."""
+"""Encrypted browser-session state shared by OAuth connector implementations.
+
+Runs on SQLite (default) or Postgres through ``storage.sql_backend``.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import secrets
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from storage.sql_backend import IntegrityError, connect, is_postgres, table_columns
+
 
 class OAuthStoreError(RuntimeError):
     pass
+
+
+def connect_sqlite_pragmas(path: str | Path) -> Any:
+    """Open a store connection; WAL + enforced foreign keys on SQLite.
+
+    Postgres always enforces foreign keys and has no journal mode, so the
+    PRAGMAs are skipped there.
+    """
+    db = connect(path, timeout=30)
+    if not is_postgres(db):
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA foreign_keys=ON")
+    return db
+
+
+def lock_schema_init(db: Any) -> None:
+    """Serialize concurrent store initialisation on Postgres.
+
+    Stores are constructed per request, and Postgres DDL (CREATE TABLE IF NOT
+    EXISTS, DROP/CREATE INDEX) races between concurrent transactions. SQLite
+    already serializes writers on the file lock.
+    """
+    if is_postgres(db):
+        db.execute("SELECT pg_advisory_xact_lock(hashtext(current_schema()))")
+
+
+def rebuild_partial_index(db: Any, name: str, required_column: str, create_sql: str) -> None:
+    """(Re)create an index unless it already covers ``required_column``.
+
+    SQLite keeps the original always-drop-and-recreate behaviour. On Postgres
+    the rebuild takes an ACCESS EXCLUSIVE table lock, so it only runs when the
+    index is missing or predates ``required_column``.
+    """
+    if is_postgres(db):
+        row = db.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ?",
+            (name,),
+        ).fetchone()
+        if row and required_column in str(row["indexdef"]):
+            return
+    db.execute(f"DROP INDEX IF EXISTS {name}")
+    db.execute(create_sql)
 
 
 class OAuthConnectorStore:
@@ -28,15 +74,12 @@ class OAuthConnectorStore:
             raise OAuthStoreError(f"Invalid {provider} token encryption key") from exc
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.path, timeout=30)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA foreign_keys=ON")
-        return db
+    def _connect(self):
+        return connect_sqlite_pragmas(self.path)
 
     def _initialize(self) -> None:
         with self._connect() as db:
+            lock_schema_init(db)
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS oauth_states (
@@ -93,7 +136,7 @@ class OAuthConnectorStore:
             # user before the multi-graph feature) needs this column added
             # explicitly, same idempotent-migration idiom as
             # connectors/core/ledger.py.
-            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(oauth_sync_runs)")}
+            columns = table_columns(db, "oauth_sync_runs")
             if "graph_name" not in columns:
                 db.execute(
                     "ALTER TABLE oauth_sync_runs ADD COLUMN graph_name TEXT NOT NULL DEFAULT 'default'"
@@ -103,11 +146,13 @@ class OAuthConnectorStore:
             # etc. source into a *second* graph just because a sync is
             # already running for it in the first -- widen it to include
             # graph_name so only same-source-same-graph is exclusive.
-            db.execute("DROP INDEX IF EXISTS oauth_one_active_sync_per_source")
-            db.execute(
+            rebuild_partial_index(
+                db,
+                "oauth_one_active_sync_per_source",
+                "graph_name",
                 """CREATE UNIQUE INDEX oauth_one_active_sync_per_source
                    ON oauth_sync_runs(provider, connection_id, source_id, graph_name)
-                   WHERE status IN ('queued', 'running')"""
+                   WHERE status IN ('queued', 'running')""",
             )
         try:
             self.path.chmod(0o600)
@@ -142,16 +187,14 @@ class OAuthConnectorStore:
 
     def consume_state(self, state: str) -> str | None:
         state_hash = self._hash(state)
+        # One atomic statement: two concurrent callbacks with the same state
+        # cannot both read it (BEGIN IMMEDIATE is a no-op on Postgres).
         with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT session_hash, expires_at FROM oauth_states WHERE provider=? AND state_hash=?",
+                """DELETE FROM oauth_states WHERE provider=? AND state_hash=?
+                   RETURNING session_hash, expires_at""",
                 (self.provider, state_hash),
             ).fetchone()
-            db.execute(
-                "DELETE FROM oauth_states WHERE provider=? AND state_hash=?",
-                (self.provider, state_hash),
-            )
         return str(row["session_hash"]) if row and row["expires_at"] >= self._now() else None
 
     def _encrypt(self, token: dict[str, Any]) -> bytes:
@@ -343,7 +386,7 @@ class OAuthConnectorStore:
                        ) VALUES (?, ?, ?, ?, 'queued', ?, ?)""",
                     (self.provider, run_id, connection_id, source_id, self._now(), graph_name),
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise RuntimeError(f"A {self.provider} sync is already active for this source") from exc
 
     def set_run(
