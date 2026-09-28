@@ -152,6 +152,13 @@ hop validation. Neither is currently justified by valid measurements.
 **One small follow-up, out of this task's file scope:** `demo_ui/backend/sync_coverage_routes.py`'s `_as_dict()` (the `/api/sync-coverage` read endpoint) doesn't include the two new fields yet — they're fully recorded in the ledger, just not exposed through that one endpoint. One-line addition whenever someone's next in that file.
 **`skipped_by_rule_count`'s definition kept unchanged** (still `files_too_large + files_without_text` only) — the two new counters are separate fields, so nothing existing shifts meaning.
 
+## New: §9.5 scoped-identity migration script (25 Sep, run 3)
+
+`scripts/migrate_scoped_identity.py` built and merged — dry-run by default (`--apply` to mutate, zero writes otherwise, verified). Ambiguous mappings and every cross-record Decision merge go to the review queue, never auto-applied. Reuses the already-tested edge-redirection primitives from `graph/duplicate_collector.py` rather than reimplementing them.
+**Wording resolved against real code, not guessed:** the plan's §9.5 text says `assertion_status = "active"` and `valid_at_basis = "api"` for deterministic edges — neither value exists anywhere in the real codebase (verified: `upsert_fact_edges` only ever writes `assertion_status="live"`, and `valid_at_basis` only ever takes `"stated"`/`"record_time"`). The script backfills the real values (`"live"`, `"record_time"`), not the plan's stale wording — 25-plan.md's §9.5 text is out of date on this point and worth a quick correction.
+**One real, worth-a-decision finding:** a diagnostic in the dry-run report (`stamped_but_unscoped`) flags System/Term nodes that already have a `namespace_uid` property but whose uid doesn't actually match what that namespace would compute today (possible via old vector-rung reuse before the migration). These are surfaced, never auto-migrated. Worth deciding whether a follow-up should also catch these, or whether they're rare enough to leave for manual review.
+**Minor:** `record_merge_trace` (built for Phase 6.4's pairwise duplicate merges) is reused as-is for migration audit trail (`reason="scoped_identity_migration"`) — fits without distortion, but flagged in case a dedicated migration-trace concept is wanted later.
+
 ## Verification
 
 - Python: `503 passed, 169 skipped, 0 failed`.
