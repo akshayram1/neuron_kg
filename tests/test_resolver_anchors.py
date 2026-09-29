@@ -1,5 +1,5 @@
 from connectors.core.models import SourceRecord
-from graph.resolver import anchor_properties
+from graph.resolution.resolver import anchor_properties
 
 
 def test_exact_anchors_are_normalized_and_persistable():
@@ -21,7 +21,7 @@ def test_exact_anchors_are_normalized_and_persistable():
 
 
 def test_pull_request_refs_from_github_and_bare_number():
-    from graph.bridge.anchors import pull_request_refs
+    from graph.resolution.anchors import pull_request_refs
     refs = pull_request_refs("github.com/Acme/Login/pull/9 and PR #9")
     assert "acme/login#9" in {ref.lower() for ref in refs}
     assert "#9" in refs

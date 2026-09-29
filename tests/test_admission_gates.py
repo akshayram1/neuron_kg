@@ -17,13 +17,14 @@ exactly as before this refactor.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from connectors.core.ledger import ConnectorLedger, DropReason, PendingChunk, SemanticStatus
-from graph.axioms import DEFAULT_AXIOMS
-from graph.profiles import ExtractedFact, WorkManagementExtraction
-from graph.semantic_pass import (
+from graph.semantics.axioms import DEFAULT_AXIOMS
+from graph.ingestion.profiles import ExtractedFact, WorkManagementExtraction
+from graph.ingestion.semantic_pass import (
     ADMISSION_GATES,
     _gate_conflict_classification,
     _gate_laya_triage,
@@ -32,6 +33,7 @@ from graph.semantic_pass import (
     _write_extraction,
     run_semantic_pass,
 )
+import graph.ingestion.semantic_pass as semantic_pass_module
 from graph.token_usage import TokenUsage
 
 
@@ -191,6 +193,54 @@ def test_fact_passing_every_gate_is_still_written(tmp_path):
     assert len(edges) == 1
     assert edges[0].rel_type == "PROVIDES_API"
     assert edges[0].from_uid == "proj-1"
+
+
+def test_cross_source_classifier_failure_drops_without_review(tmp_path, monkeypatch):
+    """An LLM-selected candidate is an automatic path: uncertainty drops
+    the link and must never create a pending review projection."""
+    ledger = ConnectorLedger(tmp_path / "l.sqlite3")
+    chunk = PendingChunk(
+        "jira:c:project:proj-1", "chunk-1", 0,
+        "Order Service provides the Checkout API.",
+    )
+    fact = ExtractedFact(
+        subject_name="Order Service", subject_kind="Project", relation="PROVIDES_API",
+        object_name="Checkout API", object_kind="Api", object_candidate_uid="api-1",
+        evidence="Order Service provides the Checkout API",
+    )
+
+    class CandidateGraph(_FakeGraph):
+        def query(self, cypher, params=None):
+            if "RETURN labels(n), n.name" in cypher:
+                return _FakeResult([[ ["Api"], "Checkout API", None, None, None, None, None, None ]])
+            return super().query(cypher, params)
+
+    old = SimpleNamespace(
+        evidence="old evidence", from_uid="project-old", to_uid="api-1",
+        rel_type="PROVIDES_API", valid_at=None,
+    )
+    monkeypatch.setattr(
+        semantic_pass_module, "find_conflict_candidates", lambda *args, **kwargs: [old],
+    )
+    monkeypatch.setattr(
+        semantic_pass_module, "classify_fact_update",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no classifier")),
+    )
+    monkeypatch.setattr(
+        semantic_pass_module, "resolve_text_fact",
+        lambda *args, **kwargs: pytest.fail("uncertain candidate reached resolver/review"),
+    )
+
+    entities, written, rejected = _write_extraction(
+        CandidateGraph(), ledger, chunk, _extraction(fact), "proj-1", "Project",
+        client=None, embedding_model="test-embed", extraction_model="test-model",
+        profile_name="work_management", token_usage=TokenUsage(), axioms=DEFAULT_AXIOMS,
+        allowed_candidate_uids=frozenset({"api-1"}),
+    )
+
+    assert (entities, written, rejected) == (0, 0, 1)
+    assert ledger.drop_counts() == {"classifier_failed": 1}
+    assert ledger.list_reviews() == []
 
 
 # --------------------------------------------------- gate 1: selective admission

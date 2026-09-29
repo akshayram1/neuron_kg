@@ -21,10 +21,10 @@ from uuid import uuid4
 import pytest
 
 from connectors.core.ledger import ConnectorLedger, ReviewState
-from graph import writer as w
-from graph.fact_predicates import LIVE_FACT_CYPHER
-from graph.falkor_client import build_client
-from graph.resolve_text_fact import (
+from graph.storage import writer as w
+from graph.semantics.fact_predicates import LIVE_FACT_CYPHER
+from graph.storage.falkor_client import build_client
+from graph.resolution.resolve_text_fact import (
     NewFact,
     OldFact,
     UnsupportedDisputeError,
@@ -626,7 +626,7 @@ def test_apply_approved_fact_update_wrong_state_raises(ledger):
 
 def test_apply_approved_possibly_same_as_merges_and_adds_scoped_alias(monkeypatch):
     from types import SimpleNamespace
-    import graph.duplicate_collector as duplicates
+    import graph.resolution.duplicate_collector as duplicates
 
     calls = []
     monkeypatch.setattr(duplicates, "_choose_survivor", lambda _g, a, b: (b, a))

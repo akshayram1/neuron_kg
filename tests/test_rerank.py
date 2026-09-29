@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from graph.rerank import (
+from graph.retrieval.rerank import (
     LayaReranker,
     RerankCandidate,
     RetrievalRole,
@@ -16,7 +16,7 @@ from graph.rerank import (
     candidates_from_hits,
     select_final,
 )
-from graph.search import SearchHit
+from graph.retrieval.search import SearchHit
 
 
 def _candidates(n: int) -> list[RerankCandidate]:

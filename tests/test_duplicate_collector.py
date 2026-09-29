@@ -21,11 +21,11 @@ import pytest
 from qdrant_client import QdrantClient
 
 from connectors.core.ledger import ConnectorLedger
-from graph import duplicate_collector as dc
-from graph import vector_store
-from graph import writer as w
-from graph.falkor_client import build_client
-from graph.semantic_pass import polarity_conflict as sp_polarity_conflict
+from graph.resolution import duplicate_collector as dc
+from graph.storage import vector_store
+from graph.storage import writer as w
+from graph.storage.falkor_client import build_client
+from graph.ingestion.semantic_pass import polarity_conflict as sp_polarity_conflict
 from storage.postgres import PostgresConfigurationError, PostgresStore, PostgresVectorClient, database_url
 
 pytestmark = pytest.mark.skipif(

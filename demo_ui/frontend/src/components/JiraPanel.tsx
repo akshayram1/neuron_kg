@@ -57,6 +57,7 @@ export default function JiraPanel({ open, graphName, onClose, onSourcesChanged, 
         try {
           const run = await getJiraSyncRun(knownRun.run_id);
           if (!mounted.current || !openRef.current) return;
+          setError(null);
           setRuns((current) => ({ ...current, [run.connection_id]: run }));
           if (run.status === "completed") {
             await loadStatus();

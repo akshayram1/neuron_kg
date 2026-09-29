@@ -11,7 +11,7 @@ import uuid
 import pytest
 
 from connectors.core.ledger import ChunkWrite, ConnectorLedger
-from graph.multigraph import GraphRegistry
+from graph.storage.multigraph import GraphRegistry
 from scripts import migrate_sqlite_to_postgres as migrate
 from storage import sql_backend
 

@@ -50,8 +50,8 @@ from falkordb import Graph
 from openai import OpenAI
 from pydantic import BaseModel
 
-from graph import multigraph
-from graph.falkor_client import get_graph
+from graph.storage import multigraph
+from graph.storage.falkor_client import get_graph
 from util import paths as _paths  # noqa: F401 -- load repo .env
 from util.paths import DATA_DIR
 

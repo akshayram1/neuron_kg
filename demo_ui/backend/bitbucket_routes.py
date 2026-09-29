@@ -2,8 +2,8 @@
 
 Combines Jira's OAuth control plane (`OAuthConnectorStore` — classic per-user
 grant, not a GitHub-App installation) with GitHub's two-phase sync execution
-(fetch files + commits + PRs, write deterministically). LLM extraction is
-Notion-only.
+(fetch files + commits + PRs, write deterministically), followed by bounded
+cross-source retrieval + LLM semantic adjudication.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
@@ -31,13 +32,15 @@ from connectors.bitbucket.oauth import (
 from connectors.core.actions import RecordAction
 from connectors.core.ledger import ConnectorLedger
 from connectors.core.oauth_store import OAuthConnectorStore, OAuthStoreError
-from graph import bitbucket_pipeline as bp
-from graph import multigraph
-from graph.embed_batch import close_batch, open_batch
-from graph import vector_store as vector_store_module
-from graph.falkor_client import get_graph
-from graph.schema import bootstrap_schema
-from graph.token_usage import TokenUsage
+from graph.ingestion import bitbucket_pipeline as bp
+from graph.ingestion import finding_bridge
+from graph.ingestion.cross_source_context import build_cross_source_context_provider
+from graph.ingestion.semantic_pass import run_semantic_pass
+from graph.storage import multigraph
+from graph.storage.embeddings import close_batch, open_batch
+from graph.storage import vector_store as vector_store_module
+from graph.storage.falkor_client import get_graph
+from graph.storage.schema import bootstrap_schema
 from util.paths import DATA_DIR
 from demo_ui.backend.job_worker import JOB_STORE
 
@@ -266,38 +269,53 @@ async def _run_sync(
         store.set_run(run_id, "running", {
             **base, "phase": "fetching", "current": f"Discovering {repository.full_name}…",
         })
-        connection = store.get_connection(payload.connection_id)
-        async with BitbucketApiClient(connection["token"]["access_token"]) as client:
+
+        async def fetch_repository_data(client: BitbucketApiClient):
             async def _commits_with_diffstats() -> tuple[list, bool]:
                 if not payload.include_commit_messages:
                     return [], False
                 found, commits_capped = await client.commits(repository, settings.max_commits_per_sync)
                 store.set_run(run_id, "running", {
                     **base, "phase": "fetching",
-                    "current": f"Fetching file lists for {len(found)} commits (in parallel with the tree)…",
+                    "current": f"Fetching file lists for {len(found)} commits…",
                     "commits_fetched": len(found),
                 })
                 attached = await client.attach_diffstats(repository, found)
                 return attached, commits_capped
 
-            (files, too_large, without_text, extension_filtered), (commits, commits_capped), pull_requests = (
-                await asyncio.gather(
-                    client.files(repository, set(payload.file_types), settings.max_file_bytes),
-                    _commits_with_diffstats(),
-                    client.pull_requests(repository) if payload.include_pull_requests
-                    else asyncio.sleep(0, result=[]),
-                )
+            files, too_large, without_text, extension_filtered = await client.files(
+                repository, set(payload.file_types), settings.max_file_bytes,
             )
-            total = len(files) + len(commits) + len(pull_requests)
-            files_changed = sum(len(commit.files) for commit in commits)
-            base.update({"records_total": total, "files_matched": len(files),
-                         "files_too_large": too_large, "files_without_text": without_text,
-                         "files_extension_filtered": extension_filtered,
-                         "commits_fetched": len(commits), "pull_requests_fetched": len(pull_requests),
-                         "commit_files_changed": files_changed, "commits_capped": commits_capped})
-            store.set_run(run_id, "running", {
-                **base, "phase": "ingesting", "current": f"Writing {total} Bitbucket records…",
-            })
+            commits, commits_capped = await _commits_with_diffstats()
+            pull_requests = (
+                await client.pull_requests(repository)
+                if payload.include_pull_requests else []
+            )
+            return (
+                files, too_large, without_text, extension_filtered,
+                commits, commits_capped, pull_requests,
+            )
+
+        (
+            files, too_large, without_text, extension_filtered,
+            commits, commits_capped, pull_requests,
+        ) = await _with_refresh(
+            store, settings, payload.connection_id, fetch_repository_data,
+        )
+        # `_with_refresh` repeats the whole read-only fetch once with a newly
+        # persisted access token if Bitbucket returns 401 at any point in the
+        # tree walk. No graph writes happen before this boundary, so replay is
+        # safe and cannot duplicate connector records.
+        total = len(files) + len(commits) + len(pull_requests)
+        files_changed = sum(len(commit.files) for commit in commits)
+        base.update({"records_total": total, "files_matched": len(files),
+                     "files_too_large": too_large, "files_without_text": without_text,
+                     "files_extension_filtered": extension_filtered,
+                     "commits_fetched": len(commits), "pull_requests_fetched": len(pull_requests),
+                     "commit_files_changed": files_changed, "commits_capped": commits_capped})
+        store.set_run(run_id, "running", {
+            **base, "phase": "ingesting", "current": f"Writing {total} Bitbucket records…",
+        })
 
         target = multigraph.resolve(
             payload.graph_name, data_dir=DATA_DIR,
@@ -309,7 +327,7 @@ async def _run_sync(
         vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
         ledger = ConnectorLedger(target.ledger_path)
                 # One local model forward per batch instead of per record -- see
-        # graph/embed_batch.py. Must be closed on every exit path below.
+        # graph/storage/embeddings.py. Must be closed on every exit path below.
         open_batch(OpenAI(timeout=30.0, max_retries=2),
                    os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
                    target.qdrant_collection)
@@ -374,6 +392,34 @@ async def _run_sync(
             present_file_keys, present_commit_keys, present_pr_keys,
         )
 
+        # Candidate retrieval must see the vectors just queued by Pass A.
+        close_batch()
+
+        def semantic_progress(done_chunks: int, total_chunks: int, record_key: str, current) -> None:
+            store.set_run(run_id, "running", {
+                **base, "phase": "semantic",
+                "current": f"Understanding {record_key.rsplit(':', 1)[-1]}…",
+                "records_done": total, "records_kept": kept, "records_written": written,
+                "chunks_ingested": done_chunks, "chunks_total": total_chunks,
+                "entities_written": current.entities_written,
+                "facts_written": current.facts_written,
+                **current.token_usage.as_dict("ingestion"),
+            })
+
+        context_provider = build_cross_source_context_provider(
+            graph, collection=target.qdrant_collection,
+        )
+        semantic = await run_in_threadpool(
+            run_semantic_pass, graph, ledger,
+            record_prefix=f"bitbucket:{payload.connection_id}:",
+            on_progress=semantic_progress,
+            collection=target.qdrant_collection,
+            context_provider=context_provider,
+        )
+        findings_synced = finding_bridge.sync_ledger_findings(
+            graph, ledger, record_prefix=f"bitbucket:{payload.connection_id}:",
+            collection=target.qdrant_collection,
+        )
         orphans_removed = bp.delete_orphaned_shared_entities(graph)
 
         # Sync coverage (plan.md Phase 0.4, extended by Phase 0.6).
@@ -408,13 +454,16 @@ async def _run_sync(
             "records_done": total, "records_total": total, "records_kept": kept,
             "records_written": written, "files_processed": len(files),
             "records_removed": removed,
-            "chunks_ingested": 0,
-            "entities_written": 0, "facts_written": 0,
+            "chunks_ingested": semantic.chunks_processed,
+            "entities_written": semantic.entities_written,
+            "facts_written": semantic.facts_written,
+            "facts_rejected": semantic.facts_rejected,
             "orphans_removed": orphans_removed,
+            "findings_synced": findings_synced,
             "provider_reported_total": None, "fetched_count": total,
             "ledger_count": sync_ledger_count, "skipped_by_rule_count": sync_skipped_by_rule,
             "files_extension_filtered": extension_filtered, "commits_capped": commits_capped,
-            **TokenUsage().as_dict("ingestion"),
+            **semantic.token_usage.as_dict("ingestion"),
         }
         store.save_source(
             payload.connection_id, source_id,
@@ -458,7 +507,7 @@ async def start_sync(payload: BitbucketSyncRequest, request: Request) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     JOB_STORE.enqueue(run_id, "bitbucket", {
         "request": payload.model_dump(), "repository": repository.__dict__,
-    })
+    }, max_attempts=10)
     return {"run_id": run_id, "status": "queued"}
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from connectors.core.ledger import ConnectorLedger
-from graph.path_support import pair_support, path_support, propose_verified_links
+from graph.resolution.link_candidates import pair_support, path_support, propose_verified_links
 
 
 class Result:

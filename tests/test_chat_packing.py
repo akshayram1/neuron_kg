@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import tiktoken
 
-from graph import chat
-from graph.search import SearchHit
+from graph.retrieval import chat
+from graph.retrieval.search import SearchHit
 
 _ENC = tiktoken.get_encoding("cl100k_base")
 

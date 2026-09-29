@@ -31,9 +31,10 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
 from connectors.core.ledger import ConnectorLedger
-from graph import derived, vector_store
-from graph.falkor_client import build_client
-from graph.link_candidates import (
+from graph.semantics import derived
+from graph.storage import vector_store
+from graph.storage.falkor_client import build_client
+from graph.resolution.link_candidates import (
     LayaRelationClassifier,
     _propose,
     apply_approved_link_candidate,

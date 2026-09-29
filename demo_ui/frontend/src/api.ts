@@ -23,8 +23,8 @@ import type {
   OntologyPending,
   OntologyUnadoptResult,
   SourceRecord,
-  SyntheticIngestResult,
-  SyntheticStatus,
+  LocalDataIngestResult,
+  LocalDataStatus,
   RerankerStatus,
   ReviewItem,
   LinkCandidateItem,
@@ -292,25 +292,25 @@ export function setAutoExtend(graphName: string, enabled: boolean): Promise<{ au
   });
 }
 
-export function getSyntheticStatus(graphName: string): Promise<SyntheticStatus> {
-  return request(`/api/synthetic/status?${new URLSearchParams({ graph_name: graphName })}`);
+export function getLocalDataStatus(graphName: string): Promise<LocalDataStatus> {
+  return request(`/api/local-data/status?${new URLSearchParams({ graph_name: graphName })}`);
 }
 
-function ingestSynthetic(provider: "jira" | "bitbucket" | "notion", graphName: string): Promise<SyntheticIngestResult> {
-  return request(`/api/synthetic/${provider}/ingest`, {
+function ingestLocalData(provider: "jira" | "bitbucket" | "notion", graphName: string): Promise<LocalDataIngestResult> {
+  return request(`/api/local-data/${provider}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ graph_name: graphName }),
   });
 }
 
-export const ingestSyntheticJira = (graphName: string) => ingestSynthetic("jira", graphName);
-export const ingestSyntheticBitbucket = (graphName: string) => ingestSynthetic("bitbucket", graphName);
-export const ingestSyntheticNotion = (graphName: string) => ingestSynthetic("notion", graphName);
+export const ingestLocalJira = (graphName: string) => ingestLocalData("jira", graphName);
+export const ingestLocalBitbucket = (graphName: string) => ingestLocalData("bitbucket", graphName);
+export const ingestLocalNotion = (graphName: string) => ingestLocalData("notion", graphName);
 
-export function resetSynthetic(
+export function resetLocalData(
   provider: "jira" | "bitbucket" | "notion", graphName: string,
 ): Promise<{ deleted: boolean; records_removed: number; orphans_removed: number }> {
   const query = new URLSearchParams({ graph_name: graphName });
-  return request(`/api/synthetic/${provider}?${query}`, { method: "DELETE" });
+  return request(`/api/local-data/${provider}?${query}`, { method: "DELETE" });
 }

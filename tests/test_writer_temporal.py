@@ -14,10 +14,10 @@ from uuid import uuid4
 
 import pytest
 
-from graph import writer as w
-from graph.falkor_client import build_client
-from graph.fact_predicates import LIVE_FACT_CYPHER, is_live_fact
-from graph.time_axis import held_at, holds_at, parse_iso
+from graph.storage import writer as w
+from graph.storage.falkor_client import build_client
+from graph.semantics.fact_predicates import LIVE_FACT_CYPHER, is_live_fact
+from graph.semantics.time_axis import held_at, holds_at, parse_iso
 
 pytestmark = pytest.mark.skipif(
     os.getenv("NEURON_INTEGRATION") != "1",

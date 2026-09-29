@@ -1,4 +1,4 @@
-import { AlertTriangle, BookOpenText, BrainCircuit, Database, Download, FileText, FlaskConical, GitBranch, Github, GitFork, GitMerge, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
+import { AlertTriangle, BookOpenText, BrainCircuit, Database, Download, FileText, GitBranch, Github, GitFork, GitMerge, ListTodo, LoaderCircle, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { clearGraph, createGraph, getConfig, getGraph, getGraphs, getSkosExportUrl, sendChat, setReranker, verifyChatAnswer } from "./api";
 import ChatPanel from "./components/ChatPanel";
@@ -9,7 +9,7 @@ import BitbucketPanel from "./components/BitbucketPanel";
 import GitHubPanel from "./components/GitHubPanel";
 import JiraPanel from "./components/JiraPanel";
 import NotionPanel from "./components/NotionPanel";
-import SyntheticIngestPanel from "./components/SyntheticIngestPanel";
+import LocalDataIngestPanel from "./components/LocalDataIngestPanel";
 import BridgePanel from "./components/BridgePanel";
 import type { AppConfig, ConversationMessage, GitHubSource, GraphInfo, GraphPayload, GraphSelection, Highlight, IngestionTokenUsage, NotionConnection, OAuthConnectorSource, TokenUsage } from "./types";
 
@@ -118,7 +118,7 @@ export default function App() {
   const [githubOpen, setGitHubOpen] = useState(false);
   const [bitbucketOpen, setBitbucketOpen] = useState(false);
   const [notionOpen, setNotionOpen] = useState(false);
-  const [syntheticOpen, setSyntheticOpen] = useState(false);
+  const [localDataOpen, setLocalDataOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [jiraSources, setJiraSources] = useState<OAuthConnectorSource[]>([]);
   const [githubSources, setGitHubSources] = useState<GitHubSource[]>([]);
@@ -341,8 +341,8 @@ export default function App() {
           <button className="notion-trigger" onClick={() => setBridgeOpen(true)}>
             <GitMerge size={14} /> Review
           </button>
-          <button className="notion-trigger" onClick={() => setSyntheticOpen(true)}>
-            <FlaskConical size={14} /> Synthetic data
+          <button className="notion-trigger" onClick={() => setLocalDataOpen(true)}>
+            <Database size={14} /> Local data
           </button>
           <button className={`notion-trigger ${jiraSources.length > 0 ? "connected" : ""}`} onClick={() => setJiraOpen(true)}>
             <ListTodo size={14} /> Jira
@@ -526,10 +526,10 @@ export default function App() {
         onSyncComplete={() => void loadGraph()}
         onTokenUsage={reportIngestionUsage}
       />
-      <SyntheticIngestPanel
-        open={syntheticOpen}
+      <LocalDataIngestPanel
+        open={localDataOpen}
         graphName={graphName}
-        onClose={() => setSyntheticOpen(false)}
+        onClose={() => setLocalDataOpen(false)}
         onSyncComplete={() => void loadGraph()}
         onTokenUsage={reportIngestionUsage}
       />

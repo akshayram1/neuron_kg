@@ -3,8 +3,8 @@ sites/projects listing are ported as-is from
 `graphiti_context_explorer/demo_ui/backend/jira_routes.py` — none of that
 touched Graphiti. What's rewritten:
 
-  - sync orchestration (`_run`): calls `graph.jira_pipeline` (Pass A only).
-    LLM extraction is Notion-only.
+  - sync orchestration (`_run`): writes deterministic Jira structure, then
+    runs bounded cross-source retrieval + LLM semantic adjudication.
   - `delete_connection`: purges by (provider, connection_id) directly against
     the unified graph instead of deleting a per-source FalkorDB group —
     plan.md §7 dropped `graph/bridge/resolver.py` and its group-based purge
@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -29,13 +30,15 @@ from connectors.core.ledger import ConnectorLedger
 from connectors.core.oauth_store import OAuthConnectorStore, OAuthStoreError
 from connectors.jira.api import JiraApiClient, JiraApiError, JiraSite, JiraUnauthorized
 from connectors.jira.oauth import JiraConfigurationError, JiraOAuthError, JiraOAuthSettings
-from graph import jira_pipeline as jp
-from graph import multigraph
-from graph.embed_batch import close_batch, open_batch
-from graph.falkor_client import get_graph
-from graph.schema import bootstrap_schema
-from graph import vector_store as vector_store_module
-from graph.token_usage import TokenUsage
+from graph.ingestion import finding_bridge
+from graph.ingestion import jira_pipeline as jp
+from graph.ingestion.cross_source_context import build_cross_source_context_provider
+from graph.ingestion.semantic_pass import run_semantic_pass
+from graph.storage import multigraph
+from graph.storage.embeddings import close_batch, open_batch
+from graph.storage.falkor_client import get_graph
+from graph.storage.schema import bootstrap_schema
+from graph.storage import vector_store as vector_store_module
 from util.paths import DATA_DIR
 from demo_ui.backend.job_worker import JOB_STORE
 
@@ -225,7 +228,7 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
             )
 
                 # One local model forward per batch instead of per record -- see
-        # graph/embed_batch.py. Must be closed on every exit path below.
+        # graph/storage/embeddings.py. Must be closed on every exit path below.
         open_batch(OpenAI(timeout=30.0, max_retries=2),
                    os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
                    target.qdrant_collection)
@@ -248,6 +251,36 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
                 "issues_fetched": total, "entities_written": 0, "facts_written": 0,
             })
 
+        # Candidate retrieval must see the vectors just queued by Pass A.
+        close_batch()
+
+        def semantic_progress(done_chunks: int, total_chunks: int, record_key: str, current) -> None:
+            store.set_run(run_id, "running", {
+                "phase": "semantic", "project_key": payload.project_key,
+                "current": f"Understanding {record_key.rsplit(':', 1)[-1]}…",
+                "records_done": total, "records_total": total,
+                "records_kept": kept, "records_written": written,
+                "issues_fetched": total, "chunks_ingested": done_chunks,
+                "chunks_total": total_chunks,
+                "entities_written": current.entities_written,
+                "facts_written": current.facts_written,
+                **current.token_usage.as_dict("ingestion"),
+            })
+
+        context_provider = build_cross_source_context_provider(
+            graph, collection=target.qdrant_collection,
+        )
+        semantic = await run_in_threadpool(
+            run_semantic_pass, graph, ledger,
+            record_prefix=f"jira:{payload.connection_id}:",
+            on_progress=semantic_progress,
+            collection=target.qdrant_collection,
+            context_provider=context_provider,
+        )
+        findings_synced = finding_bridge.sync_ledger_findings(
+            graph, ledger, record_prefix=f"jira:{payload.connection_id}:",
+            collection=target.qdrant_collection,
+        )
         orphans_removed = jp.delete_orphaned_shared_entities(graph)
 
         # Sync coverage (plan.md Phase 0.4): re-read the ledger for the exact
@@ -273,12 +306,15 @@ async def _run(run_id: str, payload: JiraSyncRequest, settings: JiraOAuthSetting
             "phase": "done", "project_key": payload.project_key,
             "current": f"Finished {total} issues from {project.key}",
             "records_done": total, "records_total": total, "records_kept": kept, "records_written": written,
-            "issues_fetched": total, "entities_written": 0,
-            "facts_written": 0, "chunks_ingested": 0,
+            "issues_fetched": total, "entities_written": semantic.entities_written,
+            "facts_written": semantic.facts_written,
+            "facts_rejected": semantic.facts_rejected,
+            "chunks_ingested": semantic.chunks_processed,
             "orphans_removed": orphans_removed,
+            "findings_synced": findings_synced,
             "provider_reported_total": None,
             "fetched_count": total, "ledger_count": sync_ledger_count, "skipped_by_rule_count": 0,
-            **TokenUsage().as_dict("ingestion"),
+            **semantic.token_usage.as_dict("ingestion"),
         }
         source_id = f"{payload.cloud_id}:{payload.project_id}"
         store.save_source(

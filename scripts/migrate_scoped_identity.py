@@ -195,21 +195,21 @@ from util.logging import configure_logging
 from util.paths import DATA_DIR
 
 from connectors.core.ledger import ConnectorLedger
-from graph import multigraph
-from graph import vector_store
-from graph.duplicate_collector import (
+from graph.storage import multigraph
+from graph.storage import vector_store
+from graph.resolution.duplicate_collector import (
     _absorb_fact_edges,
     _absorb_mentions,
     _node_source_record_keys,
 )
-from graph.falkor_client import get_graph
-from graph.semantic_pass import (
+from graph.storage.falkor_client import get_graph
+from graph.ingestion.semantic_pass import (
     _derive_namespace_uid,
     _normalize_identity,
     _record_own_kind,
     semantic_uid,
 )
-from graph.writer import _label, make_uid, upsert_entities
+from graph.storage.writer import _label, make_uid, upsert_entities
 
 logger = logging.getLogger("neuron.migrate_scoped_identity")
 

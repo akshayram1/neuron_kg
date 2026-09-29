@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import asyncio
+import threading
 from contextlib import suppress
 from pathlib import Path
 
@@ -44,21 +45,22 @@ from demo_ui.backend.jira_routes import router as jira_router
 from demo_ui.backend.link_candidate_routes import router as link_candidate_router
 from demo_ui.backend.notion_routes import router as notion_router
 from demo_ui.backend.review_routes import router as review_router
-from demo_ui.backend.synthetic_routes import router as synthetic_router
+from demo_ui.backend.synthetic_routes import router as local_data_router
 from demo_ui.backend.sync_coverage_routes import router as sync_coverage_router
 from demo_ui.backend.access import access_scope_for_request
 from demo_ui.backend.job_worker import run_hygiene_scheduler, run_worker
-from graph import multigraph
-from graph import vector_store
-from graph.chat import reranker_status, run_chat_turn, set_reranker_enabled
-from graph import adoption
-from graph.entity import fetch_entity_detail
-from graph.falkor_client import get_graph
-from graph.graph_view import fetch_graph, fetch_sources
-from graph.history import fetch_fact_history
-from graph.path_support import propose_verified_links
-from graph.schema import bootstrap_schema
-from graph.skos_export import build_skos_turtle
+from graph.storage import multigraph
+from graph.storage import vector_store
+from graph.retrieval.chat import reranker_status, run_chat_turn, set_reranker_enabled
+from graph.semantics import adoption
+from graph.retrieval.entity import fetch_entity_detail
+from graph.storage.embeddings import warmup_embedding_model
+from graph.storage.falkor_client import get_graph
+from graph.retrieval.graph_view import fetch_graph, fetch_sources
+from graph.retrieval.history import fetch_fact_history
+from graph.resolution.link_candidates import propose_verified_links
+from graph.storage.schema import bootstrap_schema
+from graph.semantics.skos_export import build_skos_turtle
 from storage import sql_backend
 from util.logging import configure_logging
 
@@ -150,7 +152,7 @@ app.include_router(jira_router)
 app.include_router(github_router)
 app.include_router(bitbucket_router)
 app.include_router(notion_router)
-app.include_router(synthetic_router)
+app.include_router(local_data_router)
 app.include_router(sync_coverage_router)
 app.include_router(review_router)
 app.include_router(link_candidate_router)
@@ -165,6 +167,13 @@ async def prevent_stale_frontend_shell(request: Request, call_next):
     return response
 
 
+def _warm_embeddings() -> None:
+    try:
+        warmup_embedding_model()
+    except Exception:
+        logger.exception("embedding model warmup failed; the first sync will load it")
+
+
 @app.on_event("startup")
 async def _ensure_schema() -> None:
     global _worker_stop, _worker_task, _hygiene_task
@@ -177,6 +186,9 @@ async def _ensure_schema() -> None:
         "Retrieval reranker mode=%s ready=%s device=%s reason=%s",
         status["mode"], status["ready"], status["device"], status["reason"],
     )
+    threading.Thread(
+        target=_warm_embeddings, name="neuron-embed-warmup", daemon=True,
+    ).start()
     _worker_stop = asyncio.Event()
     _worker_task = asyncio.create_task(run_worker(_worker_stop))
     _hygiene_task = asyncio.create_task(run_hygiene_scheduler(

@@ -41,10 +41,10 @@ from typing import Any
 
 from openai import OpenAI
 
-from graph import multigraph, vector_store
-from graph.access import AccessScope
-from graph.chat import RetrievalTrace, retrieve, run_chat_turn
-from graph.falkor_client import get_graph
+from graph.storage import multigraph, vector_store
+from graph.retrieval.access import AccessScope
+from graph.retrieval.chat import RetrievalTrace, retrieve, run_chat_turn
+from graph.storage.falkor_client import get_graph
 from graph.token_usage import TokenUsage
 from util import paths as _paths  # noqa: F401 — load repo .env
 from util.paths import DATA_DIR

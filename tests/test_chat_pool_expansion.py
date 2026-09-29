@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from graph import chat
-from graph.search import SearchHit
+from graph.retrieval import chat
+from graph.retrieval.search import SearchHit
 
 
 def _hit(uid: str, label: str = "WorkItem", name: str | None = None, score: float = 0.5) -> SearchHit:
@@ -129,7 +129,7 @@ def test_expansion_seeds_are_capped_at_max_seeds(monkeypatch):
 
     chat.retrieve(object(), object(), "what changed", limit=6, providers=None, scope=object())
 
-    from graph.expand import MAX_SEEDS
+    from graph.retrieval.expand import MAX_SEEDS
     assert len(captured["seed_uids"]) == MAX_SEEDS
     assert captured["seed_uids"] == [hit.uid for hit in pool[:MAX_SEEDS]]
 

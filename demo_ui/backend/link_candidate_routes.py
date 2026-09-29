@@ -40,10 +40,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from connectors.core.ledger import ConnectorLedger, LinkCandidate, ReviewState
-from graph import multigraph
-from graph import vector_store as vector_store_module
-from graph.falkor_client import get_graph
-from graph.link_candidates import apply_approved_link_candidate
+from graph.storage import multigraph
+from graph.storage import vector_store as vector_store_module
+from graph.storage.falkor_client import get_graph
+from graph.resolution.link_candidates import apply_approved_link_candidate
 from util.paths import DATA_DIR
 
 router = APIRouter(prefix="/api/link-candidates", tags=["link-candidates"])

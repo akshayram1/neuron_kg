@@ -13,9 +13,9 @@ from uuid import uuid4
 
 import pytest
 
-from graph import chat
-from graph.access import AccessScope
-from graph.falkor_client import build_client
+from graph.retrieval import chat
+from graph.retrieval.access import AccessScope
+from graph.storage.falkor_client import build_client
 
 # --- _file_path_candidates: pure regex, no graph -----------------------------
 

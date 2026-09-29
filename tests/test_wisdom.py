@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from graph.wisdom import (
+from graph.retrieval.wisdom import (
     WisdomApplicability,
     WisdomProposalExtraction,
     generate_wisdom_proposal,

@@ -17,9 +17,9 @@ import uuid
 import pytest
 
 from connectors.core.ledger import ConnectorLedger
-from graph import writer as w
-from graph.falkor_client import build_client
-from graph.semantic_pass import _normalize_identity, semantic_uid
+from graph.storage import writer as w
+from graph.storage.falkor_client import build_client
+from graph.ingestion.semantic_pass import _normalize_identity, semantic_uid
 from scripts import migrate_scoped_identity as m
 
 pytestmark = pytest.mark.skipif(

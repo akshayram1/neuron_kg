@@ -48,13 +48,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from graph.rerank import (
+from graph.retrieval.rerank import (
     DEFAULT_CANDIDATE_WINDOW_TOKENS,
     LayaReranker,
     RerankCandidate,
     candidates_from_hits,
 )
-from graph.search import SearchHit
+from graph.retrieval.search import SearchHit
 from util import paths as _paths  # noqa: F401 -- load repo .env, same as evaluate_retrieval.py
 
 DEFAULT_QUESTION = "What changed in the billing connector last sprint, and who owns the fix?"
@@ -235,7 +235,7 @@ def verify_fallback_path(question: str) -> dict[str, Any]:
     `RuntimeError` from `LayaReranker._load()`, not a stand-in for one.
     Restores every patched attribute in `finally`, even on failure.
     """
-    from graph import chat
+    from graph.retrieval import chat
 
     general_hits = [SearchHit("g1", "WorkItem", "g1", "summary g1", 0.5, ["vector"])]
 

@@ -283,19 +283,21 @@ export interface ConnectorSyncProgress {
   wisdom_total_tokens?: number;
 }
 
-export type SyntheticProvider = "jira" | "bitbucket" | "notion";
+export type LocalDataProvider = "jira" | "bitbucket" | "notion";
 
-export interface SyntheticStepStatus {
+export interface LocalDataStepStatus {
   available: boolean;
   ingested_records: number;
+  available_records: Record<string, number>;
 }
 
-export interface SyntheticStatus {
-  steps: Record<SyntheticProvider, SyntheticStepStatus>;
+export interface LocalDataStatus {
+  path: string;
+  steps: Record<LocalDataProvider, LocalDataStepStatus>;
 }
 
-export interface SyntheticIngestResult {
-  provider: SyntheticProvider;
+export interface LocalDataIngestResult {
+  provider: LocalDataProvider;
   records_kept: number;
   records_written: number;
   orphans_removed: number;
@@ -305,7 +307,10 @@ export interface SyntheticIngestResult {
   // Bitbucket
   repository?: string;
   pull_requests_fetched?: number;
+  commits_fetched?: number;
   commits_written?: number;
+  files_fetched?: number;
+  files_written?: number;
   // Notion
   workspace?: string;
   pages_fetched?: number;

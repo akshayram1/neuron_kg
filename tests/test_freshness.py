@@ -2,13 +2,13 @@ from datetime import timedelta
 
 import pytest
 
-from graph.freshness import (
+from graph.semantics.freshness import (
     DECAY_WINDOWS,
     Freshness,
     effective_confidence,
     freshness_class,
 )
-from graph.time_axis import parse_iso
+from graph.semantics.time_axis import parse_iso
 
 _NOW = "2026-06-01T00:00:00Z"
 

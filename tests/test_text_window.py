@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import tiktoken
 
-from graph.text_window import _overlap_score, _query_terms, _token_windows, best_window
+from graph.retrieval.text_window import _overlap_score, _query_terms, _token_windows, best_window
 
 _ENC = tiktoken.get_encoding("cl100k_base")
 

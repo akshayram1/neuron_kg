@@ -34,9 +34,9 @@ from fastapi.testclient import TestClient
 
 from connectors.core.ledger import ConnectorLedger, ReviewState
 from demo_ui.backend import review_routes
-from graph import writer as w
-from graph.falkor_client import build_client
-from graph.resolve_text_fact import NewFact, OldFact, resolve_text_fact
+from graph.storage import writer as w
+from graph.storage.falkor_client import build_client
+from graph.resolution.resolve_text_fact import NewFact, OldFact, resolve_text_fact
 
 integration = pytest.mark.skipif(
     os.getenv("NEURON_INTEGRATION") != "1",

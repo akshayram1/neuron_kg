@@ -181,10 +181,15 @@ class ConnectorJobStore:
                 (now, job_id, worker_id),
             )
 
-    def fail(self, job: ConnectorJob, worker_id: str, error: str) -> str:
+    def fail(
+        self, job: ConnectorJob, worker_id: str, error: str, *,
+        retry_after_seconds: float | None = None,
+    ) -> str:
         terminal = job.attempts >= job.max_attempts
         status = "dead" if terminal else "retry"
         delay = min(300, 2 ** max(0, job.attempts - 1))
+        if retry_after_seconds is not None:
+            delay = max(delay, min(3600, max(1, retry_after_seconds)))
         now = self._now()
         available = (now + timedelta(seconds=delay)).isoformat()
         with self._connect() as db:
@@ -200,4 +205,3 @@ class ConnectorJobStore:
         with self._connect() as db:
             row = db.execute("SELECT * FROM connector_jobs WHERE job_id=?", (job_id,)).fetchone()
         return self._job(row) if row else None
-

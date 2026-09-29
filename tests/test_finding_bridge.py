@@ -16,11 +16,11 @@ import uuid
 import pytest
 
 from connectors.core.ledger import ConnectorLedger
-from graph import vector_store
-from graph import writer as w
-from graph.falkor_client import build_client
-from graph.finding_bridge import sync_ledger_findings
-from graph.schema import bootstrap_schema
+from graph.storage import vector_store
+from graph.storage import writer as w
+from graph.storage.falkor_client import build_client
+from graph.ingestion.finding_bridge import sync_ledger_findings
+from graph.storage.schema import bootstrap_schema
 
 integration = pytest.mark.skipif(
     os.getenv("NEURON_INTEGRATION") != "1",

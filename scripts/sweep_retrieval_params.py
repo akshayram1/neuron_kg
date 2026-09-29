@@ -20,11 +20,11 @@ from statistics import mean
 
 from openai import OpenAI
 
-from graph.access import AccessScope
-from graph.falkor_client import get_graph
-from graph.schema import FULLTEXT_LABELS
-from graph import vector_store
-from graph.search import (
+from graph.retrieval.access import AccessScope
+from graph.storage.falkor_client import get_graph
+from graph.storage.schema import FULLTEXT_LABELS
+from graph.storage import vector_store
+from graph.retrieval.search import (
     _fulltext_search, _vector_search_global, embed_query, fuse_fulltext_labels, interleave,
 )
 from scripts.evaluate_retrieval import resolve_target

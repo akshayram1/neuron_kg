@@ -10,8 +10,8 @@ from pathlib import Path
 from fastapi import APIRouter, Query
 
 from connectors.core.ledger import ConnectorLedger
-from graph import multigraph
-from graph import vector_store as vector_store_module
+from graph.storage import multigraph
+from graph.storage import vector_store as vector_store_module
 from util.paths import DATA_DIR, ROOT
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])

@@ -2,7 +2,7 @@ from connectors.bitbucket.api import (
     BitbucketCommit, BitbucketFileChange, BitbucketRepository,
     parse_diffstat, src_listing_url,
 )
-from graph.bitbucket_pipeline import commit_record, modifies_paths
+from graph.ingestion.bitbucket_pipeline import commit_record, modifies_paths
 
 
 def test_src_root_listing_keeps_trailing_slash():

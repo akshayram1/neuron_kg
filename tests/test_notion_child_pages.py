@@ -151,7 +151,11 @@ def test_child_database_rows_are_ingested():
                     }
                 ),
             )
-        if path == "/v1/databases/db-1/query":
+        if path == "/v1/databases/db-1" and request.method == "GET":
+            return httpx.Response(
+                200, json={"id": "db-1", "data_sources": [{"id": "ds-1", "name": "Notes"}]},
+            )
+        if path == "/v1/data_sources/ds-1/query":
             body = json.loads(request.content or b"{}")
             assert body.get("page_size") == 100
             return httpx.Response(200, json={"results": [row], "has_more": False})

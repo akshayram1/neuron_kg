@@ -233,8 +233,15 @@ class NotionApiClient:
         return data
 
     async def _fetch_database_pages(self, database_id: str) -> list[dict[str, Any]]:
+        """Load every row of a child database.
+
+        `Notion-Version: 2026-03-11` removed `POST /databases/{id}/query`.
+        That call now returns 400 Invalid request URL. The database id on a
+        `child_database` block is the container; rows are queried per data
+        source (`GET /databases/{id}` then `POST /data_sources/{id}/query`).
+        """
         try:
-            return await self.paginate("POST", f"/databases/{database_id}/query", json={})
+            database = await self.request("GET", f"/databases/{database_id}")
         except NotionApiError as exc:
             if _is_inaccessible(exc):
                 logger.info(
@@ -243,6 +250,26 @@ class NotionApiClient:
                 )
                 return []
             raise
+        source_ids = [
+            str(item["id"])
+            for item in (database.get("data_sources") or [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        pages: list[dict[str, Any]] = []
+        for source_id in source_ids:
+            try:
+                pages.extend(
+                    await self.paginate("POST", f"/data_sources/{source_id}/query", json={})
+                )
+            except NotionApiError as exc:
+                if _is_inaccessible(exc):
+                    logger.info(
+                        "Skipping Notion data source %s — not shared with this integration",
+                        source_id,
+                    )
+                    continue
+                raise
+        return pages
 
     async def render_children(
         self, block_id: str, depth: int = 0

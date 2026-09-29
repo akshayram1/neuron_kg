@@ -97,7 +97,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.core.ledger import ConnectorLedger, Review, ReviewState
-from graph import multigraph, vector_store
+from graph.storage import multigraph, vector_store
 from util.paths import DATA_DIR
 
 # 25-plan.md §10.4's stated bar.

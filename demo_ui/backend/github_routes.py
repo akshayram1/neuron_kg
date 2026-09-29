@@ -24,12 +24,12 @@ from connectors.github_app.auth import (
     GitHubAppSettings, GitHubAuthClient, GitHubAuthError, GitHubConfigurationError,
 )
 from connectors.github_app.store import GitHubStore, github_state_db_path
-from graph import github_pipeline as gp
-from graph import multigraph
-from graph.embed_batch import close_batch, open_batch
-from graph import vector_store as vector_store_module
-from graph.falkor_client import get_graph
-from graph.schema import bootstrap_schema
+from graph.ingestion import github_pipeline as gp
+from graph.storage import multigraph
+from graph.storage.embeddings import close_batch, open_batch
+from graph.storage import vector_store as vector_store_module
+from graph.storage.falkor_client import get_graph
+from graph.storage.schema import bootstrap_schema
 from graph.token_usage import TokenUsage
 from util.paths import DATA_DIR
 from demo_ui.backend.job_worker import JOB_STORE
@@ -214,7 +214,7 @@ async def _run_sync(
             vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
             ledger = ConnectorLedger(target.ledger_path)
                         # One local model forward per batch instead of per record -- see
-            # graph/embed_batch.py. Must be closed on every exit path below.
+            # graph/storage/embeddings.py. Must be closed on every exit path below.
             open_batch(OpenAI(timeout=30.0, max_retries=2),
                        os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
                        target.qdrant_collection)

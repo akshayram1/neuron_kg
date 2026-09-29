@@ -8,11 +8,12 @@ import pytest
 from connectors.core.ledger import ConnectorLedger
 from connectors.github_app.api import GitHubCommit, GitHubRepository
 from connectors.jira.api import JiraIssue, JiraPerson, JiraProject, JiraSite
-from graph import github_pipeline, jira_pipeline, writer
-from graph.access import AccessScope
-from graph.falkor_client import build_client
-from graph.graph_view import fetch_graph
-from graph.history import fetch_fact_history
+from graph.ingestion import github_pipeline, jira_pipeline
+from graph.storage import writer
+from graph.retrieval.access import AccessScope
+from graph.storage.falkor_client import build_client
+from graph.retrieval.graph_view import fetch_graph
+from graph.retrieval.history import fetch_fact_history
 
 
 pytestmark = pytest.mark.skipif(

@@ -10,7 +10,7 @@ question worth asking about a drop.
 from __future__ import annotations
 
 from connectors.core.ledger import ConnectorLedger, DropReason, ExtractionDrop
-from graph.ontology import AS_IS, SWAPPED, resolve_direction
+from graph.semantics.ontology import AS_IS, SWAPPED, resolve_direction
 
 
 # ----------------------------------------------------------------- direction
@@ -121,7 +121,7 @@ def test_an_unmodelled_relation_keeps_the_sentence_it_came_from():
     for -- is the ontology too narrow, or was the model wrong -- because that
     judgement needs the sentence.
     """
-    from graph.semantic_pass import _drop
+    from graph.ingestion.semantic_pass import _drop
 
     class _Fact:
         subject_kind, subject_name = "Term", "GA"
@@ -138,7 +138,7 @@ def test_no_catch_all_relation_exists_to_fall_back_on():
     """The failure mode this guards against is a future `RELATES_TO` added
     "so the connection isn't lost". Once a placeholder is an edge, nothing
     downstream can tell it from a relation somebody actually asserted."""
-    from graph.axioms import DEFAULT_AXIOMS
+    from graph.semantics.axioms import DEFAULT_AXIOMS
 
     relations = {axiom.relation for axiom in DEFAULT_AXIOMS.axioms}
     for catch_all in ("RELATES_TO", "RELATED_TO", "RELATED", "ASSOCIATED_WITH"):

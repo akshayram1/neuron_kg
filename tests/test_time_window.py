@@ -9,8 +9,8 @@ month token returned 28 commits from the identical graph.
 
 from __future__ import annotations
 
-from graph.axioms import DEFAULT_AXIOMS
-from graph.time_axis import holds_at, infer_query_clocks, infer_query_window, parse_iso
+from graph.semantics.axioms import DEFAULT_AXIOMS
+from graph.semantics.time_axis import holds_at, infer_query_clocks, infer_query_window, parse_iso
 
 AUG = parse_iso("2026-08-01T00:00:00+00:00")
 SEP = parse_iso("2026-09-01T00:00:00+00:00")

@@ -7,7 +7,7 @@ actually implements the thing the question named.
 
 from __future__ import annotations
 
-from graph.search import fuse_fulltext_labels, interleave
+from graph.retrieval.search import fuse_fulltext_labels, interleave
 
 
 def _hit(uid: str, score: float) -> tuple[str, str, str, float]:

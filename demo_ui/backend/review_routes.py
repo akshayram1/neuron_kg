@@ -54,11 +54,11 @@ from falkordb import Graph
 from fastapi import APIRouter, HTTPException, Query
 
 from connectors.core.ledger import ConnectorLedger, Review, ReviewState
-from graph import multigraph
-from graph import vector_store as vector_store_module
-from graph.duplicate_collector import apply_approved_duplicate_merge
-from graph.falkor_client import get_graph
-from graph.resolve_text_fact import (
+from graph.storage import multigraph
+from graph.storage import vector_store as vector_store_module
+from graph.resolution.duplicate_collector import apply_approved_duplicate_merge
+from graph.storage.falkor_client import get_graph
+from graph.resolution.resolve_text_fact import (
     apply_approved_fact_update,
     apply_approved_possibly_same_as,
 )

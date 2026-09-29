@@ -18,9 +18,9 @@ from connectors.core.ledger import ConnectorLedger
 from connectors.core.oauth_store import OAuthConnectorStore
 from connectors.jira.api import JiraApiClient, JiraUnauthorized
 from connectors.jira.oauth import JiraOAuthSettings
-from graph import jira_pipeline as jp
-from graph.falkor_client import get_graph
-from graph.schema import bootstrap_schema
+from graph.ingestion import jira_pipeline as jp
+from graph.storage.falkor_client import get_graph
+from graph.storage.schema import bootstrap_schema
 from storage import sql_backend
 
 LEDGER_PATH = "connector_ledger.sqlite3"

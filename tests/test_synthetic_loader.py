@@ -1,5 +1,5 @@
-"""connectors/synthetic/loader.py against the real fixtures under
-synthetic/mcp-access/ (skipped if that directory isn't present) plus a
+"""connectors/synthetic/loader.py against the real export under
+nilus_data/ (skipped if that directory isn't present) plus a
 from-scratch fixture set built in a temp dir, to pin down the parsing rules
 that don't come from the live connector clients (missing Jira issue `id`,
 Bitbucket repository inferred from a PR/commit payload, Notion page markdown
@@ -11,16 +11,16 @@ import json
 
 import pytest
 
-from connectors.bitbucket.api import BitbucketCommit, BitbucketPullRequest
+from connectors.bitbucket.api import BitbucketCommit, BitbucketFile, BitbucketPullRequest
 from connectors.jira.api import JiraIssue
 from connectors.notion.api import NotionPage
 from connectors.synthetic import loader
 from util.paths import ROOT
 
-REAL_FIXTURES = ROOT / "synthetic" / "mcp-access"
+REAL_FIXTURES = ROOT / "nilus_data"
 
 
-@pytest.mark.skipif(not REAL_FIXTURES.is_dir(), reason="synthetic/mcp-access fixtures not present")
+@pytest.mark.skipif(not REAL_FIXTURES.is_dir(), reason="nilus_data export not present")
 def test_real_fixtures_load_without_error():
     assert loader.availability() == {"jira": True, "bitbucket": True, "notion": True}
 
@@ -33,11 +33,15 @@ def test_real_fixtures_load_without_error():
     assert repository.full_name and prs
     assert all(isinstance(pr, BitbucketPullRequest) for pr in prs)
     assert any(commits for commits in commits_by_pr.values())
+    all_commits = {commit.commit_hash: commit for commits in commits_by_pr.values() for commit in commits}
+    assert any(commit.files for commit in all_commits.values())
+    files = loader.load_bitbucket_files(repository)
+    assert files and all(isinstance(file, BitbucketFile) for file in files)
 
     workspace_id, workspace_name, pages = loader.load_notion()
     assert workspace_id and workspace_name and pages
     assert all(isinstance(page, NotionPage) for page in pages)
-    assert all(page.content for page in pages)  # markdown was actually attached
+    assert any(page.content for page in pages)  # rendered markdown was actually attached
 
 
 @pytest.fixture
@@ -49,9 +53,9 @@ def empty_synthetic_dir(tmp_path, monkeypatch):
 def test_missing_fixtures_return_empty_not_raise(empty_synthetic_dir):
     assert loader.availability() == {"jira": False, "bitbucket": False, "notion": False}
     site, project, issues = loader.load_jira()
-    assert issues == [] and project.key == "SYNTHETIC" and site.cloud_id == "synthetic"
+    assert issues == [] and project.key == "LOCAL" and site.cloud_id == "nilus-data"
     repository, prs, commits = loader.load_bitbucket()
-    assert prs == [] and commits == {} and repository.full_name == "synthetic/repo"
+    assert prs == [] and commits == {} and repository.full_name == "local/repo"
     workspace_id, workspace_name, pages = loader.load_notion()
     assert pages == [] and workspace_id and workspace_name
 

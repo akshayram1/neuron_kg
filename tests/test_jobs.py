@@ -42,3 +42,20 @@ def test_job_moves_to_dead_letter_after_budget(tmp_path):
     assert job is not None
     assert store.fail(job, "worker", "permanent") == "dead"
     assert store.get("run-3").last_error == "permanent"  # type: ignore[union-attr]
+
+
+def test_provider_retry_after_controls_next_claim_time(tmp_path):
+    store = ConnectorJobStore(tmp_path / "jobs.sqlite3")
+    clock = datetime(2026, 1, 1, tzinfo=UTC)
+    store._now = lambda: clock  # type: ignore[method-assign]
+    store.enqueue("run-rate-limited", "bitbucket", {})
+    job = store.claim("worker")
+    assert job is not None
+    assert store.fail(
+        job, "worker", "rate limited", retry_after_seconds=1800,
+    ) == "retry"
+
+    clock += timedelta(seconds=1799)
+    assert store.claim("worker") is None
+    clock += timedelta(seconds=1)
+    assert store.claim("worker") is not None

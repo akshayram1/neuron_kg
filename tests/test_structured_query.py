@@ -1,4 +1,4 @@
-from graph.structured_query import (
+from graph.retrieval.structured_query import (
     _ASSIGNED_TO, _CURRENT_API_USAGE, _CURRENT_REMOVAL_IMPACT,
     _LATEST_COMMIT, _SECOND, _UNASSIGNED,
     _commit_summary, _issue_keys, _repo_hint, _sha_prefixes,

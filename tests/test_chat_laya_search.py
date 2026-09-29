@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from graph import chat
-from graph.rerank import RerankCandidate, RerankScore
-from graph.search import SearchHit
+from graph.retrieval import chat
+from graph.retrieval.rerank import RerankCandidate, RerankScore
+from graph.retrieval.search import SearchHit
 
 
 def _hit(uid: str, *, methods: list[str] | None = None) -> SearchHit:

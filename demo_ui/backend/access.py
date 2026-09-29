@@ -12,21 +12,20 @@ from connectors.github_app.store import GitHubStore, github_state_db_path
 from connectors.jira.oauth import JiraOAuthSettings
 from connectors.notion.oauth import NotionOAuthSettings, NotionStore, notion_state_db_path
 from connectors.synthetic.loader import (
-    SYNTHETIC_BITBUCKET_CONNECTION, SYNTHETIC_JIRA_CONNECTION, SYNTHETIC_NOTION_CONNECTION,
+    LOCAL_DATA_BITBUCKET_CONNECTION, LOCAL_DATA_JIRA_CONNECTION, LOCAL_DATA_NOTION_CONNECTION,
 )
-from graph.access import AccessScope
+from graph.retrieval.access import AccessScope
 from util.paths import DATA_DIR
 
 
 def access_scope_for_request(request: Request) -> AccessScope:
-    # Synthetic-fixture records (demo_ui/backend/synthetic_routes.py) have no
-    # OAuth session to prove ownership of -- they aren't anyone's private
-    # data, so every session gets to see them, the same way a real OAuth
-    # connection's session grants visibility into that connection's records.
+    # The operator-provided local export has no OAuth session to prove
+    # ownership of, so every local UI session can see its ingested records,
+    # just as an owning OAuth session can see its connector records.
     allowed: dict[str, list[str]] = {
-        "jira": [SYNTHETIC_JIRA_CONNECTION],
-        "bitbucket": [SYNTHETIC_BITBUCKET_CONNECTION],
-        "notion": [SYNTHETIC_NOTION_CONNECTION],
+        "jira": [LOCAL_DATA_JIRA_CONNECTION],
+        "bitbucket": [LOCAL_DATA_BITBUCKET_CONNECTION],
+        "notion": [LOCAL_DATA_NOTION_CONNECTION],
     }
 
     jira_session = request.cookies.get("neuron_jira_session")
@@ -75,4 +74,3 @@ def access_scope_for_request(request: Request) -> AccessScope:
             pass
 
     return AccessScope.from_connections(allowed)
-

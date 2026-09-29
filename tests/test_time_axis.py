@@ -1,4 +1,4 @@
-from graph.time_axis import held_at, holds_at, infer_query_clocks, parse_iso
+from graph.semantics.time_axis import held_at, holds_at, infer_query_clocks, parse_iso
 
 
 def test_unknown_start_is_not_open_on_the_world_axis():

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from graph.dates import stated_dates
+from graph.ingestion.dates import stated_dates
 
 REF = datetime(2026, 6, 15)  # a Monday-ish anchor, mid-Q2 2026
 

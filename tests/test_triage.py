@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from connectors.core.ledger import ConnectorLedger, DropReason, PendingChunk, SemanticStatus
-from graph.semantic_pass import _gate_laya_triage, run_semantic_pass
-from graph.triage import LayaTriageClassifier, TriageDecision
+from graph.ingestion.semantic_pass import _gate_laya_triage, run_semantic_pass
+from graph.ingestion.laya import LayaTriageClassifier, TriageDecision
 
 
 def test_initial_skip_rule_and_shadow_mode():

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from graph import embeddings
+from graph.storage import embeddings
 
 
 class FakeModel:
@@ -33,3 +33,22 @@ def test_wrong_dimension_fails_before_storage(monkeypatch):
     with pytest.raises(RuntimeError, match="3-dimensional"):
         embeddings.embed_texts(["alpha"])
 
+
+def test_write_time_content_is_bounded_without_mutating_source_text():
+    original = "x" * (embeddings.WRITE_TIME_EMBED_CHARS + 100)
+
+    clipped = embeddings.write_time_content(original, "SourceFile")
+
+    assert len(clipped) == embeddings.WRITE_TIME_EMBED_CHARS
+    assert len(original) == embeddings.WRITE_TIME_EMBED_CHARS + 100
+
+
+def test_mps_default_uses_small_inference_micro_batches(monkeypatch):
+    fake = FakeModel()
+    monkeypatch.setattr(embeddings, "_load_model", lambda _name: fake)
+    monkeypatch.setattr(embeddings, "embedding_device", lambda: "mps")
+    monkeypatch.delenv("EMBEDDING_BATCH_SIZE", raising=False)
+
+    embeddings._embed_in_process(["alpha"], "BAAI/bge-m3")
+
+    assert fake.kwargs["batch_size"] == 4

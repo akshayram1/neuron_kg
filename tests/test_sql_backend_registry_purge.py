@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from connectors.core.purge import purge_ledger_prefix
-from graph.multigraph import DEFAULT_GRAPH_NAME, GraphRegistry
+from graph.storage.multigraph import DEFAULT_GRAPH_NAME, GraphRegistry
 from storage import sql_backend
 
 BACKENDS = pytest.mark.parametrize("sql_backend", ["sqlite", "postgres"], indirect=True)

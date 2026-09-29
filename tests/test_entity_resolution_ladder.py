@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import pytest
 
-import graph.semantic_pass as sp
+import graph.ingestion.semantic_pass as sp
 from connectors.core.ledger import ConnectorLedger, DropReason, PendingChunk
-from graph.axioms import DEFAULT_AXIOMS
-from graph.ontology import Api, Decision, Endpoint, System, Term
-from graph.profiles import ExtractedFact, WorkManagementExtraction
-from graph.semantic_pass import (
+from graph.semantics.axioms import DEFAULT_AXIOMS
+from graph.semantics.ontology import Api, Decision, Endpoint, System, Term
+from graph.ingestion.profiles import ExtractedFact, WorkManagementExtraction
+from graph.ingestion.semantic_pass import (
     _derive_namespace_uid,
     _passes_mention_filter,
     _resolve_semantic_entity,
@@ -38,7 +38,7 @@ from graph.semantic_pass import (
     semantic_uid,
 )
 from graph.token_usage import TokenUsage
-from graph.writer import make_uid
+from graph.storage.writer import make_uid
 
 
 # --------------------------------------------------------------------- doubles

@@ -6,8 +6,8 @@ axiom does not produce one wrong edge, it multiplies into thousands.
 
 from __future__ import annotations
 
-from graph.axioms import AxiomSet, RelationAxiom
-from graph.inference import (
+from graph.semantics.axioms import AxiomSet, RelationAxiom
+from graph.semantics.inference import (
     Edge, intersect_validity, min_confidence, symmetric_closure,
     inverse_edges, sub_property_edges, transitive_closure,
 )

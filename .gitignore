@@ -39,3 +39,6 @@ trash/
 # Root-anchored: only the captured fixture data at synthetic/mcp-access/,
 # never connectors/synthetic/ (the loader that reads it).
 /synthetic/
+# Captured local fixtures and the old Nilus-named eval snapshots.
+/nilus_data/
+eval/nilus_*

@@ -10,7 +10,7 @@ from connectors.core.chunking.router import chunk_record
 from connectors.core.hashing import record_content_hash
 from connectors.core.ledger import ConnectorLedger
 from connectors.core.models import SourceDeletion, SourceRecord
-from graph.profiles import ExtractionProfile, profile_for_record
+from graph.ingestion.profiles import ExtractionProfile, profile_for_record
 
 
 @dataclass(frozen=True)

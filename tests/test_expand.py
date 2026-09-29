@@ -12,8 +12,8 @@ from uuid import uuid4
 
 import pytest
 
-from graph.access import AccessScope
-from graph.expand import (
+from graph.retrieval.access import AccessScope
+from graph.retrieval.expand import (
     HUB_LABELS,
     MAX_SEEDS,
     PER_SEED,
@@ -21,7 +21,7 @@ from graph.expand import (
     expand_neighbors,
     tier_for_extraction_method,
 )
-from graph.falkor_client import build_client
+from graph.storage.falkor_client import build_client
 
 pytestmark = pytest.mark.skipif(
     os.getenv("NEURON_INTEGRATION") != "1",

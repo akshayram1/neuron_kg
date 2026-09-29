@@ -84,7 +84,7 @@ def _owner_oauth(path: Path) -> None:
 
 
 def _owner_graphs(path: Path) -> None:
-    from graph.multigraph import GraphRegistry
+    from graph.storage.multigraph import GraphRegistry
 
     GraphRegistry(path)
 

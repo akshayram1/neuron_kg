@@ -10,7 +10,7 @@ import math
 
 import pytest
 
-from graph.rerank import DEFAULT_CANDIDATE_WINDOW_TOKENS
+from graph.retrieval.rerank import DEFAULT_CANDIDATE_WINDOW_TOKENS
 from scripts.benchmark_laya import (
     PoolMeasurement,
     build_candidates,

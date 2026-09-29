@@ -11,8 +11,8 @@ from __future__ import annotations
 import itertools
 
 from connectors.core.ledger import ConnectorLedger
-from graph.axioms import AS_IS, SWAPPED, AxiomSet, DEFAULT_AXIOMS, RelationAxiom, load_axioms, seed_axioms
-from graph.ontology import RELATION_TYPE_MAP, is_relation_allowed
+from graph.semantics.axioms import AS_IS, SWAPPED, AxiomSet, DEFAULT_AXIOMS, RelationAxiom, load_axioms, seed_axioms
+from graph.semantics.ontology import RELATION_TYPE_MAP, is_relation_allowed
 
 _KINDS = sorted(
     {kind for pair in RELATION_TYPE_MAP for kind in pair}

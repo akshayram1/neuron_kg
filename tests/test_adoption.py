@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from connectors.core.ledger import ConnectorLedger, DropReason, ExtractionDrop
-from graph import adoption
+from graph.semantics import adoption
 
 
 def _ledger(tmp_path) -> ConnectorLedger:
@@ -88,7 +88,7 @@ def test_an_already_known_shape_is_not_re_proposed(tmp_path):
     """`Decision -APPLIES_TO-> System` is seeded. A refusal recorded against it
     (a stale row from before an earlier adoption) must not produce a duplicate
     axiom."""
-    from graph.axioms import load_axioms
+    from graph.semantics.axioms import load_axioms
 
     ledger = _ledger(tmp_path)
     load_axioms(ledger)                      # seeds the 37 built-ins
@@ -120,7 +120,7 @@ def test_adoption_widens_the_allow_list_and_nothing_else(tmp_path):
     transitivity or symmetry. Utopia's carve-out is the sharp end: a wrong
     `functional` makes the temporal engine auto-close facts, and by the time
     it is noticed those closures are a chain of supersedes."""
-    from graph.axioms import load_axioms
+    from graph.semantics.axioms import load_axioms
 
     ledger = _ledger(tmp_path)
     load_axioms(ledger)
@@ -145,7 +145,7 @@ def test_adoption_widens_the_allow_list_and_nothing_else(tmp_path):
 
 
 def test_adoption_makes_the_refused_triple_allowed(tmp_path):
-    from graph.axioms import load_axioms
+    from graph.semantics.axioms import load_axioms
 
     ledger = _ledger(tmp_path)
     load_axioms(ledger)
@@ -212,7 +212,7 @@ def test_force_adopts_with_the_switch_off(tmp_path):
 # ----------------------------------------------------------------- the undo
 
 def test_unadopt_removes_the_axioms(tmp_path):
-    from graph.axioms import load_axioms
+    from graph.semantics.axioms import load_axioms
 
     ledger = _ledger(tmp_path)
     load_axioms(ledger)
@@ -236,7 +236,7 @@ def test_unadopting_twice_is_not_an_error_and_does_nothing_the_second_time(tmp_p
 
 def test_an_undone_batch_leaves_the_seeded_vocabulary_alone(tmp_path):
     """An undo must never reach past what its own adoption created."""
-    from graph.axioms import load_axioms, seed_axioms
+    from graph.semantics.axioms import load_axioms, seed_axioms
 
     ledger = _ledger(tmp_path)
     load_axioms(ledger)

@@ -17,8 +17,8 @@ import os
 from fastapi import APIRouter, Query
 
 from connectors.core.ledger import ConnectorLedger, SyncCoverage
-from graph import multigraph
-from graph import vector_store as vector_store_module
+from graph.storage import multigraph
+from graph.storage import vector_store as vector_store_module
 from util.paths import DATA_DIR
 
 router = APIRouter(prefix="/api/sync-coverage", tags=["sync-coverage"])

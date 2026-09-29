@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from graph.chat import _assignment_facts, _used_record_keys
+from graph.retrieval.chat import _assignment_facts, _used_record_keys
 
 
 def test_trailing_whitespace_in_source_name_does_not_drop_a_citation():

@@ -1,6 +1,6 @@
 from connectors.core.chunking.models import SourceChunk
 from connectors.core.ledger import ConnectorLedger, SemanticStatus
-from graph.selective_ingestion import has_pending, selective_chunk_writes
+from graph.ingestion.selective_ingestion import has_pending, selective_chunk_writes
 
 
 def _chunk(text: str) -> SourceChunk:

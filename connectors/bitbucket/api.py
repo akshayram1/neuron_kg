@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import random
 import re
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -30,6 +34,18 @@ class BitbucketApiError(RuntimeError):
 
 class BitbucketUnauthorized(BitbucketApiError):
     pass
+
+
+class BitbucketRateLimited(BitbucketApiError):
+    """The rolling provider quota is exhausted and the job must be delayed."""
+
+    def __init__(self, retry_after_seconds: float, detail: str = ""):
+        self.retry_after_seconds = max(1.0, retry_after_seconds)
+        suffix = f"; {detail}" if detail else ""
+        super().__init__(
+            f"Bitbucket rate limit reached; retry after "
+            f"{round(self.retry_after_seconds)} seconds{suffix}"
+        )
 
 
 @dataclass(frozen=True)
@@ -148,11 +164,41 @@ def _split_author(raw_author: dict) -> tuple[str, str]:
 
 
 class BitbucketApiClient:
-    def __init__(self, access_token: str, client: httpx.AsyncClient | None = None):
+    def __init__(
+        self, access_token: str, client: httpx.AsyncClient | None = None, *,
+        max_concurrency: int | None = None, min_interval: float | None = None,
+        max_retries: int = 8,
+    ):
         self._owns = client is None
         self._client = client or httpx.AsyncClient(timeout=40)
         self._headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
         self._ref_cache: dict[tuple[str, str], str] = {}
+        # Bitbucket explicitly recommends avoiding concurrent requests after a
+        # 429. Every endpoint in this client shares this gate, including the
+        # tree walk and commit diffstats that run as separate asyncio tasks.
+        configured_concurrency = (
+            max_concurrency if max_concurrency is not None
+            else int(os.getenv("BITBUCKET_API_CONCURRENCY", "1"))
+        )
+        configured_interval = (
+            min_interval if min_interval is not None
+            else float(os.getenv("BITBUCKET_API_MIN_INTERVAL_SECONDS", "0.25"))
+        )
+        self._request_sem = asyncio.Semaphore(max(1, configured_concurrency))
+        self._pace_lock = asyncio.Lock()
+        self._min_interval = max(0.0, configured_interval)
+        self._adaptive_interval = self._min_interval
+        self._max_request_interval = max(
+            self._min_interval,
+            float(os.getenv("BITBUCKET_MAX_REQUEST_INTERVAL_SECONDS", "5")),
+        )
+        self._success_streak = 0
+        self._next_request_at = 0.0
+        self._blocked_until = 0.0
+        self._max_retries = max(1, max_retries)
+        self._max_inline_retry = max(
+            0.0, float(os.getenv("BITBUCKET_MAX_INLINE_RETRY_SECONDS", "60")),
+        )
 
     async def __aenter__(self) -> "BitbucketApiClient":
         return self
@@ -161,28 +207,110 @@ class BitbucketApiClient:
         if self._owns:
             await self._client.aclose()
 
+    async def _wait_for_request_turn(self) -> None:
+        """Apply process-local pacing and any shared provider cooldown."""
+        loop = asyncio.get_running_loop()
+        async with self._pace_lock:
+            while True:
+                now = loop.time()
+                delay = max(self._next_request_at, self._blocked_until) - now
+                if delay <= 0:
+                    self._next_request_at = now + self._adaptive_interval
+                    return
+                await asyncio.sleep(delay)
+
+    async def _set_cooldown(self, seconds: float) -> None:
+        async with self._pace_lock:
+            self._blocked_until = max(
+                self._blocked_until,
+                asyncio.get_running_loop().time() + max(0.0, seconds),
+            )
+
+    async def _apply_rate_limit(self, seconds: float) -> float:
+        """Slow every later request after a 429, not only its retry."""
+        async with self._pace_lock:
+            now = asyncio.get_running_loop().time()
+            self._blocked_until = max(self._blocked_until, now + max(0.0, seconds))
+            self._adaptive_interval = min(
+                self._max_request_interval,
+                max(self._adaptive_interval * 1.5, seconds * 1.1, self._min_interval),
+            )
+            self._success_streak = 0
+            return self._adaptive_interval
+
+    async def _record_success(self) -> None:
+        """Recover throughput only after a sustained run without throttling."""
+        async with self._pace_lock:
+            self._success_streak += 1
+            if self._success_streak >= 20:
+                self._adaptive_interval = max(
+                    self._min_interval, self._adaptive_interval * 0.9,
+                )
+                self._success_streak = 0
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response, attempt: int) -> float:
+        """Prefer provider guidance, otherwise use exponential jitter."""
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(0.0, float(retry_after))
+            except ValueError:
+                try:
+                    parsed = parsedate_to_datetime(retry_after)
+                    return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+                except (TypeError, ValueError):
+                    pass
+        reset = response.headers.get("X-RateLimit-Reset")
+        if reset:
+            try:
+                parsed = datetime.fromisoformat(reset.replace("Z", "+00:00"))
+                return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+            except ValueError:
+                pass
+        base = min(60.0, float(2 ** attempt))
+        return base * random.uniform(1.0, 1.25)
+
     async def _response(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         headers = {**self._headers, **kwargs.pop("headers", {})}
         response: httpx.Response | None = None
-        for attempt in range(5):
+        for attempt in range(self._max_retries):
+            await self._wait_for_request_turn()
             try:
-                response = await self._client.request(method, url, headers=headers, **kwargs)
+                async with self._request_sem:
+                    response = await self._client.request(method, url, headers=headers, **kwargs)
             except httpx.TransportError as exc:
-                if attempt == 4:
+                if attempt == self._max_retries - 1:
                     raise BitbucketApiError("Bitbucket network request failed") from exc
-                await asyncio.sleep(2 ** attempt)
+                await self._set_cooldown(min(30.0, float(2 ** attempt)))
                 continue
             if response.status_code == 401:
                 raise BitbucketUnauthorized("Bitbucket access token expired or was revoked")
-            if response.status_code in TRANSIENT and attempt < 4:
-                try:
-                    delay = float(response.headers.get("Retry-After") or 2 ** attempt)
-                except ValueError:
-                    delay = float(2 ** attempt)
-                await asyncio.sleep(delay)
+            if response.status_code in TRANSIENT:
+                delay = self._retry_delay(response, attempt)
+                if response.status_code == 429:
+                    interval = await self._apply_rate_limit(delay)
+                    logger.warning(
+                        "Bitbucket rate limited; retry_after=%.1fs request_gap=%.1fs "
+                        "attempt=%d/%d url=%s",
+                        delay, interval, attempt + 1, self._max_retries, url,
+                    )
+                    # A long rolling-window wait belongs in the durable queue,
+                    # where it survives backend restarts without tying up a
+                    # worker coroutine.
+                    if delay > self._max_inline_retry or attempt == self._max_retries - 1:
+                        raise BitbucketRateLimited(
+                            delay,
+                            response.headers.get("RateLimit-Reason", ""),
+                        )
+                elif attempt == self._max_retries - 1:
+                    raise BitbucketApiError(f"Bitbucket API failed ({response.status_code})")
+                if response.status_code != 429:
+                    await self._set_cooldown(delay)
                 continue
             if response.status_code >= 400:
                 raise BitbucketApiError(f"Bitbucket API failed ({response.status_code})")
+            await self._record_success()
             return response
         assert response is not None
         return response
@@ -302,10 +430,6 @@ class BitbucketApiClient:
         # Read the tree at a resolved commit, never at a branch name -- see
         # resolve_ref: a branch containing '/' cannot be addressed here.
         encoded_branch = quote(await self.resolve_ref(repository, repository.main_branch), safe="")
-        # Sibling dirs + file bodies used to run one-at-a-time. Argus has
-        # hundreds of .py files; that walk alone is "still on Discovering"
-        # for minutes. Cap concurrency so we don't trip Bitbucket 555s.
-        sem = asyncio.Semaphore(16)
         lock = asyncio.Lock()
         src_root = (
             f"{BASE_URL}/repositories/{quote(repository.workspace)}/"
@@ -315,8 +439,7 @@ class BitbucketApiClient:
         async def download(item_path: str, size: int, commit_hash: str) -> None:
             nonlocal without_text
             raw_url = f"{src_root}/{quote(item_path, safe='/')}"
-            async with sem:
-                response = await self._response("GET", raw_url, headers={"Accept": "text/plain"})
+            response = await self._response("GET", raw_url, headers={"Accept": "text/plain"})
             try:
                 content = response.content.decode("utf-8")
             except UnicodeDecodeError:
@@ -334,10 +457,9 @@ class BitbucketApiClient:
                     return
                 visited.add(path)
             url = src_listing_url(src_root, path)
-            async with sem:
-                values = await self.paginated(url, {"pagelen": 100})
+            values = await self.paginated(url, {"pagelen": 100})
             child_dirs: list[str] = []
-            pending: list[Any] = []
+            pending: list[tuple[str, int, str]] = []
             for value in values:
                 item_path = str(value.get("path") or "")
                 if value.get("type") == "commit_directory":
@@ -355,8 +477,14 @@ class BitbucketApiClient:
                         too_large += 1
                     continue
                 commit_hash = str(((value.get("commit") or {}).get("hash")) or "")
-                pending.append(download(item_path, size, commit_hash))
-            await asyncio.gather(*[walk(child) for child in child_dirs], *pending)
+                pending.append((item_path, size, commit_hash))
+            # Bitbucket's rolling quotas are consumer-wide for OAuth. Keep the
+            # tree walk sequential so a single large repository cannot fan out
+            # hundreds of raw-file requests at once.
+            for child in child_dirs:
+                await walk(child)
+            for item in pending:
+                await download(*item)
 
         await walk("")
         return output, too_large, without_text, extension_filtered
@@ -456,23 +584,22 @@ class BitbucketApiClient:
 
     async def attach_diffstats(
         self, repository: BitbucketRepository, commits: list[BitbucketCommit],
-        *, concurrency: int = 16,
     ) -> list[BitbucketCommit]:
-        """Fill `commit.files` for each commit. One failed diffstat stays empty."""
+        """Fill commit file lists sequentially; one ordinary failure stays empty."""
         if not commits:
             return commits
-        sem = asyncio.Semaphore(max(1, concurrency))
-
-        async def one(commit: BitbucketCommit) -> BitbucketCommit:
-            async with sem:
-                try:
-                    files = await self.diffstat(repository, commit.commit_hash)
-                except BitbucketApiError as exc:
-                    logger.warning(
-                        "diffstat failed commit=%s repo=%s: %s",
-                        commit.commit_hash[:12], repository.full_name, exc,
-                    )
-                    return commit
-                return replace(commit, files=files)
-
-        return list(await asyncio.gather(*[one(commit) for commit in commits]))
+        output: list[BitbucketCommit] = []
+        for commit in commits:
+            try:
+                files = await self.diffstat(repository, commit.commit_hash)
+            except BitbucketRateLimited:
+                raise
+            except BitbucketApiError as exc:
+                logger.warning(
+                    "diffstat failed commit=%s repo=%s: %s",
+                    commit.commit_hash[:12], repository.full_name, exc,
+                )
+                output.append(commit)
+            else:
+                output.append(replace(commit, files=files))
+        return output

@@ -18,9 +18,9 @@ from uuid import uuid4
 import pytest
 
 from connectors.core.ledger import ConnectorLedger
-from graph.axioms import DEFAULT_AXIOMS
-from graph.falkor_client import build_client
-from graph.hygiene import (
+from graph.semantics.axioms import DEFAULT_AXIOMS
+from graph.storage.falkor_client import build_client
+from graph.resolution.hygiene import (
     HygieneReport,
     IsolatedNodeCount,
     cardinality_violations,

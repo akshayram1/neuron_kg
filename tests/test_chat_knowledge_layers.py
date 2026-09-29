@@ -1,5 +1,5 @@
-from graph import chat
-from graph.search import SearchHit
+from graph.retrieval import chat
+from graph.retrieval.search import SearchHit
 
 
 def _hit(uid: str, label: str, name: str) -> SearchHit:

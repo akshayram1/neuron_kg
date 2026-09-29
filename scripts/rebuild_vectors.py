@@ -22,10 +22,10 @@ import logging
 from util import paths as _paths  # noqa: F401 — loads .env from repo root
 from util.logging import configure_logging
 
-from graph import multigraph, vector_store
-from graph.embeddings import embed_texts
-from graph.falkor_client import get_graph
-from graph.schema import VECTOR_LABELS
+from graph.storage import multigraph, vector_store
+from graph.storage.embeddings import WORK_ITEM_EMBED_CHARS, embed_texts
+from graph.storage.falkor_client import get_graph
+from graph.storage.schema import VECTOR_LABELS
 from scripts.evaluate_retrieval import resolve_target
 
 logger = logging.getLogger("neuron.rebuild_vectors")
@@ -55,6 +55,8 @@ def rebuild(*, recreate: bool, graph_name: str = multigraph.DEFAULT_GRAPH_NAME) 
         for start in range(0, len(rows), BATCH):
             batch = rows[start : start + BATCH]
             texts = [vector_store.truncate_for_embedding(row[1]) for row in batch]
+            if label == "WorkItem":
+                texts = [text[:WORK_ITEM_EMBED_CHARS] for text in texts]
             # Both channels in one request per batch: content first, then the
             # bare names, so `data[i]` and `data[len+i]` pair up by position.
             names = [

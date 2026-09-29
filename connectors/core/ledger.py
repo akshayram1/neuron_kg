@@ -293,6 +293,7 @@ class DropReason(StrEnum):
     DIRECTION_CORRECTED = "direction_corrected"
     GENERIC_MENTION = "generic_mention"
     LAYA_TRIAGE_SKIP = "laya_triage_skip"
+    CLASSIFIER_FAILED = "classifier_failed"
 
 
 @dataclass(frozen=True)

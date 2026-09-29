@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from graph import search, vector_store
-from graph.embeddings import EmbeddingResult
+from graph.retrieval import search
+from graph.storage import vector_store
+from graph.storage.embeddings import EmbeddingResult
 from graph.token_usage import TokenUsage
 
 

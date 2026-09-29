@@ -16,7 +16,7 @@ import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
-from graph import vector_store
+from graph.storage import vector_store
 from storage.postgres import PostgresConfigurationError, PostgresStore, PostgresVectorClient, database_url
 
 pytestmark = pytest.mark.skipif(

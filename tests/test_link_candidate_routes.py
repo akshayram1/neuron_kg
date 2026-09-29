@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from demo_ui.backend import link_candidate_routes
-from graph.falkor_client import build_client
+from graph.storage.falkor_client import build_client
 
 integration = pytest.mark.skipif(
     os.getenv("NEURON_INTEGRATION") != "1",

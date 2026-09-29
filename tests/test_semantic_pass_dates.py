@@ -31,10 +31,10 @@ import uuid
 import pytest
 
 from connectors.core.ledger import ConnectorLedger, PendingChunk
-from graph.profiles import ExtractedFact, WorkManagementExtraction
+from graph.ingestion.profiles import ExtractedFact, WorkManagementExtraction
 from graph.token_usage import TokenUsage
-from graph.axioms import DEFAULT_AXIOMS
-from graph.semantic_pass import _write_extraction
+from graph.semantics.axioms import DEFAULT_AXIOMS
+from graph.ingestion.semantic_pass import _write_extraction
 
 SOURCE_TIME = "2026-01-01T00:00:00Z"
 
@@ -218,9 +218,9 @@ pytestmark_integration = pytest.mark.skipif(
 
 @pytest.fixture
 def real_graph():
-    from graph import writer as w
-    from graph.falkor_client import build_client
-    from graph.semantic_pass import semantic_uid
+    from graph.storage import writer as w
+    from graph.storage.falkor_client import build_client
+    from graph.ingestion.semantic_pass import semantic_uid
 
     client = build_client()
     g = client.select_graph(f"neuron_test_{uuid.uuid4().hex}")

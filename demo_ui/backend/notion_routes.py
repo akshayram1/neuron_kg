@@ -22,15 +22,18 @@ from connectors.notion.oauth import (
     NotionConfigurationError, NotionOAuthClient, NotionOAuthError,
     NotionOAuthSettings, NotionStore, notion_state_db_path,
 )
-from graph import jira_pipeline as common_pipeline
-from graph import adoption
-from graph import multigraph
-from graph.embed_batch import close_batch, open_batch
-from graph import notion_pipeline as np
-from graph import vector_store as vector_store_module
-from graph.falkor_client import get_graph
-from graph.schema import bootstrap_schema
-from graph.semantic_pass import run_semantic_pass
+from graph.ingestion import finding_bridge
+from graph.ingestion import jira_pipeline as common_pipeline
+from graph.semantics import adoption
+from graph.storage import multigraph
+from graph.storage.embeddings import close_batch, open_batch
+from graph.ingestion import notion_pipeline as np
+from graph.ingestion.cross_source_context import build_cross_source_context_provider
+from graph.storage import vector_store as vector_store_module
+from graph.storage import writer as w
+from graph.storage.falkor_client import get_graph
+from graph.storage.schema import bootstrap_schema
+from graph.ingestion.semantic_pass import run_semantic_pass
 from util.paths import DATA_DIR
 from demo_ui.backend.job_worker import JOB_STORE
 
@@ -166,7 +169,7 @@ async def _run_sync(
         vector_store_module.ensure_collection(vector_store_module.client(), collection=target.qdrant_collection)
         ledger = ConnectorLedger(target.ledger_path)
                 # One local model forward per batch instead of per record -- see
-        # graph/embed_batch.py. Must be closed on every exit path below.
+        # graph/storage/embeddings.py. Must be closed on every exit path below.
         open_batch(OpenAI(timeout=30.0, max_retries=2),
                    os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
                    target.qdrant_collection)
@@ -198,6 +201,12 @@ async def _run_sync(
                 **current.token_usage.as_dict("ingestion"),
             })
 
+        # Candidate retrieval must see the vectors just queued by Pass A.
+        close_batch()
+        context_provider = build_cross_source_context_provider(
+            graph, collection=target.qdrant_collection,
+        )
+
         # See bitbucket_routes.py's identical wrap: this call blocks for
         # minutes and would otherwise freeze the whole server's event loop.
         semantic = await run_in_threadpool(
@@ -205,8 +214,16 @@ async def _run_sync(
             record_prefix=f"notion:{payload.workspace_id}:",
             on_progress=semantic_progress,
             collection=target.qdrant_collection,
+            context_provider=context_provider,
         )
         orphans_removed = common_pipeline.delete_orphaned_shared_entities(graph)
+        # The semantic pass stores should_flag=True judgements in the ledger
+        # only (record_ingestion_assessments has no Graph); copy them onto the
+        # graph as Finding nodes so the canvas and chat can see them.
+        findings_synced = finding_bridge.sync_ledger_findings(
+            graph, ledger, record_prefix=f"notion:{payload.workspace_id}:",
+            collection=target.qdrant_collection,
+        )
 
         # Sync coverage (plan.md Phase 0.4). `provider_reported_total` is left
         # None: Notion documents its `/search` endpoint as not exhaustive and
@@ -236,7 +253,8 @@ async def _run_sync(
             "missing_pages_retained": missing_retained,
             "chunks_ingested": semantic.chunks_processed,
             "entities_written": semantic.entities_written, "facts_written": semantic.facts_written,
-            "orphans_removed": orphans_removed,
+            "facts_rejected": semantic.facts_rejected,
+            "orphans_removed": orphans_removed, "findings_synced": findings_synced,
             "ontology_pending_shapes": pending["eligible_shapes"],
             "ontology_pending_facts": pending["eligible_facts"],
             "ontology_auto_extend": pending["auto_extend"],
@@ -299,6 +317,9 @@ async def delete_connection(workspace_id: str, request: Request) -> dict:
     for record_key in record_keys:
         common_pipeline.delete_record(graph, ledger, record_key)
     orphans_removed = common_pipeline.delete_orphaned_shared_entities(graph)
+    finding_keys = ledger.delete_findings_with_prefix(f"notion:{workspace_id}:")
+    for finding_key in finding_keys:
+        w.delete_node(graph, w.make_uid("Finding", finding_key))
     store.delete_connection(workspace_id)
     return {"deleted": True, "records_removed": len(record_keys),
-            "orphans_removed": orphans_removed}
+            "orphans_removed": orphans_removed, "findings_removed": len(finding_keys)}

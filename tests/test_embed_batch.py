@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import graph.embed_batch as eb
-from graph.embeddings import EmbeddingResult
+import graph.storage.embeddings as eb
+from graph.storage.embeddings import EmbeddingResult
 
 
 @dataclass
@@ -155,3 +155,28 @@ def test_close_batch_never_masks_the_error_that_broke_the_sync(monkeypatch, capl
 
     assert eb.close_batch() == 0           # swallowed, not raised
     assert eb.active_batch() is None       # and the slot is still cleared
+
+
+def test_a_full_batch_returns_before_encode_finishes(monkeypatch):
+    """Graph writes must not sit inside model.encode."""
+    import threading
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def embed(inputs, *, model_name=None):
+        started.set()
+        assert release.wait(timeout=2)
+        return EmbeddingResult([[float(i)] for i in range(len(inputs))], len(inputs), model_name)
+
+    written = _capture_upserts(monkeypatch)
+    monkeypatch.setattr(eb, "embed_texts", embed)
+    batch = eb.open_batch(FakeOpenAI(), "m", "coll", max_records=1)
+    started_at = time.perf_counter()
+    batch.add("a", "WorkItem", "content", "name")
+    assert time.perf_counter() - started_at < 0.5
+    assert started.wait(timeout=1)
+    release.set()
+    assert eb.close_batch() == 1
+    assert [row["uid"] for row in written] == ["a"]

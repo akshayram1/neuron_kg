@@ -1,5 +1,5 @@
 from connectors.core.ledger import PendingChunk
-from graph.semantic_pass import _call_llm, _candidate_identity_matches, evidence_in_chunk
+from graph.ingestion.semantic_pass import _call_llm, _candidate_identity_matches, evidence_in_chunk
 
 
 def test_verbatim_span_matches_after_whitespace_normalize():

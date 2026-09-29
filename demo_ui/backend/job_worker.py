@@ -8,13 +8,13 @@ import os
 from contextlib import suppress
 from uuid import uuid4
 
-from connectors.bitbucket.api import BitbucketRepository
+from connectors.bitbucket.api import BitbucketRateLimited, BitbucketRepository
 from connectors.core.ledger import ConnectorLedger
 from connectors.core.jobs import ConnectorJob, ConnectorJobStore
 from connectors.github_app.api import GitHubRepository
-from graph import multigraph, vector_store
-from graph.falkor_client import get_graph
-from graph.hygiene import run_hygiene_checks
+from graph.storage import multigraph, vector_store
+from graph.storage.falkor_client import get_graph
+from graph.resolution.hygiene import run_hygiene_checks
 from util.paths import DATA_DIR
 
 logger = logging.getLogger("uvicorn.error.connector_worker")
@@ -109,7 +109,12 @@ async def run_worker(stop: asyncio.Event) -> None:
             JOB_STORE.fail(job, worker_id, "Worker stopped; retry is queued")
             raise
         except Exception as exc:
-            state = JOB_STORE.fail(job, worker_id, str(exc))
+            retry_after = (
+                exc.retry_after_seconds if isinstance(exc, BitbucketRateLimited) else None
+            )
+            state = JOB_STORE.fail(
+                job, worker_id, str(exc), retry_after_seconds=retry_after,
+            )
             logger.exception("connector job=%s failed state=%s", job.job_id, state)
         else:
             graph_name = str(job.payload.get("request", {}).get("graph_name") or "default")
