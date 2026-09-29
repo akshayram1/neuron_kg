@@ -4,6 +4,44 @@ How a record becomes facts, how those facts change over time, how findings appea
 
 Orange in diagrams = LLM. Blue = Laya or vector similarity. Everything else is deterministic.
 
+## What Neuron kept from earlier work
+
+These pieces were tried in other projects first, then kept because they held up. The write-up is the [Research Report — September 2026](https://app.notion.com/p/3eac5c1d487681be8010ff692adfa682).
+
+**Graphiti prototype** (1–8 Sep) was the predecessor. Time-valid facts and the connectors worked. Graphiti as the store did not: definitions were overwritten with no history, many node types were wrong, vector search scanned the whole graph (about 98 s for one lookup), and each source lived in its own graph so the same person never merged.
+
+Kept from that prototype:
+
+- Canonical record, content hash, and KEEP / INSERT / UPDATE, so an unchanged record is skipped.
+- OAuth connectors and chunking.
+- Exact anchors (Jira keys, URLs, commit SHAs) plus a review when a cross-source link is uncertain.
+- Fact edges with world time (`valid_at` / `invalid_at`). A later fact can close an earlier one. A fact that arrives late can be stored already closed.
+- Keyword plus vector search, merged by rank, on real indexes.
+- One shared graph. Structure comes from API fields. The LLM sees only text the anchors could not already explain.
+
+**Utopia** was read as a design, not imported. On a 400-record set these changes moved MRR from 0.36 to 0.60 and recall@8 from 0.43 to 0.86. Full notes: `docs/utopia-to-neuron.md`.
+
+- Two embeddings per node, `name` and `content`, interleaved rather than score-merged, so a short empty file does not beat the real file.
+- Chunk diffing. An unchanged page is not sent to the LLM again. A one-paragraph edit re-extracts only that chunk. Old chunks stay, because facts cite them.
+- Every dropped extraction keeps a reason code.
+- A backwards relation is swapped when the ontology allows it. If neither direction is allowed, nothing vague is invented.
+- Ontology stored as data (functional, transitive, temporal). A human “no” is remembered, so the next sync does not recreate the same shape.
+- A few links derived with no LLM (for example parent chains). An asserted edge is never overwritten by a derived one.
+
+**PipesHub** — tree-sitter parser (Apache-2.0). Code chunks are comments and docstrings. A later write does not erase a value already stored.
+
+**Cognee** — the Notion reader and PDF loader shape, brought in through the prototype and then adapted. The PDF loader has no caller today.
+
+**Laya** — a local classifier, not an LLM, for four checks: is this chunk worth extracting, are these the same entity, does this fact update or contradict an existing one, and does this node help answer the question. Chat rerank stays off by default until its latency is acceptable.
+
+**Embedder comparison** — local BGE-M3. On the questions tried it matched OpenAI embeddings at top-5, with no embedding API cost. Fine-tuning the embedder did not beat the base model.
+
+**Brain / NeuralMemory** — one idea: if the first search is too thin, run a small second pass. The rest of that design was not taken.
+
+**Also used as references** (`docs/25-plan.md`): path support and thumbs-up link candidates (CoEvoKG), one-hop expansion that skips hub nodes (DICE), and Graphiti’s date rule for closing and backfilling facts.
+
+Airbyte, dlt, and a small local extraction model were tried and set aside, which kept the project on one graph and one ingestion path.
+
 ---
 
 ## 1. End to end

@@ -10,6 +10,50 @@ Short version: [`simple_readme.md`](simple_readme.md).
 - **Retrieval:** hybrid BM25 + dense vectors (local BGE-M3 on pgvector), an optional Laya reranker, and grounded LLM answers.
 - **UI:** a FastAPI backend and a React/Cytoscape frontend to connect sources, browse the graph, review uncertain decisions and chat.
 
+## What Neuron kept from earlier work
+
+September’s supporting experiments are written up in the [Research Report — September 2026](https://app.notion.com/p/3eac5c1d487681be8010ff692adfa682). Neuron is the system that remained after those trials. Each row below is something that is actually in this repo.
+
+**Graphiti prototype** ([graph_context_layer](https://github.com/akshayram1/graph_context_layer), 1–8 Sep) was the direct predecessor. It proved that time-valid facts and source connectors were the right shape, and it also showed why Graphiti itself should not be the store: node attributes such as a definition were overwritten with no history, about a third of node types were wrong, cosine search scanned the whole graph (about 98 s for one “who is” question), and each source lived in its own FalkorDB graph so the same person never merged across Jira and Notion.
+
+What carried over, often as the same files:
+
+- The connector contract: a canonical record, a secret-safe content hash, and KEEP / INSERT / UPDATE so an unchanged record is not processed again (`connectors/core/hashing.py`, `actions.py`).
+- OAuth connectors and the chunker (token counts, semantic prose chunks, code chunks).
+- Exact cross-source anchors (Jira keys, URLs, SHAs) and a review step when a link is not certain.
+- Fact edges with `valid_at` / `invalid_at`, plus Graphiti’s date rule: a later fact can close an earlier one, and a fact that arrives out of order can be written already closed.
+- Hybrid keyword + vector search merged by reciprocal rank fusion, this time on real indexes instead of a full scan.
+- The chat UI pieces (graph canvas, connector panels, review panel).
+
+The design change that came out of that prototype is one shared graph, with Pass A written from API fields and the LLM used only on text that anchors could not already explain.
+
+**Utopia** ([deeplethe/utopia](https://github.com/deeplethe/utopia)) was a design reference, not a dependency. The Rust code was not run. On Neuron’s 400-record `less_token` set the adopted patterns moved MRR from 0.36 to 0.60 and recall@8 from 0.43 to 0.86 (3 of 7 golden questions to 6 of 7). Detail is in `docs/utopia-to-neuron.md`.
+
+- **Two vectors per node.** A short query was losing to short, empty files. Each node now has a `name` vector and a `content` vector. The two lists are interleaved, not merged by score, because a short text systematically looks “closer.”
+- **Chunk diffing.** Chunk ids were already content-addressed. Re-syncing an unchanged Notion page went from 2 LLM calls to 0; a one-paragraph edit re-extracts only the new chunk. Removed chunks are soft-superseded, because facts still cite them.
+- **A reason for every drop.** Facts that fail a gate are stored with a code (`evidence_not_in_chunk`, `relation_not_allowed`, and so on) instead of disappearing in a log line.
+- **Direction correction.** If the model writes a relation backwards and the ontology allows the swap, the edge is written swapped and the correction is recorded. If neither direction is allowed, no vague `related_to` edge is invented.
+- **Ontology as data.** Relations carry flags (functional, transitive, symmetric, temporal). A rejected shape is counted, and a human “no” is a flag rather than a delete, so the next sync does not recreate it.
+- **Small derived links with no LLM.** For example, `PARENT_OF` through a Jira epic chain. Asserted edges are never overwritten by a derived one, and a derived edge keeps the provenance of its premises.
+
+**PipesHub** supplied the tree-sitter parser under Apache-2.0 (`connectors/core/chunking/code_parser/`). Code chunks are comments and docstrings, not the whole file. A related write-path fix stops a later update from erasing a value that was already stored.
+
+**Cognee** supplied the Notion reader and the PDF loader shape. They were decoupled from Cognee and brought in through the prototype. The live Notion path has since moved on; the PDF loader has no caller today.
+
+**Laya** is the local classifier Neuron calls instead of an LLM for four judgements: whether a chunk is worth extracting, whether two mentions are the same entity, whether a new fact duplicates / updates / contradicts an old one, and whether a retrieved node is needed to answer. Validation accuracy on its synthetic set went from 0.60 to 0.91. Chat rerank stays off by default until latency on the current pool is acceptable.
+
+**Embedder bake-off** chose local **BGE-M3** (1024 dimensions). On the questions tried it matched OpenAI embeddings at top-5 (about 94%) and was faster than the Qwen3 alternative, with no embedding API cost. Fine-tuning the embedder did not beat a correctly loaded base model, so the base model is what runs.
+
+**Brain / NeuralMemory** contributed one retrieval idea: if the first pass keeps too little evidence, do a small bounded second search. The rest of that memory design was not taken.
+
+**Later references** in `docs/25-plan.md`, used as ideas rather than libraries:
+
+- **CoEvoKG** — score how tightly the cited nodes are actually connected (path support), and turn a thumbs-up into a reviewable link rather than a silent write.
+- **DICE** — one-hop expansion that skips hub nodes (Repository, Project, Person), and a polarity check so a negated decision is not merged with its opposite.
+- **Graphiti, revisited** — the invalidation date rule and out-of-order backfill, without going back to Graphiti as a dependency.
+
+Airbyte, dlt, and a small local extraction model were tried and set aside. They saved the time that would have gone into a second ingestion framework or a model that could not emit valid facts.
+
 > **State of this document.** This README describes the code **as it is on disk on 2026-09-29, including the uncommitted working tree**. The last commit is `d021f41` (2026-09-28). On top of it, an uncommitted refactor moved the flat `graph/*.py` modules into `graph/{ingestion,resolution,retrieval,semantics,storage}/`. It also merged `triage.py` + `entity_resolution.py` + `fact_update_classifier.py` into `graph/ingestion/laya.py`, and re-enabled the LLM semantic pass for Jira and Bitbucket syncs. Many older docs in `docs/` still use the old flat paths (see [§17](#17-docs-index-and-which-ones-are-stale)).
 
 ## Glossary
@@ -44,6 +88,7 @@ Short definitions for project-specific words. Code-level detail lives in [§4 Co
 
 ## Contents
 
+- [What Neuron kept from earlier work](#what-neuron-kept-from-earlier-work)
 0. [Glossary](#glossary)
 1. [Architecture at a glance](#1-architecture-at-a-glance)
 2. [Quick start](#2-quick-start)
